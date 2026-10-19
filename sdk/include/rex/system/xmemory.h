@@ -60,6 +60,46 @@ inline T GuestPtr(u8* base, u32 guest_address) noexcept {
 
 class Memory;
 
+// banjo-nx (2026-10-19, CPU proposal 1): the store cards (tools/store_cards.py). A byte per 4 KB guest page at the guest
+// address of its page number (the first MB of the guest window, which Memory::Initialize keeps for them): every guest
+// store outside the stack zeroes its page's card, and so do the host writers of guest memory (MarkStoreCards: the CRT
+// memory hooks, PhysicalHeap::TriggerCallbacks for file reads, decommits and releases). Renut sets the cards of the pages
+// it checks to 1 and proves its cached vertex and index copies by them (banjo_renut_store_cards). The guest window's
+// base: nullptr before Memory::Initialize. Data of the runtime: code outside it (the app; on Windows the runtime is a
+// DLL) passes the guest window's base (Memory::virtual_membase) to MarkStoreCardsAt instead.
+extern u8* g_store_cards;
+
+inline void MarkStoreCardsAt(u8* cards, u32 guest_address, u32 length) noexcept {
+  if (!cards || !length) return;
+  const uint64_t end = uint64_t(guest_address) + length - 1;
+  const u32 last = end > 0xFFFFFFFFull ? 0xFFFFFu : u32(end >> 12);
+  for (u32 page = guest_address >> 12; page <= last; ++page) cards[page] = 0;
+}
+
+#if !REX_PLATFORM_SWITCH
+// PC diagnostics (banjo_renut_store_cards_verify): bytes the host writers marked, [0] in the physical views
+// (0x7F000000 up), [1] elsewhere; [2] calls. Read and reset by RexStoreCardsHostBytes.
+void NoteHostStoreCards(u32 guest_address, u32 length) noexcept;
+#endif
+
+inline void MarkStoreCards(u32 guest_address, u32 length) noexcept {
+#if !REX_PLATFORM_SWITCH
+  NoteHostStoreCards(guest_address, length);
+#endif
+  MarkStoreCardsAt(g_store_cards, guest_address, length);
+}
+
+// The same for a host pointer into the guest window (a hook's argument); anything outside it is left alone.
+inline void MarkStoreCardsHost(const void* host, size_t length) noexcept {
+  u8* cards = g_store_cards;
+  if (!cards || !length) return;
+  const uint64_t offset = uint64_t(reinterpret_cast<const u8*>(host) - cards);
+  if (offset >= 0x100000000ull) return;
+  u32 guest = u32(offset);
+  if (detail::PhysicalHostOffset(guest) && guest >= 0xE0001000u) guest -= 0x1000u;
+  MarkStoreCards(guest, length > 0xFFFFFFFFull ? 0xFFFFFFFFu : u32(length));  // (counted on the PC)
+}
+
 enum SystemHeapFlag : uint32_t {
   kSystemHeapVirtual = 1 << 0,
   kSystemHeapPhysical = 1 << 1,

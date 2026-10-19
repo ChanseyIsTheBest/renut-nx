@@ -331,6 +331,53 @@ banjo_renut_resolve_skip = true
 # the destinations read that way (on the emulator route 1 of the 5 a frame; the shadow maps never): about 14 MB a frame
 # less to write. configs/banjo_renut_words_always.toml writes them every time (as before).
 banjo_renut_depth_words_lazy = true
+# Package 35 (GPU, no shader changes): barriers recorded in a row are one (a drain instead of several), a transition into
+# a layout that is only written keeps the texture cache, and one read layout to another needs none.
+# configs/banjo_deko3d_barriers_before.toml turns both off. The deko3d line every 10 s counts the barriers.
+banjo_deko3d_barrier_merge = true
+banjo_deko3d_barrier_lean = true
+# Package 35: a depth resolve of a whole target, without its words, is left in the target's image: the textures sample it
+# there, and at the target's next whole clear the texture takes that image (the target another). The shadow maps are no
+# longer copied each frame (the "depth hand-over" line every 10 s). configs/banjo_deko3d_depth_handover_off.toml draws
+# every depth resolve as before.
+banjo_deko3d_depth_handover = true
+# Package 35: D24S8 depth targets (the shadow maps, small render-to-texture targets) as 24-bit unorm depth with stencil,
+# the Xbox 360's own format, instead of 32-bit float: half the bytes. Their depth is the 24-bit value the console keeps
+# (the float targets held more bits). The 20e4 float scene depth stays 32-bit float.
+# configs/banjo_deko3d_depth24_off.toml is the A/B.
+banjo_deko3d_depth24 = true
+# Package 35 (render thread): a draw's float constants and SharedConstants go to the GPU as updates of only the 64-byte
+# groups that changed (pipelined constant-buffer updates), not as a new 5.7 KB upload per draw.
+# configs/banjo_deko3d_push_constants_off.toml is the A/B.
+banjo_deko3d_push_constants = true
+# Package 35 (render thread, proposal 23): the upload ring's cache clean done by a thread on the background core.
+banjo_deko3d_ring_cleaner = true
+# Package 35 (input latency): the GPU gets each frame's work in pieces at the game's kicks, not all at the present, so
+# it starts sooner; and when the render thread is the slower one, the game reads the controller later in the frame
+# (by the time its frame would otherwise wait), so the picture shows newer input. The [latency] line every 10 s gives
+# input -> swap -> present. configs/banjo_deko3d_kick_submit_off.toml and banjo_late_input_off.toml are the A/Bs.
+banjo_deko3d_kick_submit = true
+banjo_late_input = true
+# Package 35b (latency batch 3): the frame limiter (frame_cap) follows the display's refresh: each frame is released at
+# a refresh plus a phase, found by measurement as late as the images still reach the display at the refresh they did
+# before (the limiter's own 33.3 ms timer slid against the display: up to a refresh more of waiting, and uneven frames).
+# The [display] line every 10 s gives present -> display and input -> display. OFF in package 35b: in the emulator
+# every run with it on stalled or hung (not yet explained); configs/banjo_display_sync_on.toml tries it on the console.
+# banjo_display_phase_auto = false with banjo_display_phase_us sets the phase by hand.
+banjo_display_sync = false
+banjo_display_phase_auto = true
+banjo_display_phase_max_us = 12000
+# Package 34 (CPU, 2026-10-19): the render thread's cached vertex and index copies proven by the store cards (every guest
+# store outside the stack marks its 4 KB page; Renut hashes a copy only when one of its pages was written since it was
+# last proven) instead of hashed whole after every kick (gameplay: 16 MB a frame, a quarter of the render thread). The
+# "store cards" line every 10 s counts them. configs/banjo_renut_store_cards_off.toml hashes as before (the marks stay).
+banjo_renut_store_cards = true
+# Package 34 (CPU): the render thread's per-draw lookups memoised (render targets, texture bindings, the recording
+# threads' buffer lookups), each keyed by everything it reads. configs/banjo_renut_cpu_memos_off.toml is the A/B.
+banjo_renut_cpu_memos = true
+# Package 34 (CPU): the pipeline lookup memoised before it hashes the draw's state.
+# configs/banjo_renut_pipeline_memo_off.toml is the A/B.
+banjo_renut_pipeline_memo = true
 # Diagnostics for Renut's renderer: its GPU time by pass every 10 s ("GPU profile" lines; the console's timer ticks
 # are corrected since package 28), and one frame every 30 s of its resolves, clears and target changes ("[trace]").
 # The "[renut]" lines every 10 s (frame rate, render thread, GPU, draw kinds, depth words, check worker) are always on;

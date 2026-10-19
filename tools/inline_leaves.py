@@ -18,7 +18,11 @@ originals.
 Run last of the post-codegen steps (the copies are the final text); --restore first (the other steps' analyses read
 calls by name and must not see the copies). Idempotent.
 
-usage: inline_leaves.py --gen <app/generated> [--restore] [--max N]
+banjo-nx (2026-10-19, CPU proposal 7): --hot <app/config/hot_edges.txt> adds the console profile's hottest calls to
+larger leaves in other files (caller callee per line): the callee (a leaf of up to --hot-max guest instructions, 128)
+is copied into the caller's file only, and the calls in that file go to the copy.
+
+usage: inline_leaves.py --gen <app/generated> [--restore] [--max N] [--hot FILE] [--hot-max N]
 """
 import glob
 import os
@@ -52,8 +56,8 @@ def restore_text(text):
     return INL_RE.sub(lambda m: f'__imp__{m.group(1)}(ctx, base);', text)
 
 
-def parse_functions(files, max_ins):
-    """name -> (file, body lines) of the copyable tiny leaves."""
+def parse_functions(files, max_ins, hot=None, hot_max=0):
+    """name -> (file, body lines) of the copyable tiny leaves (and of the hot callees up to hot_max instructions)."""
     leaves = {}
     for path in files:
         lines = open(path, encoding='utf-8').read().split('\n')
@@ -71,7 +75,7 @@ def parse_functions(files, max_ins):
             i = j + 1
             text = '\n'.join(body)
             instructions = sum(1 for l in body if l.startswith('\t// ') and not l.startswith('\t// REX'))
-            if instructions > max_ins:
+            if instructions > (hot_max if hot and name in hot else max_ins):
                 continue
             calls = [c for c in CALL_ANY_RE.findall(text)]
             if calls:
@@ -86,6 +90,13 @@ def main():
     args = sys.argv[1:]
     gen = args[args.index('--gen') + 1]
     max_ins = int(args[args.index('--max') + 1]) if '--max' in args else 12
+    hot_max = int(args[args.index('--hot-max') + 1]) if '--hot-max' in args else 128
+    hot = {}  # callee -> the callers whose files get a copy
+    if '--hot' in args:
+        for line in open(args[args.index('--hot') + 1], encoding='utf-8'):
+            parts = line.split('#', 1)[0].split()
+            if len(parts) == 2:
+                hot.setdefault(parts[1], set()).add(parts[0])
     files = sorted(glob.glob(os.path.join(gen, '*_recomp.*.cpp')))
     # Restore every file first (the copies and the calls), then, unless --restore, add them again.
     for path in files:
@@ -100,7 +111,16 @@ def main():
         p = open(pch, encoding='utf-8').read()
         if 'REX_INL(' not in p:
             open(pch, 'w', encoding='utf-8', newline='\n').write(p + PCH_MACRO)
-    leaves = parse_functions(files, max_ins)
+    leaves = parse_functions(files, max_ins, hot, hot_max)
+    # The files that define each hot edge's caller: only they get a copy of a callee above --max.
+    hot_files = {}
+    if hot:
+        callers = {c for cs in hot.values() for c in cs}
+        for path in files:
+            for line in open(path, encoding='utf-8'):
+                m = FUNC_RE.match(line.rstrip('\n'))
+                if m and m.group(1) in callers:
+                    hot_files.setdefault(m.group(1), path)
     total_calls = total_copies = 0
     for path in files:
         text = open(path, encoding='utf-8').read()
@@ -111,6 +131,11 @@ def main():
             leaf = leaves.get(name)
             if leaf is None or leaf[0] == path:
                 return m.group(0)
+            if name in hot and not any(hot_files.get(c) == path for c in hot[name]):
+                # a hot callee above --max: only in its callers' files
+                body = leaf[1]
+                if sum(1 for l in body if l.startswith('\t// ') and not l.startswith('\t// REX')) > max_ins:
+                    return m.group(0)
             if name not in used:
                 used.append(name)
             return f'REX_INL({name})(ctx, base);'
@@ -132,7 +157,8 @@ def main():
         open(path, 'w', encoding='utf-8', newline='\n').write('\n'.join(lines))
         total_calls += len(DIRECT_RE.findall(text)) - len(DIRECT_RE.findall(new))
         total_copies += len(used)
-    print(f'inline_leaves: {len(leaves)} tiny leaf functions (<= {max_ins} guest instructions, no calls); '
+    print(f'inline_leaves: {len(leaves)} tiny leaf functions (<= {max_ins} guest instructions, no calls; '
+          f'{sum(1 for h in hot if h in leaves)} of the {len(hot)} hot callees up to {hot_max}); '
           f'{total_calls} calls in other files go to {total_copies} inline copies')
 
 

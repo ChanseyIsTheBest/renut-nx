@@ -1,4 +1,7 @@
 // banjo-nx (2026-10-17): see banjo_renut_tuning.h.
+#include "renut_engine/gpu/backend/render_thread.h"
+#include <rex/frame_latency.h>
+#include "renut_engine/display_sync.h"
 #include "renut_engine/gpu/banjo_renut_tuning.h"
 #include "renut_engine/gpu/banjo_renut_record.h"
 #if defined(PLUME_DEKO3D)
@@ -150,6 +153,61 @@ REXCVAR_DEFINE_BOOL(banjo_renut_depth_words_lazy, true, "Banjo/Enhancements",
                     "the emulator route: the depth of field's, 1 of 5 resolves a frame; the shadow maps' never), and "
                     "in the first 300 resolves of each. A read of words not written is served by writing them then "
                     "from the unchanged source; the 10 s depth resolve line counts both. Same pixels");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_depth_handover, true, "Banjo/Enhancements",
+                    "deko3d renderer (2026-10-19, GPU): a depth resolve of a whole depth target into a texture of its "
+                    "size that needs no words is not drawn: the texture is sampled from the target's image until the "
+                    "target is bound again (then the resolve is drawn after all), and at the target's next whole clear "
+                    "the texture takes that image and the target another. The shadow maps, resolved and cleared once a "
+                    "frame, are never copied. The float a resolve writes is the depth it loads: same pixels");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_depth24, true, "Banjo/Enhancements",
+                    "deko3d renderer (2026-10-19, GPU): a D24S8 depth target (the shadow maps, small render-to-texture "
+                    "targets) as 24-bit unorm depth with stencil, the Xenos's own format, instead of 32-bit float: half "
+                    "the bytes written by its draws and read by its resolves and samples. Its depth is then the 24-bit "
+                    "value the Xbox 360 keeps (the float target held more bits than the console). The 20e4 float depth "
+                    "(D24FS8) stays 32-bit float");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_push_constants, true, "Banjo/Enhancements",
+                    "deko3d renderer (2026-10-19, render-thread proposals 2 and 5): a draw's float constants and "
+                    "SharedConstants go into three fixed uniform buffers as pipelined updates (dkCmdBufPushConstants) "
+                    "of the 64-byte groups that differ from what the GPU holds, instead of a new ring allocation of "
+                    "the whole set per draw (4,352 and 1,344 bytes), cleaned at the submit and bound again. Same values "
+                    "for every register a shader reads");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_push_constants_verify, false, "Banjo/Diagnostics",
+                    "banjo_deko3d_push_constants: after every draw's updates, checks that the model of the uniform "
+                    "buffers holds the guest's value of every register the shaders read (and their literals), and "
+                    "logs a draw where it does not (a test: slower)");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_kick_submit, true, "Banjo/Enhancements",
+                    "deko3d renderer (2026-10-19, input latency): at the game's kicks (several a frame) the command "
+                    "list recorded so far is ended and handed to the GPU at the next kick, instead of the whole frame "
+                    "at the present: the GPU starts a frame's work while the render thread still records the rest, so "
+                    "the frame (and the controller input in it) reaches the screen sooner. At most 3 more lists a "
+                    "frame, each of at least 200 draws. Same commands in the same order");
+REXCVAR_DEFINE_BOOL(banjo_late_input, true, "Banjo/Enhancements",
+                    "Input latency (2026-10-19): when the render thread is the slower one, the game's frame waits at "
+                    "its Swap for the frame before; its controller read is delayed by the least such wait of the last "
+                    "16 frames, less 2 ms, so the frame starts later with newer input and still reaches the render "
+                    "thread in time (backend/render_thread.cpp). No wait (the game thread or the frame cap the limit): "
+                    "no delay. The [latency] line every 10 s gives input -> swap -> present");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_ring_cleaner, true, "Banjo/Enhancements",
+                    "deko3d renderer (2026-10-19, render-thread proposal 23): the upload ring's cache clean (what the "
+                    "CPU wrote, written out for the GPU before each submit) done at each kick by a thread on the "
+                    "background core instead of by the render thread at the submit; a range the thread has not "
+                    "started when the submit needs it is cleaned by the render thread. Same memory for the GPU");
+REXCVAR_DEFINE_BOOL(banjo_renut_store_cards, true, "Banjo/Enhancements",
+                    "Renut's renderer (2026-10-19): cached vertex and index copies proven by the store cards (every "
+                    "guest store outside the stack marks its 4 KB page, tools/store_cards.py) instead of hashing them "
+                    "at their first use after every kick; a page written since is hashed as before. Only with "
+                    "banjo_renut_exact_streams, and only when the generated code marks the cards. The same pixels");
+REXCVAR_DEFINE_BOOL(banjo_renut_store_cards_verify, false, "Banjo/Diagnostics",
+                    "PC test of banjo_renut_store_cards: every copy the cards prove is hashed as well, and a copy whose "
+                    "bytes changed under clean cards is logged (a writer of guest memory that marks none) and hashed");
+REXCVAR_DEFINE_BOOL(banjo_renut_cpu_memos, true, "Banjo/Enhancements",
+                    "Renut's renderer (2026-10-19): the render thread's per-draw lookups memoised (render targets, "
+                    "texture bindings, vertex streams, memexport checks), each keyed by everything its lookup reads and "
+                    "an epoch bumped by every change of what it reads. The same results");
+REXCVAR_DEFINE_BOOL(banjo_renut_pipeline_memo, true, "Banjo/Enhancements",
+                    "Renut's renderer (2026-10-19): a 64-entry memo of the pipeline each key gave (built, or the generic "
+                    "one a specialisation draws with while pending or after failing), before the key's XXH3 and the "
+                    "map. The same pipelines");
 REXCVAR_DEFINE_BOOL(banjo_renut_resolve_skip, true, "Banjo/Enhancements",
                     "Renut's renderer (2026-10-19): a resolve the same as the last one into its texture (same source, "
                     "rectangle and place) whose source nothing has written since (no draw that can write it, no clear) "
@@ -159,6 +217,15 @@ REXCVAR_DEFINE_INT32(banjo_deko3d_compile_priority, 0x3E, "Banjo/Enhancements",
                      "deko3d renderer (2026-10-18): the uam shader compile thread's priority (Horizon: higher is lower; "
                      "the game's threads are 0x3B, the render thread 0x2C), on banjo_background_compile_core; a thread "
                      "waiting for a compile lends its priority. 0: as created (any core)");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_barrier_merge, true, "Banjo/Enhancements",
+                    "deko3d renderer (2026-10-19, GPU): barriers recorded one after another with no GPU work between "
+                    "them are emitted as one (the strongest wait, every invalidation) right before the next command "
+                    "that does work: one pipeline drain instead of several. Same pixels");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_barrier_lean, true, "Banjo/Enhancements",
+                    "deko3d renderer (2026-10-19, GPU): a transition into a layout that is only written next keeps "
+                    "the texture cache (only a read after a write needs it invalidated, and that read's transition "
+                    "does it), and a texture going from one read layout to another needs no barrier at all. Same "
+                    "pixels");
 REXCVAR_DEFINE_BOOL(banjo_deko3d_zcull, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-18): hierarchical depth culling (Zcull) on the queue: tiles a draw cannot "
                     "pass the depth test in are skipped before shading. Same pixels");
@@ -331,11 +398,13 @@ REXCVAR_DEFINE_INT32(banjo_renut_stream_cache_idle_s, 20, "Banjo",
                      "banjo_renut_memory_policy: a cached copy no draw read for this many seconds (at 30 frames a "
                      "second) goes (Renut: 120 s)")
     .range(2, 120);
-REXCVAR_DEFINE_INT32(banjo_renut_upload_trim_frames, 120, "Banjo",
+REXCVAR_DEFINE_INT32(banjo_renut_upload_trim_frames, 900, "Banjo",
                      "banjo_renut_memory_policy: upload ring chunks beyond what the frames since the last trim used "
                      "(a loading frame's texture uploads grow the ring by 32 MB chunks) are released after this many "
-                     "frames (Renut: 600)")
-    .range(8, 600);
+                     "frames (Renut: 600). banjo-nx (2026-10-19, render-thread proposal 18): 900 (was 120): a chunk "
+                     "released after 60 frames without a heavy frame was made again by the next one on the render "
+                     "thread, mid-draw (a 32 MB heap allocation and its GPU mapping)")
+    .range(8, 3600);
 REXCVAR_DEFINE_BOOL(banjo_renut_precise_barriers, true, "Banjo/Enhancements",
                     "Renut's renderer (Vulkan): plume's barriers take their access masks from the layouts and the "
                     "declared accesses instead of MEMORY_READ | MEMORY_WRITE on both sides, which NVK turns into "
@@ -351,11 +420,18 @@ std::atomic<uint64_t> g_exact_checks{0}, g_exact_bytes{0}, g_exact_stale{0}, g_l
 // same frame, the kicks that start the intervals, and the game's fence queries.
 std::atomic<uint64_t> g_exact_repeat{0}, g_exact_repeat_bytes{0}, g_kicks{0}, g_fence_queries{0};
 std::atomic<uint64_t> g_exact_memo{0}, g_exact_memo_bytes{0};
+// banjo-nx (2026-10-19): banjo_renut_store_cards' checks.
+std::atomic<uint64_t> g_cards_clean{0}, g_cards_clean_bytes{0}, g_cards_dirty{0}, g_cards_missed{0};
+std::atomic<uint64_t> g_tex_cards[4], g_tex_cards_bytes{0};  // proven, hashed, re-uploads saved, changed (verify)
 std::atomic<uint64_t> g_kind_depth_only{0}, g_kind_depth_plain{0}, g_kind_nothing{0}, g_kind_partial{0};
 std::atomic<uint64_t> g_depth_only_draws{0};  // banjo_gpu_depth_only (package 28)
 std::atomic<uint64_t> g_resolves_drawn{0};  // banjo_deko3d_draw_resolves (2026-10-18)
 std::atomic<uint64_t> g_resolves_skipped[2];  // banjo_renut_resolve_skip (2026-10-19): colour, depth
 std::atomic<uint64_t> g_words_lazy[3];  // banjo_renut_depth_words_lazy: not written, written late, read stale
+std::atomic<uint64_t> g_handover[6];    // banjo_deko3d_depth_handover (CountHandOver)
+std::atomic<uint64_t> g_ring_published{0};  // render-thread proposal 23
+std::atomic<uint64_t> g_kick_submit[4];      // lists submitted at a kick, ranges cleaned by the thread / by the render thread
+std::atomic<uint64_t> g_pushed[4];      // banjo_deko3d_push_constants: float bytes, shared bytes, draws, verify misses
 std::atomic<uint64_t> g_depth_float_sampled{0};  // 2026-10-18 census
 std::atomic<uint64_t> g_words_viewed{0}, g_words_copied{0};  // banjo_gpu_depth_words_view (package 28)
 // banjo_gpu_bool_spec's: draws with specialised bools, of them drawn with the generic pipeline, specialised built.
@@ -375,6 +451,9 @@ void NotePipelineBuilt() {
   g_pipelines_built.fetch_add(1, std::memory_order_relaxed);
   g_last_build_ms.store(SteadyMs(), std::memory_order_relaxed);
 }
+
+// The A/B word (banjo_renut_ab); the header reads it inline.
+std::atomic<int> g_ab_off{0};
 
 namespace {
 
@@ -462,7 +541,6 @@ const char *AbName(int target) {
 }
 
 // The A/B target whose part is in its "off" half now (0: none). The per-draw keys (3-5) read it on every use.
-std::atomic<int> g_ab_off{0};
 
 bool g_precise_barriers_on = false;  // banjo_renut_precise_barriers as configured (BeforeDeviceCreated)
 
@@ -539,6 +617,26 @@ void StatsGameFrame() {
               kicks, fence_queries, exact_stale, late_stale, evicted,
               bool_draws,
               bool_generic, bool_built, tess_vertices, tess_corners);
+  if (g_latched_ready.load(std::memory_order_acquire) && g_latched.store_cards) {
+    const uint64_t clean = g_cards_clean.exchange(0, std::memory_order_relaxed);
+    const uint64_t clean_bytes = g_cards_clean_bytes.exchange(0, std::memory_order_relaxed);
+    const uint64_t dirty = g_cards_dirty.exchange(0, std::memory_order_relaxed);
+    const uint64_t missed = g_cards_missed.exchange(0, std::memory_order_relaxed);
+    REXLOG_INFO("[renut] store cards: {} copies proven by their cards ({:.1f} MB not hashed), {} with a page written "
+                "(hashed){} (banjo_renut_store_cards); textures: {} checks proven, {} hashed, {} dynamic re-uploads "
+                "not made ({:.1f} MB not read){}",
+                clean, double(clean_bytes) / double(1u << 20), dirty,
+                g_latched.store_cards_verify ? fmt::format("; verify: {} changed under clean cards", missed)
+                                             : std::string(),
+                g_tex_cards[0].exchange(0, std::memory_order_relaxed),
+                g_tex_cards[1].exchange(0, std::memory_order_relaxed),
+                g_tex_cards[2].exchange(0, std::memory_order_relaxed),
+                double(g_tex_cards_bytes.exchange(0, std::memory_order_relaxed)) / double(1u << 20),
+                g_latched.store_cards_verify
+                    ? fmt::format("; verify: {} textures changed under clean cards",
+                                  g_tex_cards[3].exchange(0, std::memory_order_relaxed))
+                    : std::string());
+  }
   if (target) {
     const Stats::Half &on = g_stats.halves[1], &off = g_stats.halves[0];
     auto line = [](const Stats::Half &h) {
@@ -576,6 +674,38 @@ void StatsGameFrame() {
               g_words_lazy[0].exchange(0, std::memory_order_relaxed),
               g_words_lazy[1].exchange(0, std::memory_order_relaxed),
               g_words_lazy[2].exchange(0, std::memory_order_relaxed));
+  if (PushConstantsOn()) {
+    REXLOG_INFO("[renut] pushed constants (banjo_deko3d_push_constants): {} draws, {:.1f} KB of float constants and "
+                "{:.1f} KB of shared constants pushed{}",
+                g_pushed[2].exchange(0, std::memory_order_relaxed),
+                double(g_pushed[0].exchange(0, std::memory_order_relaxed)) / 1024.0,
+                double(g_pushed[1].exchange(0, std::memory_order_relaxed)) / 1024.0,
+                PushConstantsVerifyOn() ? fmt::format("; verify: {} draws with a register the model got wrong",
+                                                      g_pushed[3].exchange(0, std::memory_order_relaxed))
+                                        : std::string());
+  }
+  {
+    // banjo-nx (2026-10-19, input latency): the probe and the late input delay.
+    const std::string probe = rex::latency::Report();
+    REXLOG_INFO("[latency] {}; {}", probe.empty() ? std::string("no frame presented") : probe,
+                ::renut::gpu::render_thread::LateInputReport());
+    // banjo-nx (2026-10-19, latency batch 3): the display's refresh, the phase and input -> display.
+    if (const std::string display = banjo::display_sync::Report(); !display.empty())
+      REXLOG_INFO("[display] {}", display);
+  }
+  REXLOG_INFO("[renut] upload ring: {:.1f} MB cleaned (render-thread proposal 23); ranges cleaned by the cleaner "
+              "thread {}, by the render thread {}; command lists submitted at a kick {} (banjo_deko3d_kick_submit)",
+              double(g_ring_published.exchange(0, std::memory_order_relaxed)) / double(1u << 20),
+              g_kick_submit[1].exchange(0, std::memory_order_relaxed),
+              g_kick_submit[2].exchange(0, std::memory_order_relaxed),
+              g_kick_submit[0].exchange(0, std::memory_order_relaxed));
+  if (DepthHandOverOn()) {
+    REXLOG_INFO("[renut] depth hand-over (banjo_deko3d_depth_handover): {} resolves not drawn, {} binds of a target's "
+                "image, {} images taken at a whole clear; {} drawn after all ({} from a taken image); {} lost",
+                g_handover[0].exchange(0, std::memory_order_relaxed), g_handover[1].exchange(0, std::memory_order_relaxed),
+                g_handover[2].exchange(0, std::memory_order_relaxed), g_handover[3].exchange(0, std::memory_order_relaxed),
+                g_handover[4].exchange(0, std::memory_order_relaxed), g_handover[5].exchange(0, std::memory_order_relaxed));
+  }
   // The generated code's self-checks (their "[verify]" line and any DIFFERENCE): banjo-nx's renderer reports them
   // in its own 10 s report; with Renut's renderer nobody did (package 27).
   banjo::CodegenChecksReport(static_cast<int>(since + 0.5));
@@ -612,44 +742,30 @@ void StatsGpuFrame(double ms) {
 
 bool g_pmull_hash = false;
 
-bool BoolSpecOn() {
-  static const bool on = ::renut::gpu::UsesVulkanBindings() &&
-                         EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_bool_spec));
-  return on && g_ab_off.load(std::memory_order_relaxed) != 7;
-}
 
-bool TessGridOn() {
-  static const bool on = EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_tess_grid));
-  return on && g_ab_off.load(std::memory_order_relaxed) != 9;
+
+// banjo-nx (2026-10-19, CPU proposal 5): a counter only the render thread adds to: a load and a store, not an exclusive
+// read-modify-write loop (the A57 has no LSE atomics). The 10 s report's exchange may rarely lose one count.
+inline void Bump(std::atomic<uint64_t> &c, uint64_t v) {
+  c.store(c.load(std::memory_order_relaxed) + v, std::memory_order_relaxed);
 }
 
 void CountTessGrid(uint64_t corners, uint64_t vertices) {
-  g_tess_corners.fetch_add(corners, std::memory_order_relaxed);
-  g_tess_vertices.fetch_add(vertices, std::memory_order_relaxed);
+  Bump(g_tess_corners, corners);
+  Bump(g_tess_vertices, vertices);
 }
 
-bool DepthOnlyOn() {
-  static const bool on = EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_depth_only));
-  return on && g_ab_off.load(std::memory_order_relaxed) != 11;
-}
 
-bool OutputTrimOn() {
-  static const bool on = ::renut::gpu::UsesVulkanBindings() &&
-                         EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_output_trim));
-  return on && g_ab_off.load(std::memory_order_relaxed) != 12;
-}
 
 bool RecordWorkerAbOn() {
   return g_ab_off.load(std::memory_order_relaxed) != 14;
 }
 
-bool DepthWordsViewOn() {
-  static const bool on = EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_depth_words_view));
-  return on && g_ab_off.load(std::memory_order_relaxed) != 13;
-}
 
 bool Deko3DDepthCompressionOn() { return REXCVAR_GET(banjo_deko3d_depth_compression); }
 bool Deko3DZcullOn() { return REXCVAR_GET(banjo_deko3d_zcull); }
+bool Deko3DBarrierMergeOn() { return REXCVAR_GET(banjo_deko3d_barrier_merge); }
+bool Deko3DBarrierLeanOn() { return REXCVAR_GET(banjo_deko3d_barrier_lean); }
 bool Deko3DVsOutputsOn() { return REXCVAR_GET(banjo_deko3d_vs_outputs); }
 bool Deko3DUamPrmtOn() { return REXCVAR_GET(banjo_deko3d_uam_prmt); }
 bool EarlyHoistOn() { return REXCVAR_GET(banjo_deko3d_early_hoist); }
@@ -668,36 +784,32 @@ unsigned Deko3DUamFlags() {
 }
 int Deko3DCompileCore() { return REXCVAR_GET(banjo_background_compile_core); }
 int Deko3DCompilePriority() { return REXCVAR_GET(banjo_deko3d_compile_priority); }
-bool TessSpecOn() {
-  static const bool on = REXCVAR_GET(banjo_deko3d_tess_spec);
-  return on;
-}
-bool AlphaSpecOn() {
-  static const bool on = REXCVAR_GET(banjo_deko3d_alpha_spec);
-  return on;
-}
 
-bool DrawResolvesOn() {
-  static const bool on = REXCVAR_GET(banjo_deko3d_draw_resolves);
-  return on;
-}
 
 void CountDepthFloatSampled() {
-  g_depth_float_sampled.fetch_add(1, std::memory_order_relaxed);
+  Bump(g_depth_float_sampled, 1);
 }
 
 void CountDrawnResolve() {
   g_resolves_drawn.fetch_add(1, std::memory_order_relaxed);
 }
 
-bool ResolveSkipOn() {
-  static const bool on = REXCVAR_GET(banjo_renut_resolve_skip);
-  return on;
+
+
+void CountKickSubmit(int what) {
+  g_kick_submit[what].store(g_kick_submit[what].load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
 }
 
-bool DepthWordsLazyOn() {
-  static const bool on = REXCVAR_GET(banjo_renut_depth_words_lazy);
-  return on;
+void CountRingPublished(uint64_t bytes) {
+  g_ring_published.store(g_ring_published.load(std::memory_order_relaxed) + bytes, std::memory_order_relaxed);
+}
+
+void CountPushedConstants(uint64_t bytes, int what) {
+  g_pushed[what].store(g_pushed[what].load(std::memory_order_relaxed) + bytes, std::memory_order_relaxed);
+}
+
+void CountHandOver(int what) {
+  g_handover[what].store(g_handover[what].load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
 }
 
 void CountLazyWords(int what) {
@@ -712,80 +824,67 @@ void CountDepthWords(bool viewed) {
   (viewed ? g_words_viewed : g_words_copied).fetch_add(1, std::memory_order_relaxed);
 }
 
-bool DiagGpuShadersOn() {
-  static const bool on = REXCVAR_GET(banjo_renut_diag_gpu_shaders);
-  return on;
-}
 
-bool DiagTrimPoison() {
-  static const bool on = REXCVAR_GET(banjo_renut_diag_trim_poison);
-  return on;
-}
 
 void CountDepthOnly() {
   g_depth_only_draws.fetch_add(1, std::memory_order_relaxed);
 }
 
-bool HalfPixelOffsetOn() {
-  static const bool on = REXCVAR_GET(banjo_renut_half_pixel_offset);
-  return on;
-}
 
-bool PointMinMaxRadiusOn() {
-  static const bool on = REXCVAR_GET(banjo_renut_point_minmax_radius);
-  return on;
-}
 
-bool DepthWordsStencilOn() {
-  static const bool on = REXCVAR_GET(banjo_renut_depth_words_stencil);
-  return on;
-}
 
-bool AlphaToMaskTestOn() {
-  static const bool on = REXCVAR_GET(banjo_renut_alpha_to_mask_test);
-  return on;
-}
 
-bool BlendSkipOn() {
-  static const bool on = ::renut::gpu::UsesVulkanBindings() && REXCVAR_GET(banjo_renut_blend_skip) &&
-                         EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_blend_skip));
-  return on && g_ab_off.load(std::memory_order_relaxed) != 8;
-}
 
 void CountBoolSpec(BoolSpecEvent event) {
-  (event == BoolSpecEvent::kDraw ? g_bool_draws : event == BoolSpecEvent::kGeneric ? g_bool_generic : g_bool_built)
-      .fetch_add(1, std::memory_order_relaxed);
+  Bump(event == BoolSpecEvent::kDraw      ? g_bool_draws
+       : event == BoolSpecEvent::kGeneric ? g_bool_generic
+                                          : g_bool_built,
+       1);
 }
 
-bool ExactStreamsOn() {
-  return REXCVAR_GET(banjo_renut_exact_streams) && g_ab_off.load(std::memory_order_relaxed) != 6;
-}
 
 void CountExactCheck(uint64_t bytes, bool stale, bool repeat_in_frame) {
-  g_exact_checks.fetch_add(1, std::memory_order_relaxed);
-  g_exact_bytes.fetch_add(bytes, std::memory_order_relaxed);
+  Bump(g_exact_checks, 1);
+  Bump(g_exact_bytes, bytes);
   if (stale)
-    g_exact_stale.fetch_add(1, std::memory_order_relaxed);
+    Bump(g_exact_stale, 1);
   if (repeat_in_frame) {
-    g_exact_repeat.fetch_add(1, std::memory_order_relaxed);
-    g_exact_repeat_bytes.fetch_add(bytes, std::memory_order_relaxed);
+    Bump(g_exact_repeat, 1);
+    Bump(g_exact_repeat_bytes, bytes);
   }
 }
 
+void CountCards(uint64_t bytes, bool clean) {
+  if (clean) {
+    Bump(g_cards_clean, 1);
+    Bump(g_cards_clean_bytes, bytes);
+  } else {
+    Bump(g_cards_dirty, 1);
+  }
+}
+
+void CountCardsMissed(uint64_t) { Bump(g_cards_missed, 1); }
+
+void CountTextureCards(uint64_t bytes, int what) {
+  Bump(g_tex_cards[what], 1);
+  if (what == 0 || what == 2)
+    Bump(g_tex_cards_bytes, bytes);
+}
+
 void CountExactMemoHit(uint64_t bytes) {
-  g_exact_memo.fetch_add(1, std::memory_order_relaxed);
-  g_exact_memo_bytes.fetch_add(bytes, std::memory_order_relaxed);
+  Bump(g_exact_memo, 1);
+  Bump(g_exact_memo_bytes, bytes);
 }
 
 void CountDrawKind(bool depth_only, bool depth_only_plain, bool writes_nothing, bool partial_mask) {
   if (depth_only)
-    g_kind_depth_only.fetch_add(1, std::memory_order_relaxed);
+    Bump(g_kind_depth_only, 1);
   if (depth_only_plain)
-    g_kind_depth_plain.fetch_add(1, std::memory_order_relaxed);
+    Bump(g_kind_depth_plain, 1);
   if (writes_nothing)
-    g_kind_nothing.fetch_add(1, std::memory_order_relaxed);
+    Bump(g_kind_nothing, 1);
   if (partial_mask)
-    g_kind_partial.fetch_add(1, std::memory_order_relaxed);
+    Bump(g_kind_partial, 1);
 }
 
 void CountKick() {
@@ -985,12 +1084,9 @@ void ReportNvk() {
 #endif
 }
 
-bool KeepGpuWritten() {
-  return REXCVAR_GET(banjo_renut_keep_gpu_written);
-}
 
+std::atomic<bool> g_trace_frame{false};  // banjo-nx (2026-10-19): read inline by ResolveTraceOn
 namespace {
-std::atomic<bool> g_trace_frame{false};
 std::chrono::steady_clock::time_point g_trace_last{};
 }  // namespace
 
@@ -1011,17 +1107,11 @@ void ResolveTraceFrameStart() {
   }
 }
 
-bool ResolveTraceOn() {
-  return g_trace_frame.load(std::memory_order_relaxed);
-}
 
 int DiagBuildDelayMs() {
   return REXCVAR_GET(banjo_renut_diag_build_delay_ms);
 }
 
-bool PoisonSlotsOn() {
-  return REXCVAR_GET(banjo_renut_diag_poison_slots);
-}
 
 uint64_t PmullHash(const void *data, size_t size, uint64_t seed) {
 #if BANJO_PMULL_FINGERPRINT
@@ -1100,34 +1190,14 @@ std::filesystem::path NextToExecutable(const std::string &path) {
   return p.is_relative() ? rex::filesystem::GetExecutableFolder() / p : p;
 }
 
-bool SharedDedupeOn() {
-  static const bool on = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(banjo_renut_shared_dedupe));
-  return on && g_ab_off.load(std::memory_order_relaxed) != 3;
-}
 
 void CountSharedConstants(bool reused) {
-  (reused ? g_shared_reused : g_shared_uploaded).fetch_add(1, std::memory_order_relaxed);
+  Bump(reused ? g_shared_reused : g_shared_uploaded, 1);
 }
 
-bool QueueNotifyIdleOn() {
-  static const bool on = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(banjo_renut_queue_notify_idle));
-  return on;
-}
 
-bool NeonSwapOn() {
-  static const bool on = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(banjo_renut_neon_swap));
-  return on;
-}
 
-bool CapturePoolOn() {
-  static const bool on = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(banjo_renut_capture_pool));
-  return on && g_ab_off.load(std::memory_order_relaxed) != 5;
-}
 
-bool PushPointOnly() {
-  static const bool on = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(banjo_renut_push_point_only));
-  return on && g_ab_off.load(std::memory_order_relaxed) != 4;
-}
 
 bool UploadCached() {
 #if REX_PLATFORM_SWITCH
@@ -1240,6 +1310,52 @@ void BeforeDeviceDestroyed() {
   g_saver.cv.notify_all();
   g_saver.thread.join();
   SaveNow("exit");
+}
+
+// banjo-nx (2026-10-19, CPU proposal 5): the per-draw switches, latched once (the cvars are final by the first draw,
+// as the function-local statics they replace assumed); the A/B word stays a live relaxed load (a plain load on
+// ARM).
+Latched g_latched;
+std::atomic<bool> g_latched_ready{false};
+
+void LatchTuning() {
+  g_latched.bool_spec = ::renut::gpu::UsesVulkanBindings() && EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_bool_spec));
+  g_latched.tess_grid = EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_tess_grid));
+  g_latched.depth_only = EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_depth_only));
+  g_latched.output_trim = ::renut::gpu::UsesVulkanBindings() && EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_output_trim));
+  g_latched.depth_words_view = EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_depth_words_view));
+  g_latched.tess_spec = REXCVAR_GET(banjo_deko3d_tess_spec);
+  g_latched.alpha_spec = REXCVAR_GET(banjo_deko3d_alpha_spec);
+  g_latched.draw_resolves = REXCVAR_GET(banjo_deko3d_draw_resolves);
+  g_latched.resolve_skip = REXCVAR_GET(banjo_renut_resolve_skip);
+  g_latched.depth_words_lazy = REXCVAR_GET(banjo_renut_depth_words_lazy);
+  g_latched.depth_handover = REXCVAR_GET(banjo_deko3d_depth_handover);
+  g_latched.depth24 = REXCVAR_GET(banjo_deko3d_depth24);
+  g_latched.push_constants = REXCVAR_GET(banjo_deko3d_push_constants);
+  g_latched.kick_submit = REXCVAR_GET(banjo_deko3d_kick_submit);
+  g_latched.late_input = REXCVAR_GET(banjo_late_input);
+  g_latched.ring_cleaner = REXCVAR_GET(banjo_deko3d_ring_cleaner);
+  g_latched.push_constants_verify = REXCVAR_GET(banjo_deko3d_push_constants_verify);
+  g_latched.diag_gpu_shaders = REXCVAR_GET(banjo_renut_diag_gpu_shaders);
+  g_latched.diag_trim_poison = REXCVAR_GET(banjo_renut_diag_trim_poison);
+  g_latched.half_pixel_offset = REXCVAR_GET(banjo_renut_half_pixel_offset);
+  g_latched.point_minmax_radius = REXCVAR_GET(banjo_renut_point_minmax_radius);
+  g_latched.depth_words_stencil = REXCVAR_GET(banjo_renut_depth_words_stencil);
+  g_latched.alpha_to_mask_test = REXCVAR_GET(banjo_renut_alpha_to_mask_test);
+  g_latched.blend_skip = ::renut::gpu::UsesVulkanBindings() && REXCVAR_GET(banjo_renut_blend_skip) && EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_blend_skip));
+  g_latched.exact_streams = REXCVAR_GET(banjo_renut_exact_streams);
+  g_latched.keep_gpu_written = REXCVAR_GET(banjo_renut_keep_gpu_written);
+  g_latched.poison_slots = REXCVAR_GET(banjo_renut_diag_poison_slots);
+  g_latched.shared_dedupe = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(banjo_renut_shared_dedupe));
+  g_latched.queue_notify_idle = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(banjo_renut_queue_notify_idle));
+  g_latched.neon_swap = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(banjo_renut_neon_swap));
+  g_latched.capture_pool = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(banjo_renut_capture_pool));
+  g_latched.push_point_only = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(banjo_renut_push_point_only));
+  g_latched.pipeline_memo = REXCVAR_GET(banjo_renut_pipeline_memo);
+  g_latched.cpu_memos = REXCVAR_GET(banjo_renut_cpu_memos);
+  g_latched.store_cards = REXCVAR_GET(banjo_renut_store_cards) && g_banjo_store_cards;
+  g_latched.store_cards_verify = g_latched.store_cards && REXCVAR_GET(banjo_renut_store_cards_verify);
+  g_latched_ready.store(true, std::memory_order_release);
 }
 
 }  // namespace banjo::renut_gpu

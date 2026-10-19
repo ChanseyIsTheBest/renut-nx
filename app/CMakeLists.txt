@@ -249,6 +249,10 @@ option(BANJO_GEN_R1_LOCAL "Guest r1 as a local mirror in the chosen functions (t
 option(BANJO_GEN_VSEL_NEON "VMX vsel as one NEON bit select (tools/vsel_neon.py)" ON)
 option(BANJO_GEN_HOT_LAYOUT "The console profile's functions declared hot, gathered by the linker (tools/hot_layout.py)" ON)
 option(BANJO_GEN_INLINE_LEAVES "Inline copies of the tiny leaf functions each file calls in another (tools/inline_leaves.py)" ON)
+# 2026-10-19 (CPU proposal 1): every guest store outside the stack marks its page's store card (tools/store_cards.py);
+# Renut proves its cached vertex and index copies by them (banjo_renut_store_cards). OFF compiles the marks out (Renut
+# then hashes as before: app/src/cpu/banjo_hot_guest.cpp tells it).
+option(BANJO_GEN_STORE_CARDS "Guest stores outside the stack mark their page's store card (tools/store_cards.py)" ON)
 set(_banjo_round_definitions "")
 if(NOT BANJO_GEN_VPERM1)
     list(APPEND _banjo_round_definitions REX_VPERM1_OFF)
@@ -339,6 +343,9 @@ if(NOT BANJO_GEN_HOT_LAYOUT)
 endif()
 if(NOT BANJO_GEN_INLINE_LEAVES)
     list(APPEND _banjo_round_definitions REX_INLINE_LEAVES_OFF)
+endif()
+if(NOT BANJO_GEN_STORE_CARDS)
+    list(APPEND _banjo_round_definitions REX_STORE_CARDS_OFF)
 endif()
 if(NOT REXGLUE_PLATFORM_SWITCH)
     list(APPEND _banjo_round_definitions REX_R1_CHECK REX_LR_WRITE_SAME_CHECK)

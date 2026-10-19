@@ -218,6 +218,8 @@ void InstallShaderCache() {
   options.zcull = Deko3DZcullOn();
   options.vsOutputs = Deko3DVsOutputsOn();
   options.uamFlags = Deko3DUamFlags();
+  options.mergeBarriers = Deko3DBarrierMergeOn();  // banjo-nx (2026-10-19, GPU)
+  options.leanBarriers = Deko3DBarrierLeanOn();
   // The uam thread on the background compile core, below the game's threads (2026-10-18).
   options.compileCore = Deko3DCompileCore();
   options.compilePriority = Deko3DCompilePriority();
@@ -275,11 +277,16 @@ std::string Report() {
   const plume::Deko3DStats &st = plume::GetDeko3DStats();
   const uint64_t compiles = st.shaderCompiles;
   return fmt::format("deko3d: {} draws ({} through the address window), {} pipeline binds ({} state binds); uam {} compiles (avg {:.0f} ms, {} failed), "
-                     "DKSH cache {} hits, {} added; memory: images {} MB, buffers {} MB, code {} KB, commands {} KB",
+                     "DKSH cache {} hits, {} added; memory: images {} MB, buffers {} MB, code {} KB, commands {} KB; "
+                     "barriers: {} primitives, {} fragments, {} full ({} invalidating textures); copy and 2D engines: {} "
+                     "buffer copies, {} texture uploads, {} readbacks, {} image copies, {} resolves, {} blits",
                      st.draws.load(), st.windowDraws.load(), st.pipelineBinds.load(), st.stateBinds.load(), compiles,
                      compiles ? double(st.shaderCompileNs.load()) / 1e6 / double(compiles) : 0.0,
                      st.shaderCompileFailures.load(), g_cache.hits, g_cache.added, st.imageBytes.load() >> 20,
-                     st.bufferBytes.load() >> 20, st.codeBytes.load() >> 10, st.commandBytes.load() >> 10);
+                     st.bufferBytes.load() >> 20, st.codeBytes.load() >> 10, st.commandBytes.load() >> 10,
+                     st.barriersPrimitives.load(), st.barriersFragments.load(), st.barriersFull.load(),
+                     st.barriersImageInvalidate.load(), st.copyBuffer.load(), st.copyUpload.load(), st.copyReadback.load(),
+                     st.copyImage.load(), st.copyResolve.load(), st.copyBlit.load());
 }
 
 #else

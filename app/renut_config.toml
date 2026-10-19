@@ -67,7 +67,8 @@ fcti_inline = true
 # The post-codegen locals (tools/loop_locals.py, tools/leaf_locals.py) skip the functions of app/config/locals_optout.txt
 # (2026-10-16, marathon-nx proposal 3: 207 loop and 89 leaf functions whose A57 code is cheaper without them, measured
 # by tools/locals_choice.py). The tools never undo a function they converted, so a new list needs a fresh codegen: edit
-# this comment (the build re-runs the generator when this file changes). List revision 1.
+# this comment (the build re-runs the generator when this file changes). List revision 3 (2026-10-19: two of the
+# four hottest opted-out functions taken back off it, measured on the A57 code; config/locals_optout.txt).
 # dcbt_prefetch (2026-10-16, proposed by marathon-nx, which emits its 276 always): the game's 1,785 dcbt / dcbtst hints
 # as the host's prefetch of the same address (REX_PREFETCH in the pch). PRFM never faults and changes no value; the
 # A57's hardware prefetcher may already cover the sequential ones. CMake BANJO_GEN_DCBT_PREFETCH=OFF compiles them to
@@ -85,6 +86,10 @@ fp_compares_modeless = true
 fp_mode_lookahead = true
 fp_mode_lookahead_past_branch = true
 fp_copy_pairs = true
+# banjo-nx (2026-10-19, CPU proposal 15; sdk: codegen config fp_copy_forwarding): the copy forms in any mode and through
+# in-place fneg / fabs / fnabs and instructions that write other registers (the culling loop's lfs, fneg, stfs paid two
+# range checks and two conversions); an lfs takes the form whenever one of its stores does.
+fp_copy_forwarding = true
 div_inline = true
 # sa2-nx round 7 (sdk: codegen config fp_moves_modeless, rex/ppc/diet_ops.h): floating-point moves (lfd/stfd forms,
 # stfiwx, fmr, fabs, fnabs, fneg) switch no host flush mode, and in VMX mode lfs/stfs convert with mode-independent

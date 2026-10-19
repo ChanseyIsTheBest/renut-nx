@@ -137,6 +137,9 @@ enum class GpuColorFormat : u32 {
 
 plume::RenderFormat ColorTargetFormat(GpuColorFormat format);
 plume::RenderFormat DepthTargetFormat();
+// banjo-nx (2026-10-19, banjo_deko3d_depth24): the host format of a depth target of D3D format 'd3d_format': 24-bit
+// unorm with stencil (4 bytes a pixel, the Xenos D24S8's own) for D24S8 on deko3d, else DepthTargetFormat().
+plume::RenderFormat DepthTargetFormat(u32 d3d_format);
 
 plume::RenderBlend ConvertBlendFactor(u32 factor);
 plume::RenderBlendOperation ConvertBlendOp(u32 op);

@@ -25,6 +25,18 @@ struct DrawCapture {
   std::vector<u8> state;  // the device, kDeviceSnapshotSize bytes
   std::vector<u8> vertices, indices;
   DrawCall call;
+  // banjo-nx (2026-10-19, CPU proposal 23): a queued clear's or resolve's arguments. They come from the same pool as
+  // the draws' captures: each made three heap allocations on the game thread (its arguments, a device snapshot, a
+  // closure too large for std::function's own storage), freed on the render thread through the one malloc lock.
+  u32 flags = 0;
+  bool has_rect = false, has_color = false, has_dest_format = false;
+  ClearRect rect{};
+  float color[4] = {};
+  float depth = 0.0f;
+  u32 stencil = 0;
+  u32 dest_texture_va = 0, dest_level = 0, dest_slice = 0;
+  i32 dest_x = 0, dest_y = 0;
+  d3d::TextureFetchConstant dest_format{};
 };
 
 // banjo-nx (banjo_renut_capture_pool): a draw's capture comes from a pool and goes back to it once the render thread
@@ -82,10 +94,6 @@ std::unordered_map<u32, DeferredDraw> g_deferred;
 void ClearPending(d3d::Device *device) {
   for (auto &mask : device->m_Pending)
     mask = 0;
-}
-
-std::vector<u8> Snapshot(const u8 *device) {
-  return std::vector<u8>(device, device + d3d::kDeviceSnapshotSize);
 }
 
 void QueueCapture(DrawCapture *capture) {
@@ -168,20 +176,18 @@ void QueueClear(u32 device_va, u32 flags, const ClearRect *rect, const float col
   const auto *device = GuestPtr<const u8>(device_va);
   if (!device)
     return;
-  struct Args {
-    std::vector<u8> state;
-    bool has_rect;
-    ClearRect rect;
-    float color[4];
-  };
-  auto args = std::make_shared<Args>();
-  args->state = Snapshot(device);
+  DrawCapture *args = g_capture_pool.Take();  // banjo-nx (2026-10-19): pooled, see DrawCapture
+  args->state.assign(device, device + d3d::kDeviceSnapshotSize);
   args->has_rect = rect != nullptr;
   args->rect = rect ? *rect : ClearRect{};
   std::memcpy(args->color, color, sizeof(args->color));
-  render_thread::Queue([args, flags, depth, stencil] {
-    ClearStateLocked(args->state.data(), flags, args->has_rect ? &args->rect : nullptr, args->color,
-                     depth, stencil);
+  args->flags = flags;
+  args->depth = depth;
+  args->stencil = stencil;
+  render_thread::Queue([args] {
+    ClearStateLocked(args->state.data(), args->flags, args->has_rect ? &args->rect : nullptr, args->color,
+                     args->depth, args->stencil);
+    g_capture_pool.Give(args);
   });
 }
 
@@ -193,17 +199,10 @@ void QueueResolve(u32 device_va, u32 flags, const ClearRect *source_rect, u32 de
   const auto *device = GuestPtr<const u8>(device_va);
   if (!device)
     return;
-  struct Args {
-    std::vector<u8> state;
-    bool has_rect, has_color, has_dest_format;
-    ClearRect rect;
-    float color[4];
-    // The destination header as it is now: the game often builds it on the
-    // stack (as for recorded resolves).
-    d3d::TextureFetchConstant dest_format;
-  };
-  auto args = std::make_shared<Args>();
-  args->state = Snapshot(device);
+  // The destination header as it is now: the game often builds it on the
+  // stack (as for recorded resolves).
+  DrawCapture *args = g_capture_pool.Take();  // banjo-nx (2026-10-19): pooled, see DrawCapture
+  args->state.assign(device, device + d3d::kDeviceSnapshotSize);
   args->has_rect = source_rect != nullptr;
   args->rect = source_rect ? *source_rect : ClearRect{};
   args->has_color = clear_color != nullptr;
@@ -213,12 +212,20 @@ void QueueResolve(u32 device_va, u32 flags, const ClearRect *source_rect, u32 de
   args->has_dest_format = header != nullptr;
   if (header)
     args->dest_format = header->Format;
-  render_thread::Queue([args, flags, dest_texture_va, dest_x, dest_y, dest_level, dest_slice,
-                        clear_depth, clear_stencil] {
-    ResolveStateLocked(args->state.data(), flags, args->has_rect ? &args->rect : nullptr,
-                       dest_texture_va, args->has_dest_format ? &args->dest_format : nullptr,
-                       dest_x, dest_y, dest_level, dest_slice,
-                       args->has_color ? args->color : nullptr, clear_depth, clear_stencil);
+  args->flags = flags;
+  args->dest_texture_va = dest_texture_va;
+  args->dest_x = dest_x;
+  args->dest_y = dest_y;
+  args->dest_level = dest_level;
+  args->dest_slice = dest_slice;
+  args->depth = clear_depth;
+  args->stencil = clear_stencil;
+  render_thread::Queue([args] {
+    ResolveStateLocked(args->state.data(), args->flags, args->has_rect ? &args->rect : nullptr,
+                       args->dest_texture_va, args->has_dest_format ? &args->dest_format : nullptr,
+                       args->dest_x, args->dest_y, args->dest_level, args->dest_slice,
+                       args->has_color ? args->color : nullptr, args->depth, args->stencil);
+    g_capture_pool.Give(args);
   });
 }
 

@@ -95,6 +95,9 @@ namespace plume {
         // transient memory is free again. dkCmdBufClear rewinds into the memory fed last, so the first block is fed
         // explicitly (SwitchWakerHD: deko3d 0.5.0's clear keeps the old position).
         dkCmdBufClear(cmd);
+        pendingBarrier = false;  // banjo-nx (2026-10-19): nothing held over from the list before
+        pendingBarrierMode = DkBarrier_None;
+        pendingBarrierInvalidate = 0;
         memoryUsed = 0;
         addMemory(0);
         transientBlock = 0;
@@ -106,6 +109,7 @@ namespace plume {
         computePipeline = nullptr;
         boundStateHash = 0;
         boundShaders[0] = boundShaders[1] = boundShaders[2] = nullptr;
+        std::fill(std::begin(boundGroups), std::end(boundGroups), 0);
         graphicsLayout = computeLayout = nullptr;
         boundImageSet = boundSamplerSet = 0;
         boundImageCount = boundSamplerCount = 0;
@@ -123,6 +127,8 @@ namespace plume {
         sharedBase = 0;
         sharedSize = 0;
         sharedCpu = nullptr;
+        sharedWords = nullptr;  // banjo-nx (2026-10-19)
+        sharedWordsSize = 0;
         descriptorEpoch = 0;
         // NaN: the first setBlendConstant of the list always writes it.
         blendConstant[0] = blendConstant[1] = blendConstant[2] = blendConstant[3] = __builtin_nanf("");
@@ -142,8 +148,14 @@ namespace plume {
     }
 
     void Deko3DCommandList::end() {
+        flushBarriers();
         list = dkCmdBufFinishList(cmd);
         open = false;
+        // banjo-nx (2026-10-19, render-thread proposal 13): this list's draws into the totals.
+        Deko3DStats &st = GetDeko3DStats();
+        st.draws.store(st.draws.load(std::memory_order_relaxed) + statDraws, std::memory_order_relaxed);
+        st.windowDraws.store(st.windowDraws.load(std::memory_order_relaxed) + statWindowDraws, std::memory_order_relaxed);
+        statDraws = statWindowDraws = 0;
     }
 
     void Deko3DCommandList::flushDescriptorInvalidate() {
@@ -151,6 +163,7 @@ namespace plume {
         // them are dropped before the next draw or dispatch.
         const uint64_t epoch = currentEpoch();
         if (epoch != descriptorEpoch) {
+            flushBarriers();
             dkCmdBufBarrier(cmd, DkBarrier_None, DkInvalidateFlags_Descriptors | DkInvalidateFlags_Shader);
             descriptorEpoch = epoch;
         }
@@ -180,6 +193,11 @@ namespace plume {
             case RenderTextureLayout::PRESENT:
             case RenderTextureLayout::COLOR_WRITE:
             case RenderTextureLayout::DEPTH_WRITE:
+                mode = std::max(mode, DkBarrier_Fragments);
+                // banjo-nx (2026-10-19, Deko3DOptions::leanBarriers): written next, not read: no invalidation.
+                if (!Deko3DGetOptions().leanBarriers)
+                    invalidate |= DkInvalidateFlags_Image;
+                break;
             default:
                 mode = std::max(mode, DkBarrier_Fragments);
                 invalidate |= DkInvalidateFlags_Image;
@@ -196,7 +214,30 @@ namespace plume {
             mode = DkBarrier_Full;
         if (mode == DkBarrier_None && textureBarriersCount == 0 && bufferBarriersCount == 0)
             mode = DkBarrier_Primitives;
+        if (Deko3DGetOptions().mergeBarriers) {
+            // banjo-nx (2026-10-19): held until the next command that does work (flushBarriers), merged with any
+            // barrier recorded before then.
+            pendingBarrierMode = pendingBarrier ? std::max(pendingBarrierMode, mode) : mode;
+            pendingBarrierInvalidate |= invalidate;
+            pendingBarrier = true;
+            return;
+        }
+        emitBarrier(mode, invalidate);
+    }
+
+    void Deko3DCommandList::emitBarrier(DkBarrier mode, uint32_t invalidate) {
+        {
+            // banjo-nx (2026-10-19): counted for the renderer's report (a load and a store: diagnostics).
+            Deko3DStats &st = GetDeko3DStats();
+            auto bump = [](std::atomic<uint64_t> &c) { c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); };
+            bump(mode == DkBarrier_Full ? st.barriersFull : mode == DkBarrier_Fragments ? st.barriersFragments : st.barriersPrimitives);
+            if (invalidate & DkInvalidateFlags_Image)
+                bump(st.barriersImageInvalidate);
+        }
         dkCmdBufBarrier(cmd, mode, invalidate);
+        pendingBarrier = false;
+        pendingBarrierMode = DkBarrier_None;
+        pendingBarrierInvalidate = 0;
     }
 
     void Deko3DCommandList::dispatch(uint32_t x, uint32_t y, uint32_t z) {
@@ -230,6 +271,7 @@ namespace plume {
             }
             computeSsboDirty = false;
         }
+        flushBarriers();
         dkCmdBufDispatchCompute(cmd, x, y, z);
     }
 
@@ -240,7 +282,7 @@ namespace plume {
     void Deko3DCommandList::bindGraphicsBuffers() {
         const Deko3DGraphicsPipeline *p = graphicsPipeline;
         if ((p->ssboMask[0] | p->ssboMask[1] | p->ssboMask[2]) & (1u << AddressWindowSlot))
-            GetDeko3DStats().windowDraws.fetch_add(1, std::memory_order_relaxed);
+            ++statWindowDraws;
         for (int st = 0; st < 3; st++) {
             const uint32_t stageBit = 1u << GraphicsStages[st];
             uint32_t ubo = p->uboMask[st] & graphicsUboValid;
@@ -273,7 +315,12 @@ namespace plume {
         if (!(graphicsUboValid & (1u << SharedUboSlot)))
             return;
         const DkGpuAddr addr = graphicsUbo[SharedUboSlot].addr;
-        if (!sharedCpu || addr < sharedBase || addr >= sharedBase + sharedSize) {
+        // banjo-nx (2026-10-19, render-thread proposal 5): pushed shared constants: the renderer's copy.
+        if (sharedWords) {
+            sharedCpu = sharedWords;
+            sharedBase = addr;
+            sharedSize = sharedWordsSize;
+        } else if (!sharedCpu || addr < sharedBase || addr >= sharedBase + sharedSize) {
             if (!device->findBuffer(addr, sharedBase, sharedSize, sharedCpu)) {
                 sharedCpu = nullptr;
                 static std::atomic<uint32_t> logged{0};
@@ -316,8 +363,9 @@ namespace plume {
         bindGraphicsBuffers();
         if (graphicsPipeline->boundTextures)
             bindTextures();
+        flushBarriers();
         dkCmdBufDraw(cmd, graphicsPipeline->primitive, vertexCount, instanceCount, startVertex, startInstance);
-        GetDeko3DStats().draws.fetch_add(1, std::memory_order_relaxed);
+        ++statDraws;
     }
 
     void Deko3DCommandList::drawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t startIndex, int32_t baseVertex, uint32_t startInstance) {
@@ -327,8 +375,9 @@ namespace plume {
         bindGraphicsBuffers();
         if (graphicsPipeline->boundTextures)
             bindTextures();
+        flushBarriers();
         dkCmdBufDrawIndexed(cmd, graphicsPipeline->primitive, indexCount, instanceCount, startIndex, baseVertex, startInstance);
-        GetDeko3DStats().draws.fetch_add(1, std::memory_order_relaxed);
+        ++statDraws;
     }
 
     void Deko3DCommandList::setPipeline(const RenderPipeline *pipeline) {
@@ -350,13 +399,12 @@ namespace plume {
         graphicsPipeline = p;
         if (!p->valid)
             return;
-        GetDeko3DStats().pipelineBinds.fetch_add(1, std::memory_order_relaxed);
+        // banjo-nx (2026-10-19): a load and a store (a lost count is possible between two recording threads), not
+        // an exclusive read-modify-write loop: the A57 has no LSE atomics.
+        auto bump = [](std::atomic<uint64_t> &c) { c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); };
+        bump(GetDeko3DStats().pipelineBinds);
         // Shaders: rebound when any stage differs (absent stages are disabled by the bind).
-        const DkShader *want[3] = {};
-        for (uint32_t i = 0; i < p->shaderCount; i++) {
-            const DkStage stage = dkShaderGetStage(p->shaders[i]);
-            want[stage == DkStage_Vertex ? 0 : stage == DkStage_Geometry ? 1 : 2] = p->shaders[i];
-        }
+        const DkShader *const *want = p->stageShaders;  // banjo-nx: kept at creation
         if (want[0] != boundShaders[0] || want[1] != boundShaders[1] || want[2] != boundShaders[2]) {
             dkCmdBufBindShaders(cmd, DkStageFlag_GraphicsMask, p->shaders, p->shaderCount);
             boundShaders[0] = want[0];
@@ -366,27 +414,44 @@ namespace plume {
             // rebind.
         }
         if (p->stateHash != boundStateHash) {
-            GetDeko3DStats().stateBinds.fetch_add(1, std::memory_order_relaxed);
-            dkCmdBufBindRasterizerState(cmd, &p->rasterizer);
-            dkCmdBufBindMultisampleState(cmd, &p->multisample);
-            dkCmdBufBindColorState(cmd, &p->color);
-            dkCmdBufBindColorWriteState(cmd, &p->colorWrite);
-            if (p->blendCount) {
+            bump(GetDeko3DStats().stateBinds);
+            // banjo-nx (2026-10-19, CPU proposal 13): only the groups whose state differs from what is bound (a group
+            // the GPU already holds is a redundant command). The stencil values and the depth bias are left as they
+            // are by a pipeline that does not set them (no stencil, a dynamic bias), as before; the dynamic setters
+            // make their groups unknown, so the next pipeline that sets them does.
+            auto changed = [&](uint32_t g) {
+                if (boundGroups[g] == p->groupHash[g])
+                    return false;
+                boundGroups[g] = p->groupHash[g];
+                return true;
+            };
+            if (changed(0))
+                dkCmdBufBindRasterizerState(cmd, &p->rasterizer);
+            if (changed(1))
+                dkCmdBufBindMultisampleState(cmd, &p->multisample);
+            if (changed(2))
+                dkCmdBufBindColorState(cmd, &p->color);
+            if (changed(3))
+                dkCmdBufBindColorWriteState(cmd, &p->colorWrite);
+            if (p->blendCount && changed(4)) {
                 dkCmdBufBindBlendStates(cmd, 0, p->blend, p->blendCount);
                 // deko3d 0.5.0's FuncAlphaDst (see blendWords): the six registers of each target again.
                 for (uint32_t i = 0; i < p->blendCount; i++)
                     dkCmdBufReplayCmds(cmd, p->blendWords[i], 7);
             }
-            dkCmdBufBindDepthStencilState(cmd, &p->depthStencil);
-            if (p->stencilEnabled)
+            if (changed(5))
+                dkCmdBufBindDepthStencilState(cmd, &p->depthStencil);
+            if (p->stencilEnabled && changed(6))
                 dkCmdBufSetStencil(cmd, DkFace_FrontAndBack, p->stencilWriteMask, p->stencilReference, p->stencilReadMask);
-            if (!p->dynamicDepthBias)
+            if (!p->dynamicDepthBias && changed(7))
                 dkCmdBufSetDepthBias(cmd, p->depthBias, p->depthBiasClamp, p->slopeScaledDepthBias);
             // Always, also with none: deko3d makes the attributes after the last one given constants and disables the
             // buffers after the last one, so a pipeline without vertex input leaves no earlier attribute fetching from
-            // a buffer that may be gone.
-            dkCmdBufBindVtxAttribState(cmd, p->attribs, p->attribCount);
-            dkCmdBufBindVtxBufferState(cmd, p->vtxBuffers, p->vtxBufferCount);
+            // a buffer that may be gone. (banjo-nx: with the same attributes and buffers as bound, nothing to do.)
+            if (changed(8)) {
+                dkCmdBufBindVtxAttribState(cmd, p->attribs, p->attribCount);
+                dkCmdBufBindVtxBufferState(cmd, p->vtxBuffers, p->vtxBufferCount);
+            }
             boundStateHash = p->stateHash;
         }
     }
@@ -646,17 +711,20 @@ namespace plume {
         const DkImageView *colors[8];
         for (uint32_t i = 0; i < f->colorCount; i++)
             colors[i] = &f->colors[i];
+        flushBarriers();
         dkCmdBufBindRenderTargets(cmd, colors, f->colorCount, f->hasDepth ? &f->depth : nullptr);
         writeFramebufferSrgb(cmd, f->colorCount && f->srgb[0]);
     }
 
     void Deko3DCommandList::setDepthBias(float depthBias, float depthBiasClamp, float slopeScaledDepthBias) {
         dkCmdBufSetDepthBias(cmd, depthBias, depthBiasClamp, slopeScaledDepthBias);
+        boundGroups[7] = 0;  // banjo-nx (2026-10-19): unknown for the next pipeline that sets a bias
     }
 
     void Deko3DCommandList::setStencilReference(uint32_t reference) {
         const Deko3DGraphicsPipeline *p = graphicsPipeline;
         dkCmdBufSetStencil(cmd, DkFace_FrontAndBack, p ? p->stencilWriteMask : 0xFF, uint8_t(reference), p ? p->stencilReadMask : 0xFF);
+        boundGroups[6] = 0;  // banjo-nx (2026-10-19): unknown for the next pipeline that sets the stencil values
     }
 
     void Deko3DCommandList::clearColor(uint32_t attachmentIndex, RenderColor color, const RenderRect *rects, uint32_t rectsCount) {
@@ -673,6 +741,7 @@ namespace plume {
         if (rectsCount == 0) {
             const DkScissor all = {0, 0, 16384, 16384};
             dkCmdBufSetScissors(cmd, 0, &all, 1);
+            flushBarriers();
             dkCmdBufClearColorFloat(cmd, attachmentIndex, DkColorMask_RGBA, color.r, color.g, color.b, color.a);
         }
         else {
@@ -681,6 +750,7 @@ namespace plume {
                 const DkScissor s = {uint32_t(std::max(r.left, 0)), uint32_t(std::max(r.top, 0)),
                                      uint32_t(std::max(r.right - r.left, 0)), uint32_t(std::max(r.bottom - r.top, 0))};
                 dkCmdBufSetScissors(cmd, 0, &s, 1);
+                flushBarriers();
                 dkCmdBufClearColorFloat(cmd, attachmentIndex, DkColorMask_RGBA, color.r, color.g, color.b, color.a);
             }
         }
@@ -691,6 +761,7 @@ namespace plume {
         if (rectsCount == 0) {
             const DkScissor all = {0, 0, 16384, 16384};
             dkCmdBufSetScissors(cmd, 0, &all, 1);
+            flushBarriers();
             dkCmdBufClearDepthStencil(cmd, clearDepth, depthValue, clearStencil ? 0xFF : 0, uint8_t(stencilValue));
         }
         else {
@@ -699,6 +770,7 @@ namespace plume {
                 const DkScissor s = {uint32_t(std::max(r.left, 0)), uint32_t(std::max(r.top, 0)),
                                      uint32_t(std::max(r.right - r.left, 0)), uint32_t(std::max(r.bottom - r.top, 0))};
                 dkCmdBufSetScissors(cmd, 0, &s, 1);
+                flushBarriers();
                 dkCmdBufClearDepthStencil(cmd, clearDepth, depthValue, clearStencil ? 0xFF : 0, uint8_t(stencilValue));
             }
         }
@@ -710,6 +782,8 @@ namespace plume {
         const Deko3DBuffer *s = static_cast<const Deko3DBuffer *>(src.ref);
         if (!d || !s || size == 0)
             return;
+        flushBarriers();
+        GetDeko3DStats().copyBuffer.store(GetDeko3DStats().copyBuffer.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);  // banjo-nx (2026-10-19)
         dkCmdBufCopyBuffer(cmd, s->gpu + src.offset, d->gpu + dst.offset, uint32_t(size));
     }
 
@@ -776,6 +850,8 @@ namespace plume {
             DkImageView v = subresourceView(t, dstLoc.subresource.mipLevel, dstLoc.subresource.arrayIndex);
             const bool layered = t->type == DkImageType_3D;
             const DkImageRect rect = {dstX, dstY, layered ? dstZ : 0, fp.width, fp.height, std::max<uint32_t>(fp.depth, 1)};
+            flushBarriers();
+            GetDeko3DStats().copyUpload.store(GetDeko3DStats().copyUpload.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);  // banjo-nx (2026-10-19)
             dkCmdBufCopyBufferToImage(cmd, &src, &v, &rect, 0);
             invalidateZcullAfterCopy(t);  // banjo-nx (2026-10-18): an upload into a depth target, the same as a copy
         }
@@ -797,8 +873,12 @@ namespace plume {
             else
                 rect = {0, 0, 0, fp.width, fp.height, std::max<uint32_t>(fp.depth, 1)};
             // The copy engine finishes, and its writes leave the GPU's L2, before the CPU reads them (after a fence).
+            flushBarriers();
             dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Image);
+            flushBarriers();
+            GetDeko3DStats().copyReadback.store(GetDeko3DStats().copyReadback.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);  // banjo-nx (2026-10-19)
             dkCmdBufCopyImageToBuffer(cmd, &v, &rect, &dst, 0);
+            flushBarriers();
             dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_L2Cache);
         }
         else {
@@ -816,6 +896,8 @@ namespace plume {
                 srect = {0, 0, 0, mipDim(st->desc.width, srcLoc.subresource.mipLevel), mipDim(st->desc.height, srcLoc.subresource.mipLevel),
                          st->type == DkImageType_3D ? mipDim(st->desc.depth, srcLoc.subresource.mipLevel) : 1};
             const DkImageRect drect = {dstX, dstY, dt->type == DkImageType_3D ? dstZ : 0, srect.width, srect.height, srect.depth};
+            flushBarriers();
+            GetDeko3DStats().copyImage.store(GetDeko3DStats().copyImage.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);  // banjo-nx (2026-10-19)
             dkCmdBufCopyImage(cmd, &sv, &srect, &dv, &drect, 0);
             invalidateZcullAfterCopy(dt);
         }
@@ -826,6 +908,7 @@ namespace plume {
         // bound one (the copy engine does not update Zcull) leaves it describing the old depth, which would cull draws
         // the new depth passes.
         if (Deko3DGetOptions().zcull && (dst->desc.flags & RenderTextureFlag::DEPTH_TARGET))
+            flushBarriers();
             dkCmdBufBarrier(cmd, DkBarrier_None, DkInvalidateFlags_Zcull);
     }
 
@@ -834,6 +917,8 @@ namespace plume {
         const Deko3DBuffer *s = static_cast<const Deko3DBuffer *>(src);
         if (!d || !s)
             return;
+        flushBarriers();
+        GetDeko3DStats().copyBuffer.store(GetDeko3DStats().copyBuffer.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);  // banjo-nx (2026-10-19)
         dkCmdBufCopyBuffer(cmd, s->gpu, d->gpu, uint32_t(std::min(d->desc.size, s->desc.size)));
     }
 
@@ -850,6 +935,8 @@ namespace plume {
                 DkImageView sv = subresourceView(st, m, l);
                 const DkImageRect r = {0, 0, 0, mipDim(st->desc.width, m), mipDim(st->desc.height, m),
                                        st->type == DkImageType_3D ? mipDim(st->desc.depth, m) : 1};
+                flushBarriers();
+                GetDeko3DStats().copyImage.store(GetDeko3DStats().copyImage.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);  // banjo-nx (2026-10-19)
                 dkCmdBufCopyImage(cmd, &sv, &r, &dv, &r, 0);
             }
         }
@@ -863,6 +950,8 @@ namespace plume {
             return;
         DkImageView dv = dt->defaultView();
         DkImageView sv = st->defaultView();
+        flushBarriers();
+        GetDeko3DStats().copyResolve.store(GetDeko3DStats().copyResolve.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);  // banjo-nx (2026-10-19)
         dkCmdBufResolveImage(cmd, &sv, &dv);
         invalidateZcullAfterCopy(dt);
     }
@@ -885,6 +974,8 @@ namespace plume {
         const RenderRect r = srcRect ? *srcRect : RenderRect(0, 0, int32_t(st->desc.width), int32_t(st->desc.height));
         const DkImageRect srect = {uint32_t(r.left), uint32_t(r.top), 0, uint32_t(r.right - r.left), uint32_t(r.bottom - r.top), 1};
         const DkImageRect drect = {dstX, dstY, 0, srect.width, srect.height, 1};
+        flushBarriers();
+        GetDeko3DStats().copyBlit.store(GetDeko3DStats().copyBlit.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);  // banjo-nx (2026-10-19)
         dkCmdBufBlitImage(cmd, &sv, &srect, &dv, &drect, DkBlitFlag_FilterLinear, 0);
         invalidateZcullAfterCopy(dt);
     }
@@ -899,6 +990,7 @@ namespace plume {
         if (!pool || !pool->block || queryIndex >= pool->results.size())
             return;
         // The timestamp when the work before it has finished (bottom of the pipe), as Vulkan's.
+        flushBarriers();
         dkCmdBufReportCounter(cmd, DkCounter_Timestamp, dkMemBlockGetGpuAddr(pool->block) + uint64_t(queryIndex) * 16);
     }
 
@@ -935,6 +1027,49 @@ namespace plume {
             cl->graphicsSsboValid |= 1u << AddressWindowSlot;
             cl->ssboBoundStages[AddressWindowSlot] = 0;
         }
+        return true;
+    }
+
+    bool Deko3DBindUniform(RenderCommandList *commandList, uint32_t slot, uint64_t address, uint32_t size) {
+        Deko3DCommandList *cl = static_cast<Deko3DCommandList *>(commandList);
+        if (!cl || !address || slot >= 16)
+            return false;
+        const DkBufExtents e = {address, size};
+        if (!(cl->graphicsUboValid & (1u << slot)) || cl->graphicsUbo[slot].addr != e.addr || cl->graphicsUbo[slot].size != e.size) {
+            cl->graphicsUbo[slot] = e;
+            cl->graphicsUboValid |= 1u << slot;
+            cl->uboBoundStages[slot] = 0;
+        }
+        return true;
+    }
+
+    bool Deko3DPushUniform(RenderCommandList *commandList, uint64_t address, uint32_t uboSize, uint32_t offset,
+                           const void *data, uint32_t size) {
+        Deko3DCommandList *cl = static_cast<Deko3DCommandList *>(commandList);
+        if (!cl || !address || !size || offset + size > uboSize)
+            return false;
+        // Pipelined: the draws recorded before it read the old values (as setGraphicsPushConstants' updates). In pieces
+        // of at most 1 KB: Ryujinx stages one update packet in a 512-word buffer and throws on a longer one (emulator
+        // run 60: "Destination is too short" in ConstantBufferUpdater.Update, the GPU thread gone); the console takes
+        // either, and consecutive pieces cost a few command words each.
+        constexpr uint32_t kPiece = 1024;
+        const uint8_t *bytes = static_cast<const uint8_t *>(data);
+        for (uint32_t done = 0; done < size;) {
+            const uint32_t n = std::min(kPiece, size - done);
+            dkCmdBufPushConstants(cl->cmd, address, uboSize, offset + done, alignUp(n, 4), bytes + done);
+            done += n;
+        }
+        return true;
+    }
+
+    bool Deko3DSetSharedWords(RenderCommandList *commandList, const void *cpu, uint32_t size) {
+        Deko3DCommandList *cl = static_cast<Deko3DCommandList *>(commandList);
+        if (!cl)
+            return false;
+        cl->sharedWords = static_cast<const uint8_t *>(cpu);
+        cl->sharedWordsSize = size;
+        if (!cpu)
+            cl->sharedCpu = nullptr;  // looked up again where the bound buffer is
         return true;
     }
 
@@ -980,6 +1115,7 @@ namespace plume {
             dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Image);
             const DkImageRect rect = {0, 0, 0, 64, 64, 1};
             const DkCopyBuf dst = {dkMemBlockGetGpuAddr(out), 64 * 4, 64 * 64 * 4};
+            GetDeko3DStats().copyReadback.store(GetDeko3DStats().copyReadback.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);  // banjo-nx (2026-10-19)
             dkCmdBufCopyImageToBuffer(cmd, &view, &rect, &dst, 0);
             dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_L2Cache);
             DkFence fence{};

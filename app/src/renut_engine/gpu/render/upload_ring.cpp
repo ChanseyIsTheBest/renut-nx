@@ -93,8 +93,24 @@ void UploadRing::Publish() {
   for (size_t i = 0; i <= current_ && i < chunks_.size(); ++i) {
     Chunk &chunk = chunks_[i];
     if (chunk.written > chunk.published) {
+      // banjo-nx (2026-10-19, render-thread proposal 23): what the submit cleans, for the report (whether moving the
+      // clean to another core is worth it once the constants are pushed).
+      banjo::renut_gpu::CountRingPublished(chunk.written - chunk.published);
       const plume::RenderRange range(chunk.published, chunk.written);
       chunk.buffer->unmap(0, &range);  // plume: flushes the range of a persistently mapped buffer
+      chunk.published = chunk.written;
+    }
+  }
+}
+
+void UploadRing::HandOff(std::vector<Range> &out) {
+  if (!host_cached_)
+    return;
+  for (size_t i = 0; i <= current_ && i < chunks_.size(); ++i) {
+    Chunk &chunk = chunks_[i];
+    if (chunk.written > chunk.published) {
+      banjo::renut_gpu::CountRingPublished(chunk.written - chunk.published);
+      out.push_back({chunk.buffer.get(), chunk.published, chunk.written});
       chunk.published = chunk.written;
     }
   }
@@ -129,6 +145,34 @@ UploadAllocation UploadRing::Allocate(uint64_t size, uint64_t alignment) {
     }
     // Next chunk, growing the ring if this frame outgrew every existing one.
     if (current_ + 1 >= chunks_.size() && !AddChunk(size))
+      return out;
+    ++current_;
+    offset_ = 0;
+  }
+}
+
+UploadAllocation UploadRing::AllocateWithRoom(uint64_t size, uint64_t room, uint64_t alignment) {
+  UploadAllocation out;
+  if (size == 0 || chunks_.empty())
+    return out;
+  room = std::max(room, size);
+  alignment = std::max<uint64_t>(alignment, 16);
+  for (;;) {
+    Chunk &chunk = chunks_[current_];
+    const uint64_t aligned = (offset_ + alignment - 1) & ~(alignment - 1);
+    if (aligned + room <= chunk.size) {
+      out.ref = plume::RenderBufferReference(chunk.buffer.get(), aligned);
+      out.cpu = chunk.mapped + aligned;
+      out.gpu_address = chunk.address ? chunk.address + aligned : 0;
+      out.size = static_cast<uint32_t>(size);
+      out.chunk_size = chunk.size;
+      out.float_constants_set = chunk.float_constants_set.get();
+      out.shared_constants_set = chunk.shared_constants_set.get();
+      offset_ = aligned + size;
+      chunk.written = offset_;
+      return out;
+    }
+    if (current_ + 1 >= chunks_.size() && !AddChunk(room))
       return out;
     ++current_;
     offset_ = 0;

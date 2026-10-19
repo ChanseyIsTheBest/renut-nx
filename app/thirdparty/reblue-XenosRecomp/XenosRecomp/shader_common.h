@@ -62,7 +62,7 @@
 #ifdef __spirv__
 
 // banjo-nx: 16-byte vectors of SharedConstants (render/draw.h, kSharedConstantsUboBytes / 16).
-#define RENUT_SHARED_VECTORS 84
+#define RENUT_SHARED_VECTORS 85  // banjo-nx (2026-10-19): 1360 bytes, with g_PixelOrigin
 
 #ifndef BANJO_DEKO3D  // banjo-nx: the deko3d build has no push constants and no 64-bit addresses
 struct PushConstants
@@ -122,6 +122,10 @@ struct RenutUboShared { uint4 v[RENUT_SHARED_VECTORS]; };
 // 1336: host pixels per guest pixel on each axis (the render targets are that multiple of their
 // guest size; g_ViewportSize and the screen-space values are in guest pixels).
 #define g_ResolutionScale          RENUT_SHARED_FLOAT(1336)
+// 1344 (Renut upstream 574b488, the Jinjo Bingo silhouette; ported 2026-10-19): in guest pixels, the corner of the tile
+// a draw predicated to one tile renders to; the pixel position is relative to it, as the GPU's is to the EDRAM a tile
+// renders in.
+#define g_PixelOrigin              RENUT_SHARED_FLOAT2(1344)
 #define g_AlphaThreshold           RENUT_SHARED_FLOAT(552)
 #define g_AlphaTestFunc            RENUT_SHARED_UINT(556)
 #define g_VertexFetchDataAddress   RENUT_SHARED_UINT64(560)
@@ -186,7 +190,8 @@ struct RenutUboShared { uint4 v[RENUT_SHARED_VECTORS]; };
     uint4 g_Tessellation : packoffset(c65); \
     uint4 g_BoundFetchArr[16] : packoffset(c66); \
     float2 g_ViewportSize : packoffset(c83.x); \
-    float g_ResolutionScale : packoffset(c83.z);
+    float g_ResolutionScale : packoffset(c83.z); \
+    float2 g_PixelOrigin : packoffset(c84.x);
 
 #define g_Booleans(i) (g_BooleansArr[(i) / 4][(i) % 4])
 #define g_VertexFetchSlot(i) (g_VertexFetchSlotsArr[(i) / 4][(i) % 4])

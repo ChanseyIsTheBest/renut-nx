@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <rex/frame_latency.h>  // banjo-nx (2026-10-19)
 #include <chrono>
 #include <algorithm>
 #include <cmath>
@@ -315,6 +316,9 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
 
 X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
   SCOPE_profile_cpu_f("hid");
+  // banjo-nx (2026-10-19, input latency): the late input delay (first read after a Swap) and the latency probe.
+  rex::latency::BeforeInputRead();
+  rex::latency::NoteInputRead();
   if (user_index == 0 && !InputScript().empty()) {  // input_script: only the scripted presses
     const uint16_t buttons = ScriptedButtons();
     static uint32_t packet = 1;

@@ -186,6 +186,7 @@ template <class S>
   std::memcpy(::banjo::hot::Raw(base, slot), &saved, 8);
   if (n == 0) return true;
   if (!s.Note(dst, n)) [[unlikely]] return true;
+  ::banjo::hot::Card(base, dst, n);
   uint8_t* d = ::banjo::hot::Raw(base, dst);
   const uint8_t* p = ::banjo::hot::Raw(base, src);
   if (n <= 64) {
@@ -221,6 +222,7 @@ template <class S>
   if (n == 0) return true;
   if (!detail::Straight(dst, n)) [[unlikely]] return false;
   if (!s.Note(dst, n)) [[unlikely]] return true;
+  ::banjo::hot::Card(base, dst, n);
   uint8_t* d = ::banjo::hot::Raw(base, dst);
   if (n <= 64) {
     detail::FillSmall(d, ctx.r4.u8, n);
@@ -275,6 +277,7 @@ template <class S>
 #endif
   if (count) {
     if (!s.Note(dst, bytes)) [[unlikely]] return true;
+    ::banjo::hot::Card(base, dst, bytes);
     uint8_t* d = ::banjo::hot::Raw(base, dst);
     const uint8_t* p = ::banjo::hot::Raw(base, src);
     if (count <= 8) {
@@ -289,6 +292,7 @@ template <class S>
     }
   }
   if (!s.Note(mask, 8)) [[unlikely]] return true;
+  ::banjo::hot::Card(base, mask, 8);
   uint64_t m;
   std::memcpy(&m, ::banjo::hot::Raw(base, mask), 8);
   m |= __builtin_bswap64(ctx.r7.u64);
@@ -416,6 +420,7 @@ template <class S, uint32_t kUnit, uint32_t kFrame>
     }
     const uint32_t run_bytes = 4u * pads + 4u + bytes;
     if (!s.Note(wp + 4u, run_bytes)) [[unlikely]] return true;
+    ::banjo::hot::Card(base, wp + 4u, run_bytes);
     uint8_t* d = buffer + (wp - start) + 4;
     for (uint32_t k = 0; k < pads; ++k) {
       Store32(d, 0x80000000u);
@@ -434,6 +439,7 @@ template <class S, uint32_t kUnit, uint32_t kFrame>
     m = length == 64 ? 0 : m << length;
   } while (m);
   if (!s.Note(device + 48, 4)) [[unlikely]] return true;
+  ::banjo::hot::Card(base, device + 48, 4);
   Store32(::banjo::hot::Raw(base, device + 48), wp);
   return true;
 }

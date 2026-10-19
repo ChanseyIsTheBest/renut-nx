@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "compiler_iface.h"
 #include "uam_log.h"
 
@@ -273,6 +274,12 @@ DekoCompiler::DekoCompiler(pipeline_stage stage, int optLevel) :
 	m_info.bin.sourceRep = PIPE_SHADER_IR_TGSI;
 
 	m_info.optLevel = optLevel;
+	// banjo-nx (2026-10-19): UAM_IR_DEBUG=1 prints the final nv50 IR (NV50_IR_DEBUG_BASIC); tooling only.
+	if (const char* dbg = getenv("UAM_IR_DEBUG"))
+	{
+		m_info.dbgFlags = (uint8_t)strtoul(dbg, nullptr, 0);
+		fprintf(stderr, "uam: IR debug flags %u\n", (unsigned)m_info.dbgFlags);
+	}
 
 	m_info.io.auxCBSlot      = 17;            // Driver constbuf c[0x0]. Note that codegen was modified to transform constbuf ids like such: final_id = (raw_id + 1) % 18
 	m_info.io.drawInfoBase   = 0x000;         // This is used for gl_BaseVertex, gl_BaseInstance and gl_DrawID (in that order)

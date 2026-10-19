@@ -436,17 +436,18 @@ MARKER = '// rexglue ports: guest register writes nothing reads (tools/dead_ctx_
 END = '// (end of the macros of tools/dead_ctx_defs.py)\n'
 MACROS = MARKER + '''
 #ifndef REX_DEAD_DEF
-// REX_DEAD_REC: a record form whose register is dead: the value goes to a temporary for cr0.
+// REX_DEAD_REC: a record form whose register is dead: the value goes to a temporary for cr0. (The last parameter is
+// 'record', not 'compare': the keep form's body calls cr0.compare, which a parameter of that name would replace.)
 #if defined(REX_DEAD_DEFS_KEEP)
 #define REX_DEAD_DEF(reg, statement) statement
-#define REX_DEAD_REC(reg, statement, dead, compare)   do { statement; cr0.compare<int32_t>(ctx.reg.s32, 0, xer); } while (0)
+#define REX_DEAD_REC(reg, statement, dead, record)   do { statement; cr0.compare<int32_t>(ctx.reg.s32, 0, xer); } while (0)
 #elif defined(REX_DEAD_DEFS_POISON)
 #define REX_DEAD_DEF(reg, statement) (ctx.reg.u64 = 0xDEADBEEFDEADBEEFull)
-#define REX_DEAD_REC(reg, statement, dead, compare) \
-  do { PPCRegister rex_dead; dead; compare; ctx.reg.u64 = 0xDEADBEEFDEADBEEFull; } while (0)
+#define REX_DEAD_REC(reg, statement, dead, record) \
+  do { PPCRegister rex_dead; dead; record; ctx.reg.u64 = 0xDEADBEEFDEADBEEFull; } while (0)
 #else
 #define REX_DEAD_DEF(reg, statement) ((void)0)
-#define REX_DEAD_REC(reg, statement, dead, compare) do { PPCRegister rex_dead; dead; compare; } while (0)
+#define REX_DEAD_REC(reg, statement, dead, record) do { PPCRegister rex_dead; dead; record; } while (0)
 #endif
 #endif  // REX_DEAD_DEF
 ''' + END

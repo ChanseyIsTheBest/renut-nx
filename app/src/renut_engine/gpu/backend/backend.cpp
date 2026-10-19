@@ -258,10 +258,15 @@ void RouteVulkanPipelineCreation() {
 
 } // namespace
 
-Backend ActiveBackend() {
+// banjo-nx (2026-10-19, CPU proposal 5): ActiveBackend() is inline (backend.h), a byte load after the first call.
+namespace detail {
+uint8_t g_backend_plus1 = 0;
+Backend LatchBackend() {
   static const Backend backend = ResolveBackend();
+  g_backend_plus1 = uint8_t(uint8_t(backend) + 1);
   return backend;
 }
+}  // namespace detail
 
 const char *BackendName(Backend backend) {
   return backend == Backend::Vulkan ? "Vulkan" : backend == Backend::Deko3D ? "deko3d" : "D3D12";

@@ -22,6 +22,12 @@
 
 namespace renut::gpu {
 
+// banjo-nx (2026-10-19, render-thread proposal 1, banjo_renut_store_cards): whether no page of the guest range at
+// 'data' (physical memory, through any of its views) was written since interval 'proven' (CardsInterval at the time),
+// reading and clearing its cards as the vertex copies' proof does; and the current interval (one per kick).
+bool GuestRangeCardsClean(const u8 *data, size_t bytes, uint64_t proven);
+uint64_t CardsInterval();
+
 struct DrawCall {
   u32 primitive = 0;  // D3DPRIMITIVETYPE (Xenos primitive type)
   // Non-indexed: 'count' vertices from start_vertex.

@@ -1021,6 +1021,70 @@ def pass_dowhile(text):
     return map_main(text, body)
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: selsame — a select inside a select on the same condition
+
+def _split_args(text):
+    """Top-level comma-separated arguments of 'text' (the inside of a call's parentheses)."""
+    out, depth, start = [], 0, 0
+    for i, c in enumerate(text):
+        if c in '([':
+            depth += 1
+        elif c in ')]':
+            depth -= 1
+        elif c == ',' and depth == 0:
+            out.append(text[start:i])
+            start = i + 1
+    out.append(text[start:])
+    return out
+
+
+def _unparen(e):
+    e = e.strip()
+    while e.startswith('(') and matching(e, 0, '(', ')') == len(e) - 1:
+        e = e[1:-1].strip()
+    return e
+
+
+def pass_selsame(text):
+    """Renut's lights select each term on the light's flag twice: `dk_sel(c, (dk_sel(c, exp2(a), b)), d)`. With the same
+    condition text, the inner select's other value can never be chosen: `dk_sel(c, x, d)` (and `dk_sel(c, a, dk_sel(c, x,
+    y))` is `dk_sel(c, a, y)`). The conditions are variables or pure expressions (no calls with effects in GLSL)."""
+    def body(b):
+        changed = True
+        while changed:
+            changed = False
+            out, pos = [], 0
+            for m in re.finditer(r'\bdk_sel\(', b):
+                if m.start() < pos:
+                    continue
+                o = m.end() - 1
+                c = matching(b, o, '(', ')')
+                if c < 0:
+                    continue
+                args = _split_args(b[o + 1:c])
+                if len(args) != 3:
+                    continue
+                cond = args[0].strip()
+                new = list(args)
+                for k, keep in ((1, 1), (2, 2)):
+                    inner = _unparen(args[k])
+                    if inner.startswith('dk_sel(') and matching(inner, 6, '(', ')') == len(inner) - 1:
+                        ia = _split_args(inner[7:-1])
+                        if len(ia) == 3 and ia[0].strip() == cond:
+                            new[k] = ' (' + ia[keep].strip() + ')'
+                if new != args:
+                    out.append(b[pos:m.start()])
+                    out.append('dk_sel(' + ','.join(new) + ')')
+                    pos = c + 1
+                    changed = True
+            if changed:
+                out.append(b[pos:])
+                b = ''.join(out)
+        return b
+    return map_main(text, body)
+
+
 PASSES = [
     ('scale1', pass_scale1),
     ('fragscale', pass_fragscale),
@@ -1039,6 +1103,7 @@ PASSES = [
     ('earlyhoist', pass_earlyhoist),
     ('ifmerge', pass_ifmerge),
     ('dowhile', pass_dowhile),
+    ('selsame', pass_selsame),
 ]
 DEFAULT = ','.join(name for name, _ in PASSES)
 

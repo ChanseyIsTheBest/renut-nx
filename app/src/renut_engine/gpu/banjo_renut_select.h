@@ -7,13 +7,23 @@
 // Renut's side, renut_native_sub_X, when Renut's renderer is chosen.
 #pragma once
 
+#include <cstdint>
+
 #include <rex/hook.h>
 #include <rex/ppc.h>
 
 namespace banjo::renut_gpu {
 
-// banjo_renderer == "renut", read once (the choice holds for the session).
-bool Active();
+// banjo_renderer == "renut", read once (the choice holds for the session). banjo-nx (2026-10-19): inline, a byte load
+// after the first call (every Direct3D hook asks).
+namespace detail {
+extern int8_t g_active;  // 1 renut, -1 not, 0 not read yet
+bool LatchActive();
+}  // namespace detail
+inline bool Active() {
+  const int8_t a = detail::g_active;
+  return a ? a > 0 : detail::LatchActive();
+}
 
 }  // namespace banjo::renut_gpu
 

@@ -27,6 +27,8 @@ REXCVAR_DECLARE(bool, banjo_renut_diag_gpu_shaders);
 
 namespace renut::gpu::gpu_profile {
 
+bool g_recording_timed = false;
+
 namespace {
 
 // Timestamps one frame may write; past them its work stays with the last
@@ -134,6 +136,12 @@ void BeginList(VideoState &s) {
     slot.count = 0;
     slot.list = 0;
     slot.active = REXCVAR_GET(renut_gpu_profile) > 0.0 && s.device->getCapabilities().queryPools;
+    // banjo-nx (2026-10-19, GPU): with the per-shader breakdown (a timestamp at nearly every draw), one frame in
+    // kShaderSample is timed; the report's averages are over the timed frames (draws are counted in them only).
+    static uint32_t frames_seen = 0;
+    constexpr uint32_t kShaderSample = 4;
+    if (slot.active && REXCVAR_GET(banjo_renut_diag_gpu_shaders) && (frames_seen++ % kShaderSample) != 0)
+      slot.active = false;
     if (slot.active && !slot.pool) {
       slot.pool = s.device->createQueryPool(kMaxMarks);
       slot.active = slot.pool != nullptr;
@@ -142,6 +150,7 @@ void BeginList(VideoState &s) {
     if (slot.active)
       s.command_list->resetQueryPool(slot.pool.get(), 0, kMaxMarks);
   }
+  g_recording_timed = slot.active;  // banjo-nx (2026-10-19, render-thread proposal 7)
   if (slot.active && slot.count + 2 < kMaxMarks)
     Write(s, slot, kOther);
 }

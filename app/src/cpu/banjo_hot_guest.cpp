@@ -36,6 +36,14 @@
 // The generated code's macros and helpers: the copies are made of generated statements.
 #include "renut_pch.h"
 
+// banjo-nx (2026-10-19): whether the generated code marks the store cards (tools/store_cards.py ran and
+// REX_STORE_CARDS_OFF is not set): Renut proves its cached copies by them only then (banjo_renut_store_cards).
+#if defined(REX_CARD) && !defined(REX_STORE_CARDS_OFF)
+extern "C" const bool g_banjo_store_cards = true;
+#else
+extern "C" const bool g_banjo_store_cards = false;
+#endif
+
 #include "banjo_hot_guest.h"
 
 #include <algorithm>

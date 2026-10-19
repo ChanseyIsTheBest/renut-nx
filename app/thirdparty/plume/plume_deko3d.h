@@ -48,8 +48,16 @@ namespace plume {
         std::atomic<uint64_t> imageBytes{0}, bufferBytes{0}, codeBytes{0}, commandBytes{0};
         std::atomic<uint64_t> descriptorWrites{0}, pipelineBinds{0}, stateBinds{0}, draws{0};
         std::atomic<uint64_t> windowDraws{0}; // draws whose shaders read fetch data from memory (storage binding 15)
+        // banjo-nx (2026-10-19): the barriers recorded, by what they wait for (DkBarrier_Primitives, _Fragments, _Full:
+        // the 3D pipe drained, the copy engine as well), and those that invalidate the texture cache.
+        std::atomic<uint64_t> barriersPrimitives{0}, barriersFragments{0}, barriersFull{0}, barriersImageInvalidate{0};
+        // banjo-nx (2026-10-19): copy-engine and 2D-engine work, by kind (each fenced by Full barriers in Renut):
+        // buffer copies, buffer-to-image (texture uploads), image-to-buffer (readbacks), image copies, resolves, blits.
+        std::atomic<uint64_t> copyBuffer{0}, copyUpload{0}, copyReadback{0}, copyImage{0}, copyResolve{0}, copyBlit{0};
     };
-    Deko3DStats &GetDeko3DStats();
+    // banjo-nx (2026-10-19, render-thread proposal 13): read inline (no call per draw).
+    extern Deko3DStats g_deko3dStats;
+    inline Deko3DStats &GetDeko3DStats() { return g_deko3dStats; }
 
     // Where the back end's messages go (stderr until set: the application's log, so they reach it on the console and in
     // an emulator alike).
@@ -242,6 +250,11 @@ namespace plume {
         bool boundTextures = false;
         bool textures = false;
         uint64_t stateHash = 0; // equal hashes: the same fixed-function state (binds skipped)
+        // banjo-nx (2026-10-19, CPU proposal 13): the shader of each stage (vertex, geometry, fragment; null when
+        // absent), so a bind does not ask deko3d, and a hash of each group of the fixed-function state, so a bind
+        // after a pipeline of other state sends only the groups that differ (kStateGroups, Deko3DCommandList).
+        const DkShader *stageShaders[3] = {};
+        uint64_t groupHash[9] = {};
     };
 
     struct Deko3DComputePipeline : Deko3DPipeline {
@@ -304,6 +317,9 @@ namespace plume {
         const Deko3DComputePipeline *computePipeline = nullptr;
         uint64_t boundStateHash = 0;
         const DkShader *boundShaders[3] = {};
+        // banjo-nx (2026-10-19): the groups of fixed-function state as last bound (Deko3DGraphicsPipeline::groupHash;
+        // 0: unknown). The dynamic depth bias and stencil reference make theirs unknown.
+        uint64_t boundGroups[9] = {};
         const Deko3DPipelineLayout *graphicsLayout = nullptr, *computeLayout = nullptr;
         DkGpuAddr boundImageSet = 0, boundSamplerSet = 0;
         uint32_t boundImageCount = 0, boundSamplerCount = 0;
@@ -328,6 +344,10 @@ namespace plume {
         DkGpuAddr sharedBase = 0;
         uint32_t sharedSize = 0;
         const uint8_t *sharedCpu = nullptr;
+        // banjo-nx (2026-10-19, render-thread proposal 5, Deko3DSetSharedWords): the CPU's copy of the shared constants
+        // the next draws read, when the renderer pushes them (its uniform buffer holds them only on the GPU's side).
+        const uint8_t *sharedWords = nullptr;
+        uint32_t sharedWordsSize = 0;
         DkViewport viewports[16]{};
         uint32_t viewportCount = 0;
         DkScissor scissors[16]{};
@@ -383,6 +403,18 @@ namespace plume {
         void addMemory(size_t minimum);
         bool transientAlloc(uint32_t size, uint32_t alignment, void **cpu, DkGpuAddr *gpu);
         void flushDescriptorInvalidate();
+        // banjo-nx (2026-10-19, Deko3DOptions::mergeBarriers): the barrier recorded but not yet emitted.
+        DkBarrier pendingBarrierMode = DkBarrier_None;
+        uint32_t pendingBarrierInvalidate = 0;
+        bool pendingBarrier = false;
+        // banjo-nx (2026-10-19, render-thread proposal 13): per-draw counters of this list, added to the totals at end()
+        // (no atomic read-modify-write per draw: the A57 has no LSE).
+        uint64_t statDraws = 0, statWindowDraws = 0;
+        void emitBarrier(DkBarrier mode, uint32_t invalidate);
+        void flushBarriers() {
+            if (pendingBarrier)
+                emitBarrier(pendingBarrierMode, pendingBarrierInvalidate);
+        }
         void invalidateZcullAfterCopy(const Deko3DTexture *dst);
         uint64_t currentEpoch() const;
         void bindGraphicsBuffers();
@@ -578,8 +610,27 @@ namespace plume {
     // banjo-nx: the vertex fetch data of the next draws (storage binding 15 of the graphics stages): size bytes from
     // address, which the shaders index from 0 (shader_common.h, g_DkAddressWindow).
     bool Deko3DBindFetchData(RenderCommandList *commandList, uint64_t address, uint32_t size);
+    // banjo-nx (2026-10-19, render-thread proposals 2 and 5): a uniform buffer the renderer keeps up to date with
+    // pipelined updates (Deko3DPushUniform: dkCmdBufPushConstants; the draws before an update keep the old values), bound
+    // at 'slot' for the graphics stages that read it; the update of 'size' bytes at 'offset' of the 'uboSize'-byte
+    // buffer at 'address'; and the CPU's copy of the shared constants bound textures are read from (bindTextures), for
+    // a shared uniform buffer the renderer pushes (nullptr: read where the bound buffer's memory is, as before).
+    bool Deko3DBindUniform(RenderCommandList *commandList, uint32_t slot, uint64_t address, uint32_t size);
+    bool Deko3DPushUniform(RenderCommandList *commandList, uint64_t address, uint32_t uboSize, uint32_t offset,
+                           const void *data, uint32_t size);
+    bool Deko3DSetSharedWords(RenderCommandList *commandList, const void *cpu, uint32_t size);
     // banjo-nx: the queue lost (dkQueueIsInErrorState).
     bool Deko3DDeviceLost(RenderDevice *device);
+    // banjo-nx (2026-10-19, latency batch 3): a copy of what a command fence's last submit signals, taken on the thread
+    // that submits (the fence itself is re-armed by the next submit of its slot), and whether the GPU has signalled it
+    // (dkFenceWait with no wait): any thread may test its own copy.
+    struct Deko3DFenceCopy {
+        DkFence fence{};
+        bool valid = false;  // a submit's signal to test
+        bool done = false;   // already waited for (nothing pending)
+    };
+    Deko3DFenceCopy Deko3DCopyFence(const RenderCommandFence *fence);
+    bool Deko3DFenceCopyDone(Deko3DFenceCopy &copy);
 
     // banjo-nx (2026-10-18, GPU bandwidth): options read when the device and its textures are made; set them before
     // CreateDeko3DInterface. depthCompression: depth/stencil targets get hardware compression (as colour targets do).
@@ -599,7 +650,17 @@ namespace plume {
         // A thread that waits for a compile lends its priority to the uam thread while it waits.
         int compileCore = -1;
         int compilePriority = 0;
+        // banjo-nx (2026-10-19, GPU): barriers recorded one after another with no work between them are one barrier
+        // (the strongest wait and every invalidation of them), emitted right before the next command that does GPU
+        // work: the same ordering, one drain instead of several.
+        bool mergeBarriers = false;
+        // banjo-nx (2026-10-19, GPU): a transition into a layout that is only written next (colour, depth, present)
+        // waits for the work before it but keeps the texture cache: only a read after a write needs it invalidated,
+        // and that read's own transition does it.
+        bool leanBarriers = false;
     };
     void Deko3DSetOptions(const Deko3DOptions &options);
-    const Deko3DOptions &Deko3DGetOptions();
+    // banjo-nx (2026-10-19, render-thread proposal 13): read inline (barriers() reads it per call).
+    extern Deko3DOptions g_deko3dOptions;
+    inline const Deko3DOptions &Deko3DGetOptions() { return g_deko3dOptions; }
 };

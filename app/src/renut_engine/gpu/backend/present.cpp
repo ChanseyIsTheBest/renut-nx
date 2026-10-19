@@ -355,10 +355,20 @@ void PresentLocked(VideoState &s, const PresentImage *image) {
   cmd->barriers(plume::RenderBarrierStage::GRAPHICS,
                 plume::RenderTextureBarrier(back, plume::RenderTextureLayout::COLOR_WRITE));
   cmd->setFramebuffer(back_fb);
-  // Letterbox bars (and the whole output when there is no guest image).
-  cmd->clearColor(0, plume::RenderColor(0.0f, 0.0f, 0.0f, 1.0f));
+  const bool scan_out = image && image->texture && image->descriptor != kInvalidDescriptor;
+  // Letterbox bars (and the whole output when there is no guest image). banjo-nx (2026-10-19, GPU): not when the
+  // frame covers the whole output, where the scan-out writes every pixel the clear would.
+  bool covers = false;
+  if (scan_out) {
+    const FrameFit fit = FitFrame(out_w, out_h, image->source_width ? image->source_width : image->width,
+                                  image->source_height ? image->source_height : image->height);
+    covers = fit.viewport.x <= 0.0f && fit.viewport.y <= 0.0f && fit.viewport.x + fit.viewport.width >= float(out_w) &&
+             fit.viewport.y + fit.viewport.height >= float(out_h);
+  }
+  if (!covers)
+    cmd->clearColor(0, plume::RenderColor(0.0f, 0.0f, 0.0f, 1.0f));
 
-  if (image && image->texture && image->descriptor != kInvalidDescriptor)
+  if (scan_out)
     RecordScanOut(s, *image, out_w, out_h);
 
   cmd->setViewports(plume::RenderViewport(0.0f, 0.0f, float(out_w), float(out_h)));
@@ -401,6 +411,46 @@ int64_t NowMs() {
 
 } // namespace
 
+// banjo-nx (2026-10-19, latency batch 3): the fences of the last guest presents' frames, as copies (the slot's fence is
+// re-armed two frames later), for the display thread (renut_engine/display_sync.cpp) to test without waiting. Its own
+// mutex: the render thread holds State().mutex for whole frames.
+namespace {
+constexpr uint32_t kPresentFences = 8;
+struct PresentFence {
+  uint64_t index = 0;
+#if defined(PLUME_DEKO3D)
+  plume::Deko3DFenceCopy fence;
+#endif
+};
+std::mutex g_present_fence_mutex;
+PresentFence g_present_fences[kPresentFences];
+std::atomic<uint64_t> g_present_count{0};
+} // namespace
+
+uint64_t Video::PresentCount() {
+  return g_present_count.load(std::memory_order_acquire);
+}
+
+int Video::PresentDone(uint64_t index) {
+#if defined(PLUME_DEKO3D)
+  if (!index || index > g_present_count.load(std::memory_order_acquire))
+    return -1;
+  plume::Deko3DFenceCopy fence;
+  {
+    // Copied out: the test (an ioctl) runs without the mutex the render thread takes at every present.
+    std::lock_guard lock(g_present_fence_mutex);
+    const PresentFence &p = g_present_fences[index % kPresentFences];
+    if (p.index != index)
+      return 1;  // older than the ring: long finished (two frames in flight)
+    fence = p.fence;
+  }
+  return plume::Deko3DFenceCopyDone(fence) ? 1 : 0;
+#else
+  (void)index;
+  return -1;
+#endif
+}
+
 void Video::Present(const PresentImage *image) {
   auto &s = State();
   if (s.shutting_down.load(std::memory_order_acquire))
@@ -410,6 +460,17 @@ void Video::Present(const PresentImage *image) {
     return;
   PresentLocked(s, image);
   s.last_guest_present_ms.store(NowMs(), std::memory_order_release);
+  {
+    // The frame just submitted: the slot before the one SubmitAndAdvance moved to.
+    std::lock_guard fence_lock(g_present_fence_mutex);
+    const uint64_t index = g_present_count.load(std::memory_order_relaxed) + 1;
+    PresentFence &p = g_present_fences[index % kPresentFences];
+    p.index = index;
+#if defined(PLUME_DEKO3D)
+    p.fence = plume::Deko3DCopyFence(s.fences[(s.frame + kFramesInFlight - 1) % kFramesInFlight].get());
+#endif
+    g_present_count.store(index, std::memory_order_release);
+  }
 }
 
 void Video::PresentOverlayOnly() {

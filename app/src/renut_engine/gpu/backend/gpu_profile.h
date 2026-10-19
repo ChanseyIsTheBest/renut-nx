@@ -39,4 +39,9 @@ void EndList(VideoState &s, bool last_in_frame);
 // The slot's frame has finished on the GPU (its fence was waited).
 void Collect(VideoState &s, uint32_t slot);
 
+// banjo-nx (2026-10-19, render-thread proposal 7): whether the frame being recorded is timed (set by BeginList): labels
+// are worked out only for timed frames (with the per-shader breakdown, one frame in four).
+extern bool g_recording_timed;
+inline bool Timed() { return g_recording_timed; }
+
 } // namespace renut::gpu::gpu_profile

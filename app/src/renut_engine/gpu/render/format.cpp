@@ -3,6 +3,9 @@
  */
 #include "renut_engine/gpu/render/format.h"
 
+#include "renut_engine/gpu/backend/backend.h"      // banjo-nx (2026-10-19): IsDeko3D
+#include "renut_engine/gpu/banjo_renut_tuning.h"  // banjo-nx (2026-10-19): Depth24On
+
 #include <cstring>
 
 namespace renut::gpu {
@@ -36,6 +39,15 @@ plume::RenderFormat DepthTargetFormat() {
   // Both Xenos depth formats (24-bit unorm and 20e4 float) fit in 32-bit float
   // depth; plume offers no 24-bit depth format.
   return plume::RenderFormat::D32_FLOAT_S8_UINT;
+}
+
+plume::RenderFormat DepthTargetFormat(u32 d3d_format) {
+  // banjo-nx (2026-10-19, banjo_deko3d_depth24): the Xenos stores D24S8 depth as 24-bit unorm; a host Z24S8 target
+  // holds the same values (a resolve or a fetch gives the unorm as a float, as the Xenos's does) in half the bytes of
+  // D32_FLOAT_S8_UINT. The 20e4 float format (D24FS8) has no host equivalent and stays 32-bit float.
+  if ((d3d_format & 0x3F) == u32(GpuTextureFormat::Fmt24_8) && IsDeko3D() && banjo::renut_gpu::Depth24On())
+    return plume::RenderFormat::D24_UNORM_S8_UINT;
+  return DepthTargetFormat();
 }
 
 plume::RenderBlend ConvertBlendFactor(u32 factor) {

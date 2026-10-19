@@ -129,6 +129,30 @@ Each variant is the base config with a few keys changed, so two logs compare dir
                                    banjo_renut_depth_words_lazy off: the GPU A/B of the depth resolves
   banjo_renut_resolve_skip_off.toml  package 34: repeated resolves of an unchanged source done again,
                                    banjo_renut_resolve_skip off
+  banjo_deko3d_barriers_before.toml  package 35: plume's barriers one per call with every invalidation (as before),
+                                   banjo_deko3d_barrier_merge and banjo_deko3d_barrier_lean off
+  banjo_deko3d_depth_handover_off.toml  package 35: every depth resolve drawn when the game asks (as before; the shadow
+                                   maps copied each frame), banjo_deko3d_depth_handover off
+  banjo_deko3d_depth24_off.toml    package 35: D24S8 depth targets (the shadow maps) as 32-bit float again (as before),
+                                   banjo_deko3d_depth24 off
+  banjo_deko3d_push_constants_off.toml  package 35: the float constants and SharedConstants uploaded whole into the
+                                   ring for every draw again (as before), banjo_deko3d_push_constants off: the render
+                                   thread's A/B of the pushed constants (and the GPU's, which processes the updates)
+  banjo_deko3d_kick_submit_off.toml  package 35: the frame's GPU work submitted only at the present (as before),
+                                   banjo_deko3d_kick_submit off: the input latency A/B of the kick submits
+  banjo_late_input_off.toml        package 35: the controller read at the start of the frame as before,
+                                   banjo_late_input off: the input latency A/B of the late input
+  banjo_deko3d_ring_cleaner_off.toml  package 35: the upload ring cleaned by the render thread at the submit (as
+                                   before), banjo_deko3d_ring_cleaner off
+  banjo_display_sync_on.toml       package 35b: the frame limiter on the display's refresh (banjo_display_sync on;
+                                   off by default: the emulator stalled with it), for a console try
+  banjo_renut_store_cards_off.toml  package 34: cached vertex and index copies hashed whole after every kick again (as
+                                   before; the generated code still marks the cards), banjo_renut_store_cards off: the
+                                   render thread's A/B of the store cards
+  banjo_renut_cpu_memos_off.toml   package 34: the render thread's per-draw lookups (targets, texture bindings, the
+                                   recording threads' buffers) made in full every time, banjo_renut_cpu_memos off
+  banjo_renut_pipeline_memo_off.toml  package 34: the pipeline lookup hashes the draw's state every time,
+                                   banjo_renut_pipeline_memo off
   banjo_deko3d_early_hoist_off.toml  package 34: the fur-type shaders' early alpha test fetches its textures again (as
                                    before; 2 registers fewer), banjo_deko3d_early_hoist off: the GPU A/B of the top shader
   banjo_deko3d_alpha_spec_off.toml  package 33: the alpha test read at run time by every pixel shader (no early depth
@@ -439,6 +463,22 @@ VARIANTS = {
     "banjo_deko3d_early_hoist_off.toml": dict(PROFILING, **RENUT, banjo_deko3d_early_hoist="false"),
     "banjo_renut_words_always.toml": dict(PROFILING, **RENUT, banjo_renut_depth_words_lazy="false"),
     "banjo_renut_resolve_skip_off.toml": dict(PROFILING, **RENUT, banjo_renut_resolve_skip="false"),
+    # Package 35 (GPU, no shader changes): barriers as before; depth resolves always drawn.
+    "banjo_deko3d_barriers_before.toml": dict(PROFILING, **RENUT, banjo_deko3d_barrier_merge="false",
+                                              banjo_deko3d_barrier_lean="false"),
+    "banjo_deko3d_depth_handover_off.toml": dict(PROFILING, **RENUT, banjo_deko3d_depth_handover="false"),
+    "banjo_deko3d_depth24_off.toml": dict(PROFILING, **RENUT, banjo_deko3d_depth24="false"),
+    # Package 35 (render thread, input latency).
+    "banjo_deko3d_push_constants_off.toml": dict(PROFILING, **RENUT, banjo_deko3d_push_constants="false"),
+    "banjo_deko3d_kick_submit_off.toml": dict(PROFILING, **RENUT, banjo_deko3d_kick_submit="false"),
+    "banjo_late_input_off.toml": dict(PROFILING, **RENUT, banjo_late_input="false"),
+    "banjo_deko3d_ring_cleaner_off.toml": dict(PROFILING, **RENUT, banjo_deko3d_ring_cleaner="false"),
+    # Package 35b (latency batch 3).
+    "banjo_display_sync_on.toml": dict(PROFILING, **RENUT, banjo_display_sync="true"),
+    # Package 34 (CPU): the render thread's new work off, one at a time.
+    "banjo_renut_store_cards_off.toml": dict(PROFILING, **RENUT, banjo_renut_store_cards="false"),
+    "banjo_renut_cpu_memos_off.toml": dict(PROFILING, **RENUT, banjo_renut_cpu_memos="false"),
+    "banjo_renut_pipeline_memo_off.toml": dict(PROFILING, **RENUT, banjo_renut_pipeline_memo="false"),
     # Package 28: renut.toml boots Renut's renderer; this is it with banjo-nx's renderer.
     "banjo_renderer_native.toml": dict(PROFILING, banjo_renderer='"native"', disable_msaa="false"),
     # Renut's renderer with banjo-nx's tuning of it off (the four keys; the threads unpinned).

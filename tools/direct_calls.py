@@ -39,7 +39,8 @@ SOURCES = [os.path.join(APP, 'src'), os.path.join(SDK, 'src'), os.path.join(SDK,
 # In C/C++ files only the code counts (from peggle2-nx, 2026-10-15; futari-nx found it first). Comments name addresses
 # for the reader, and a native calls the original through __imp__sub_X: neither defines a hook. Before, 128 of the 592
 # "hooked" names came only from them, and 208 calls to 28 functions stayed weak (not inlinable; 124 to sub_823E4A38
-# because of a comment in cvar_menu.cpp). The .toml and .txt files (localized.txt among them) are still read whole.
+# because of a comment in cvar_menu.cpp). The .txt files (localized.txt among them) are still read whole; the tomls and CMakeLists.txt
+# without their # comments (2026-10-19).
 CODE_SUFFIXES = ('.cpp', '.cc', '.c', '.h', '.hpp', '.inc')
 
 
@@ -64,6 +65,11 @@ def hooked():
                 continue
             if path.endswith(CODE_SUFFIXES):
                 text = CodeOnly(text)
+            elif path.endswith('.toml') or os.path.basename(path) == 'CMakeLists.txt':
+                # banjo-nx (2026-10-19, CPU proposal 7): a # comment names addresses for the reader, not hooks.
+                # renut_config.toml's comment on the scalar/vector alternators kept 99 calls to 24 functions on the
+                # weak alias (not inlinable; 56 of them to sub_82CE9250).
+                text = re.sub(r'(?m)(^|[ \t])#[^\n]*', ' ', text)
             if os.path.basename(path) == 'renut_config.toml':
                 # non_argument_as_local's keep list names functions that keep r11/r12 in ctx, not hooks
                 text = re.sub(r'non_argument_as_local_keep\s*=\s*\[.*?\]', ' ', text, flags=re.S)

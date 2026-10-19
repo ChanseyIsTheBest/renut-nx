@@ -144,6 +144,8 @@ namespace plume {
             // In order to be able to create both depth-stencil and shader resource views,
             // we must use R32G8X24_TYPELESS as the base type and specialize later.
             return DXGI_FORMAT_R32G8X24_TYPELESS;
+        case RenderFormat::D24_UNORM_S8_UINT:  // banjo-nx (2026-10-19): typeless, as above
+            return DXGI_FORMAT_R24G8_TYPELESS;
         case RenderFormat::R32_FLOAT:
             return DXGI_FORMAT_R32_FLOAT;
         case RenderFormat::R32_UINT:

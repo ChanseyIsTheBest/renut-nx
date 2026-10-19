@@ -15,9 +15,14 @@ REXCVAR_DEFINE_STRING(banjo_renderer, "native", "Banjo",
 
 namespace banjo::renut_gpu {
 
-bool Active() {
+// banjo-nx (2026-10-19, CPU proposal 22): Active() is inline (banjo_renut_select.h), a byte load after the first call.
+namespace detail {
+int8_t g_active = 0;
+bool LatchActive() {
   static const bool active = REXCVAR_GET(banjo_renderer) == "renut";
+  g_active = active ? 1 : -1;
   return active;
 }
+}  // namespace detail
 
 }  // namespace banjo::renut_gpu

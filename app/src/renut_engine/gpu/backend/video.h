@@ -115,6 +115,17 @@ struct VideoState {
   uint32_t frame = 0;
   plume::RenderCommandList *command_list = nullptr;
   bool list_open = false;
+  // banjo-nx (2026-10-19, banjo_deko3d_kick_submit): a slot's frame may record into more lists, submitted at the
+  // game's kicks: the list the slot records into now (command_lists[slot] or one of kick_lists[slot]), the kick lists
+  // taken in the slot's frame, the list ended at the last kick and not yet submitted (with the cleaner's ticket for
+  // its memory), and the draws recorded into the open list.
+  static constexpr uint32_t kKickLists = 3;
+  std::unique_ptr<plume::RenderCommandList> kick_lists[kFramesInFlight][kKickLists];
+  plume::RenderCommandList *slot_list[kFramesInFlight] = {};
+  uint32_t kick_lists_used[kFramesInFlight] = {};
+  plume::RenderCommandList *pending_list = nullptr;
+  uint64_t pending_ticket = 0;
+  uint32_t list_draws = 0;
   // Bumped each time a command list begins; bound state cached against an
   // older value has to be set again.
   uint64_t list_generation = 0;
@@ -234,7 +245,13 @@ struct VideoState {
   std::atomic<bool> shutting_down{false};
 };
 
-VideoState &State();
+// The renderer's state (constructed on first use). banjo-nx (2026-10-19): inline, a pointer load after the first call.
+extern VideoState *g_state;
+VideoState &StateSlow();
+inline VideoState &State() {
+  VideoState *s = g_state;
+  return s ? *s : StateSlow();
+}
 
 class Video {
 public:
@@ -256,6 +273,11 @@ public:
   // Guest D3DDevice_Swap: scan out 'image' (nullptr = no guest image this
   // frame) plus the overlay, submit and present.
   static void Present(const PresentImage *image);
+  // banjo-nx (2026-10-19, latency batch 3, renut_engine/display_sync.cpp): the guest presents so far, and whether the
+  // GPU has finished the frame of the 'index'-th (1-based): 1 yes, 0 not yet, -1 unknown (no such present, or a back
+  // end without fence copies). Any thread; PresentDone never waits.
+  static uint64_t PresentCount();
+  static int PresentDone(uint64_t index);
 
   // UI pump: presents just the overlay whenever the guest is not presenting
   // (before it starts, and while it stalls in loads or movie decode), so the
@@ -271,6 +293,11 @@ public:
 
   // Opens the current frame's command list if it is not open yet.
   static bool EnsureCommandListLocked();
+  // banjo-nx (2026-10-19, banjo_deko3d_kick_submit / banjo_deko3d_ring_cleaner): the game kicked its ring and its
+  // fills are done (QueueKickFlush): the upload ring written so far goes to the cleaner, the list ended at the last
+  // kick to the GPU, and the open list ends here when it holds enough draws. And a draw recorded into the open list.
+  static void KickLocked();
+  static void NoteDrawLocked();
   static plume::RenderCommandList *CommandListLocked();
   static UploadRing &UploadsLocked();
 

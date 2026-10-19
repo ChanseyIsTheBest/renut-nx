@@ -9,6 +9,9 @@
 #include <mutex>
 #include <thread>
 #include <utility>
+#include <fmt/format.h>
+#include <string>
+#include <rex/frame_latency.h>
 #include <vector>
 
 #include "renut_engine/perf/frame_stats.h"
@@ -111,10 +114,17 @@ void Run() {
         break;
       batch.swap(g_queue);
     }
+    // banjo-nx (2026-10-19, render-thread proposal 19): one clock read per item (the end of one is the start of the
+    // next). Its other half, one State().mutex hold across consecutive locked items, hung the emulator run at the
+    // first loading screen (a game thread's hook waits on the lock while the render thread's next item waits on it):
+    // each item takes the lock on its own, as before.
+    Clock::time_point start = Clock::now();
     for (Item &item : batch) {
-      g_item_start = Clock::now();
+      g_item_start = start;
       Execute(item);
-      g_busy += Clock::now() - g_item_start;
+      const Clock::time_point end = Clock::now();
+      g_busy += end - start;
+      start = end;
     }
     {
       std::lock_guard lock(g_mutex);
@@ -132,6 +142,7 @@ void Run() {
 
 void Start() {
   std::call_once(g_start_once, [] {
+    InstallLateInput();  // banjo-nx (2026-10-19, banjo_late_input): the delay function (it reads the key per frame)
     std::lock_guard lock(g_mutex);
     g_running = true;
     // Never joined or destroyed: the renderer's objects are left at exit too
@@ -230,6 +241,59 @@ bool WaitForFenceProgress(std::chrono::milliseconds timeout) {
   return g_running && !g_stopping;
 }
 
+// banjo-nx (2026-10-19, input latency, banjo_late_input): the game reads its controller at the start of a frame, and
+// when the render thread is the slower of the two its frame then waits: the Swap below waits for the frame before to be
+// done. The slack of a frame is that wait plus the delay its read already had: how much later the read could have been
+// without the frame reaching the render thread any later. The next frame's first read is delayed by the least slack of
+// the last kSlackFrames frames less kLateInputMarginUs (rex::latency::SetFrameReadDelayFunction): a frame whose game
+// work runs long eats into the margin, and a run of them shrinks the delay; with the game thread or the frame cap the
+// limit there is no wait, and the delay goes to 0.
+namespace {
+constexpr uint32_t kSlackFrames = 16;
+constexpr uint64_t kLateInputMarginUs = 2000;
+// banjo-nx (2026-10-19, latency batch 3): the most the read is delayed: 80 % of the game's frame interval (averaged over
+// the frames at QueueFrame), at most kLateInputCeilingUs. A fixed 30 ms held it back where the GPU is the limit: the
+// console's 18 fps scenes (package 35) delayed 30.0 ms with more slack than that.
+constexpr uint64_t kLateInputCeilingUs = 60000;
+std::atomic<uint64_t> g_frame_interval_us{0};
+uint64_t g_last_queue_us = 0;
+uint64_t g_slack_us[kSlackFrames] = {};
+uint32_t g_slack_next = 0;
+uint32_t g_slack_count = 0;
+std::atomic<uint32_t> g_applied_delay_us{0};
+std::atomic<uint64_t> g_delay_total_us{0}, g_delay_frames{0};
+
+uint32_t LateInputDelay() {
+  if (!banjo::renut_gpu::LateInputOn() || g_slack_count < kSlackFrames) {
+    g_applied_delay_us.store(0, std::memory_order_relaxed);
+    return 0;
+  }
+  uint64_t least = UINT64_MAX;
+  for (uint64_t s : g_slack_us)
+    least = std::min(least, s);
+  const uint64_t interval = g_frame_interval_us.load(std::memory_order_relaxed);
+  const uint64_t ceiling = std::min(kLateInputCeilingUs, interval * 4 / 5);
+  const uint64_t delay = least > kLateInputMarginUs ? std::min(least - kLateInputMarginUs, ceiling) : 0;
+  g_applied_delay_us.store(uint32_t(delay), std::memory_order_relaxed);
+  g_delay_total_us.fetch_add(delay, std::memory_order_relaxed);
+  g_delay_frames.fetch_add(1, std::memory_order_relaxed);
+  return uint32_t(delay);
+}
+}  // namespace
+
+void InstallLateInput() {
+  rex::latency::SetFrameReadDelayFunction(&LateInputDelay);
+}
+
+std::string LateInputReport() {
+  const uint64_t frames = g_delay_frames.exchange(0, std::memory_order_relaxed);
+  const uint64_t total = g_delay_total_us.exchange(0, std::memory_order_relaxed);
+  return frames ? fmt::format("late input: the first controller read of a frame delayed {:.1f} ms on average ({} "
+                              "frames)",
+                              double(total) / 1000.0 / double(frames), frames)
+                : std::string("late input: no delay");
+}
+
 uint64_t QueueFrame(std::function<void()> work) {
   {
     std::lock_guard lock(g_mutex);
@@ -258,8 +322,26 @@ uint64_t QueueFrame(std::function<void()> work) {
   });
   const uint64_t done = g_frames_done;
   lock.unlock();
-  frame_stats::OnGameThreadWait(
-      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waiting).count());
+  const auto waited = std::chrono::steady_clock::now() - waiting;
+  frame_stats::OnGameThreadWait(std::chrono::duration<double, std::milli>(waited).count());
+  // banjo-nx (2026-10-19, banjo_late_input): this frame's slack (the game thread only: one Swap at a time).
+  {
+    // The game's frame interval (the game thread only), averaged over about 16 frames.
+    const uint64_t at = uint64_t(
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+    if (g_last_queue_us && at > g_last_queue_us) {
+      const uint64_t gap = std::min<uint64_t>(at - g_last_queue_us, 1'000'000);
+      const uint64_t avg = g_frame_interval_us.load(std::memory_order_relaxed);
+      g_frame_interval_us.store(avg ? avg + (int64_t(gap) - int64_t(avg)) / 16 : gap, std::memory_order_relaxed);
+    }
+    g_last_queue_us = at;
+  }
+  g_slack_us[g_slack_next] =
+      uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(waited).count()) +
+      g_applied_delay_us.exchange(0, std::memory_order_relaxed);
+  g_slack_next = (g_slack_next + 1) % kSlackFrames;
+  g_slack_count = std::min(g_slack_count + 1, kSlackFrames);
   return done;
 }
 

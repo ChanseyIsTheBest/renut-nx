@@ -76,15 +76,14 @@ namespace plume {
         return h;
     }
 
-    static Deko3DStats g_stats;
+    Deko3DStats g_deko3dStats;
     // PLUME_DEKO3D_GUARDS: bytes after each block's storage, and their value.
     static constexpr uint32_t GuardBytes = 64u << 10;
     static constexpr uint8_t GuardByte = 0xA5;
-    Deko3DStats &GetDeko3DStats() { return g_stats; }
 
-    static Deko3DOptions g_options;
-    void Deko3DSetOptions(const Deko3DOptions &options) { g_options = options; }
-    const Deko3DOptions &Deko3DGetOptions() { return g_options; }
+
+    Deko3DOptions g_deko3dOptions;
+    void Deko3DSetOptions(const Deko3DOptions &options) { g_deko3dOptions = options; }
 
     static Deko3DShaderCacheLookup g_cacheLookup;
     static Deko3DShaderCacheStore g_cacheStore;
@@ -131,6 +130,7 @@ namespace plume {
         case RenderFormat::R32_FLOAT: return DkImageFormat_R32_Float;
         case RenderFormat::D32_FLOAT: return DkImageFormat_ZF32;
         case RenderFormat::D32_FLOAT_S8_UINT: return DkImageFormat_ZF32_X24S8;
+        case RenderFormat::D24_UNORM_S8_UINT: return DkImageFormat_Z24S8;  // banjo-nx (2026-10-19)
         case RenderFormat::R32_UINT: return DkImageFormat_R32_Uint;
         case RenderFormat::R32_SINT: return DkImageFormat_R32_Sint;
         case RenderFormat::R8G8_TYPELESS:
@@ -206,6 +206,7 @@ namespace plume {
         case RenderFormat::R16_UNORM:
         case RenderFormat::D16_UNORM: return DkImageFormat_Z16;
         case RenderFormat::D32_FLOAT_S8_UINT: return DkImageFormat_ZF32_X24S8;
+        case RenderFormat::D24_UNORM_S8_UINT: return DkImageFormat_Z24S8;
         default: return toDkFormat(format);
         }
     }
@@ -428,7 +429,7 @@ namespace plume {
             return;
         gpu = dkMemBlockGetGpuAddr(block);
         cpu = static_cast<uint8_t *>(dkMemBlockGetCpuAddr(block));
-        g_stats.bufferBytes += size;
+        g_deko3dStats.bufferBytes += size;
         {
             std::lock_guard<std::mutex> lock(device->bufferMutex);
             device->bufferRanges[gpu] = {uint32_t(size), cpu};
@@ -441,7 +442,7 @@ namespace plume {
                 std::lock_guard<std::mutex> lock(device->bufferMutex);
                 device->bufferRanges.erase(gpu);
             }
-            g_stats.bufferBytes -= dkMemBlockGetSize(block);
+            g_deko3dStats.bufferBytes -= dkMemBlockGetSize(block);
             device->retire({}, block);
         }
     }
@@ -456,8 +457,11 @@ namespace plume {
             begin = writtenRange->begin;
             end = writtenRange->end;
         }
+        // banjo-nx (2026-10-19, CPU proposal 14): a clean (dc cvac) of the written lines, not deko3d's clean and
+        // invalidate (dc civac): only upload buffers are CPU-cached (written by the CPU, read by the GPU, never read
+        // back), so the lines may stay valid for the ring's next pass.
         if (end > begin)
-            dkMemBlockFlushCpuCache(block, uint32_t(begin), uint32_t(end - begin));
+            armDCacheClean(static_cast<uint8_t *>(cpu) + begin, size_t(end - begin));
     }
 
     std::unique_ptr<RenderBufferFormattedView> Deko3DBuffer::createBufferFormattedView(RenderFormat format) {
@@ -527,7 +531,7 @@ namespace plume {
             flags |= DkImageFlags_UsageRender;
             // Colour targets compressed; depth too with Deko3DOptions::depthCompression (SwitchWakerHD's defaults left it
             // off as not verified).
-            if (!depth || g_options.depthCompression)
+            if (!depth || g_deko3dOptions.depthCompression)
                 flags |= DkImageFlags_HwCompression;
         }
         if (desc.flags & (RenderTextureFlag::UNORDERED_ACCESS | RenderTextureFlag::STORAGE))
@@ -548,13 +552,13 @@ namespace plume {
             return;
         }
         dkImageInitialize(&image, &layout, alloc.block, alloc.offset);
-        g_stats.imageBytes += alloc.size;
+        g_deko3dStats.imageBytes += alloc.size;
         valid = true;
     }
 
     Deko3DTexture::~Deko3DTexture() {
         if (valid && ownsMemory) {
-            g_stats.imageBytes -= alloc.size;
+            g_deko3dStats.imageBytes -= alloc.size;
             device->retire(alloc, nullptr);
         }
     }
@@ -725,7 +729,7 @@ namespace plume {
             dkImageDescriptorInitialize(&local, &view, loadStore, false);
             memcpy(d, &local, sizeof(local));
         }
-        g_stats.descriptorWrites++;
+        g_deko3dStats.descriptorWrites++;
         device->descriptorEpoch.fetch_add(1, std::memory_order_release);
     }
 
@@ -737,7 +741,7 @@ namespace plume {
             memset(d, 0, sizeof(*d));
         else
             memcpy(d, &static_cast<const Deko3DSampler *>(sampler)->descriptor, sizeof(*d));
-        g_stats.descriptorWrites++;
+        g_deko3dStats.descriptorWrites++;
         device->descriptorEpoch.fetch_add(1, std::memory_order_release);
     }
 
@@ -805,7 +809,7 @@ namespace plume {
         // Zcull off unless Deko3DOptions::zcull (SwitchWakerHD: with it deko3d dropped depth-biased decals in whole 4x8
         // tiles).
         qm.flags = DkQueueFlags_Graphics | DkQueueFlags_Compute | DkQueueFlags_MediumPrio |
-                   (g_options.zcull ? 0u : uint32_t(DkQueueFlags_DisableZcull));
+                   (g_deko3dOptions.zcull ? 0u : uint32_t(DkQueueFlags_DisableZcull));
         qm.commandMemorySize = 1u << 20;
         qm.flushThreshold = qm.commandMemorySize / 8;
         // Scratch (local) memory per warp: Renut's biggest vertex shaders need 32 KB (uam's DKSH headers; 81 of the 4,881
@@ -857,8 +861,8 @@ namespace plume {
         pthread_attr_destroy(&attr);
         pthread_detach(thread);
         logf("device ready: queue with zcull %s, depth targets %scompressed, vertex shader outputs %s, 1 MB of queue "
-             "command memory; uam compile thread started", g_options.zcull ? "on" : "off",
-             g_options.depthCompression ? "" : "not ", g_options.vsOutputs ? "pruned per pipeline" : "all written");
+             "command memory; uam compile thread started", g_deko3dOptions.zcull ? "on" : "off",
+             g_deko3dOptions.depthCompression ? "" : "not ", g_deko3dOptions.vsOutputs ? "pruned per pipeline" : "all written");
         return true;
     }
 
@@ -903,7 +907,9 @@ namespace plume {
         static std::atomic<uint64_t> total{0};
         static std::atomic<uint32_t> logged{0};
         const uint64_t before = total.fetch_add(m.size);
-        if ((size >= (8u << 20) || (before >> 26) != ((before + m.size) >> 26)) && logged.fetch_add(1) < 96) {
+        // banjo-nx (2026-10-19, render-thread proposal 18): 24 lines, not 96 (each walks the heap and writes the SD card,
+        // on the thread making the block: the render thread for the upload ring's chunks).
+        if ((size >= (8u << 20) || (before >> 26) != ((before + m.size) >> 26)) && logged.fetch_add(1) < 24) {
             uint64_t heapFree = 0, processFree = 0;
             memoryFigures(heapFree, processFree);
             logf("memory block: %s, %u KiB (deko3d blocks %" PRIu64 " MB in all; heap %" PRIu64 " MB free, process %" PRIu64 " MB unused)",
@@ -1210,19 +1216,19 @@ namespace plume {
         memoryFigures(heapFree, processFree);
         logf("uam thread: starting (heap %" PRIu64 " MB free, process %" PRIu64 " MB unused)", heapFree >> 20, processFree >> 20);
         const uint64_t i0 = armTicksToNs(armGetSystemTick());
-        uam::setBanjoFlags(g_options.uamFlags);  // banjo-nx (2026-10-18)
+        uam::setBanjoFlags(g_deko3dOptions.uamFlags);  // banjo-nx (2026-10-18)
         // banjo-nx (2026-10-18): off the render thread's core and below the game's threads (package 33's first run
         // compiled 231 variants during play: a core busy for minutes, every thread slower).
         {
             std::lock_guard<std::mutex> lock(compileMutex);  // compile() reads it under the lock
             compileThreadHandle = threadGetCurHandle();
         }
-        if (g_options.compileCore >= 0)
-            svcSetThreadCoreMask(CUR_THREAD_HANDLE, g_options.compileCore, 1u << g_options.compileCore);
-        if (g_options.compilePriority > 0)
-            svcSetThreadPriority(CUR_THREAD_HANDLE, u32(g_options.compilePriority));
-        logf("uam thread: core %d, priority 0x%X (a waiting thread lends its own)", g_options.compileCore,
-             g_options.compilePriority);
+        if (g_deko3dOptions.compileCore >= 0)
+            svcSetThreadCoreMask(CUR_THREAD_HANDLE, g_deko3dOptions.compileCore, 1u << g_deko3dOptions.compileCore);
+        if (g_deko3dOptions.compilePriority > 0)
+            svcSetThreadPriority(CUR_THREAD_HANDLE, u32(g_deko3dOptions.compilePriority));
+        logf("uam thread: core %d, priority 0x%X (a waiting thread lends its own)", g_deko3dOptions.compileCore,
+             g_deko3dOptions.compilePriority);
         uam::init(true);
         // Self-test (SwitchWakerHD's): a small shader now, which also builds the resident frontend's tables before the
         // game's first variant.
@@ -1263,8 +1269,8 @@ namespace plume {
                 }
             }
             uam::Result r = uam::compile(stages[std::min<uint32_t>(job->stage, 5)], job->source->c_str());
-            g_stats.shaderCompileNs += armTicksToNs(armGetSystemTick()) - t0;
-            g_stats.shaderCompiles++;
+            g_deko3dStats.shaderCompileNs += armTicksToNs(armGetSystemTick()) - t0;
+            g_deko3dStats.shaderCompiles++;
             {
                 std::lock_guard<std::mutex> lock(compileMutex);
                 job->ok = r.ok;
@@ -1289,8 +1295,8 @@ namespace plume {
         // banjo-nx (2026-10-18): the waiting thread's priority, lent to the uam thread while it waits (the render
         // thread must not wait behind the game's threads for a low-priority compile).
         s32 waiterPriority = 0;
-        bool lend = g_options.compilePriority > 0 && R_SUCCEEDED(svcGetThreadPriority(&waiterPriority, CUR_THREAD_HANDLE)) &&
-                    waiterPriority < g_options.compilePriority;
+        bool lend = g_deko3dOptions.compilePriority > 0 && R_SUCCEEDED(svcGetThreadPriority(&waiterPriority, CUR_THREAD_HANDLE)) &&
+                    waiterPriority < g_deko3dOptions.compilePriority;
         {
             std::lock_guard<std::mutex> lock(compileMutex);
             compileQueue.push_back(&job);
@@ -1312,7 +1318,7 @@ namespace plume {
 
     // compileMutex held: the uam thread at its own priority, or the highest a waiting thread has.
     void Deko3DDevice::applyCompilePriority() {
-        s32 priority = g_options.compilePriority;
+        s32 priority = g_deko3dOptions.compilePriority;
         for (s32 p : compileWaiters)
             priority = std::min(priority, p);
         if (priority != compileAppliedPriority && compileThreadHandle != 0 &&
@@ -1361,7 +1367,7 @@ namespace plume {
             return false;
         }
         cb.second = at + size;
-        g_stats.codeBytes += size;
+        g_deko3dStats.codeBytes += size;
         // Command lists invalidate the GPU's shader cache before their next draw (deko3d does it only at a queue
         // flush).
         codeEpoch.fetch_add(1, std::memory_order_release);
@@ -1419,13 +1425,13 @@ namespace plume {
                 have = true;
             }
             if (!have && g_cacheLookup && g_cacheLookup(key, dksh)) {
-                g_stats.shaderCacheHits++;
+                g_deko3dStats.shaderCacheHits++;
                 have = true;
             }
             if (!have) {
                 std::string log;
                 if (!compile(shader->stage, source, dksh, log)) {
-                    g_stats.shaderCompileFailures++;
+                    g_deko3dStats.shaderCompileFailures++;
                     static std::atomic<uint32_t> logged{0};
                     if (logged.fetch_add(1) < 32)
                         logf("uam failed for %s (variant %016" PRIx64 "): %s", shader->name.empty() ? "a shader" : shader->name.c_str(), key, log.c_str());
@@ -1577,7 +1583,7 @@ namespace plume {
         // shader reads of the ones it writes, when that is not all of them (tools/deko3d_variant_cache.py's stage_spec
         // gives the DKSH cache the same).
         std::vector<RenderSpecConstant> vsSpec;
-        if (g_options.vsOutputs && stages[0] && !stages[1] &&
+        if (g_deko3dOptions.vsOutputs && stages[0] && !stages[1] &&
             std::find(stages[0]->specIds.begin(), stages[0]->specIds.end(), 905u) != stages[0]->specIds.end()) {
             const uint32_t outs = stages[0]->usage.outputMask;
             const uint32_t mask = (stages[2] ? stages[2]->usage.inputMask : 0u) & outs;
@@ -1589,7 +1595,7 @@ namespace plume {
         // banjo-nx (2026-10-18): the pixel shader's constant 906, its inputs the vertex shader writes as zero (not with a
         // geometry shader, which writes them).
         std::vector<RenderSpecConstant> psSpec;
-        if (g_options.vsOutputs && stages[0] && stages[2] && !stages[1] &&
+        if (g_deko3dOptions.vsOutputs && stages[0] && stages[2] && !stages[1] &&
             std::find(stages[2]->specIds.begin(), stages[2]->specIds.end(), 906u) != stages[2]->specIds.end()) {
             const uint32_t zero = stages[0]->usage.zeroOutputMask & stages[2]->usage.inputMask;
             if (zero) {
@@ -1610,6 +1616,7 @@ namespace plume {
                 continue;
             }
             p->shaders[p->shaderCount++] = s;
+            p->stageShaders[i] = s;  // banjo-nx (2026-10-19)
             p->stageMask |= 1u << dkStages[i];
             p->uboMask[i] = stages[i]->usage.uboMask;
             p->ssboMask[i] = stages[i]->usage.ssboMask;
@@ -1737,6 +1744,28 @@ namespace plume {
         h = mixHash(h, p->vtxBuffers, sizeof(DkVtxBufferState) * p->vtxBufferCount);
         h = mixHash(h, &p->vtxBufferCount, sizeof(p->vtxBufferCount));
         p->stateHash = h | 1;
+        // banjo-nx (2026-10-19, CPU proposal 13): each group of setPipeline's state binds, hashed apart (never 0).
+        auto group = [](std::initializer_list<std::pair<const void *, size_t>> parts) {
+            uint64_t g = 0xcbf29ce484222325ull;
+            for (const auto &[data, size] : parts)
+                g = mixHash(g, data, size);
+            return g | 1;
+        };
+        p->groupHash[0] = group({{&p->rasterizer, sizeof(p->rasterizer)}});
+        p->groupHash[1] = group({{&p->multisample, sizeof(p->multisample)}});
+        p->groupHash[2] = group({{&p->color, sizeof(p->color)}});
+        p->groupHash[3] = group({{&p->colorWrite, sizeof(p->colorWrite)}});
+        p->groupHash[4] = group({{&p->blendCount, sizeof(p->blendCount)},
+                                 {p->blend, sizeof(DkBlendState) * p->blendCount},
+                                 {p->blendWords, sizeof(p->blendWords[0]) * p->blendCount}});
+        p->groupHash[5] = group({{&p->depthStencil, sizeof(p->depthStencil)}});
+        p->groupHash[6] = group({{&p->stencilReadMask, 1}, {&p->stencilWriteMask, 1}, {&p->stencilReference, 1}});
+        p->groupHash[7] = group({{&p->depthBias, sizeof(float)}, {&p->depthBiasClamp, sizeof(float)},
+                                 {&p->slopeScaledDepthBias, sizeof(float)}});
+        p->groupHash[8] = group({{&p->attribCount, sizeof(p->attribCount)},
+                                 {p->attribs, sizeof(DkVtxAttribState) * p->attribCount},
+                                 {&p->vtxBufferCount, sizeof(p->vtxBufferCount)},
+                                 {p->vtxBuffers, sizeof(DkVtxBufferState) * p->vtxBufferCount}});
         return p;
     }
 
@@ -1841,6 +1870,25 @@ namespace plume {
 
     std::unique_ptr<RenderInterface> CreateDeko3DInterface() {
         return std::make_unique<Deko3DInterface>();
+    }
+
+    Deko3DFenceCopy Deko3DCopyFence(const RenderCommandFence *fence) {
+        Deko3DFenceCopy copy;
+        if (const auto *f = static_cast<const Deko3DCommandFence *>(fence)) {
+            if (f->pending) {
+                copy.fence = f->fence;
+                copy.valid = true;
+            } else {
+                copy.done = true;
+            }
+        }
+        return copy;
+    }
+
+    bool Deko3DFenceCopyDone(Deko3DFenceCopy &copy) {
+        if (!copy.done && copy.valid && dkFenceWait(&copy.fence, 0) == DkResult_Success)
+            copy.done = true;  // signalled once is signalled for good: no second wait
+        return copy.done;
     }
 
     bool Deko3DDeviceLost(RenderDevice *device) {

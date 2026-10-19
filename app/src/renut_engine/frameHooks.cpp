@@ -6,6 +6,7 @@
 #include <rex/cvar.h>
 #include "globals.h"
 #include "profiler/profiler.h"
+#include "renut_engine/display_sync.h"  // banjo-nx (2026-10-19, latency batch 3)
 
 #include <chrono>
 #include <cstdlib>
@@ -124,6 +125,8 @@ void renutFrameLimit()
 {
 	using clock = std::chrono::steady_clock;
 	static clock::time_point next = clock::now();
+	// banjo-nx (2026-10-19, latency batch 3): the display's refresh, followed from the first frame on (the Switch).
+	banjo::display_sync::Start();
 
 	const int fps = renutFrameCapFps();
 	if (fps <= 0) {
@@ -142,9 +145,38 @@ void renutFrameLimit()
 
 	const auto frameDur = std::chrono::duration_cast<clock::duration>(
 		std::chrono::duration<double>(1.0 / fps));
-	next += frameDur;
-
 	clock::time_point now = clock::now();
+
+	// banjo-nx (2026-10-19, latency batch 3, banjo_display_sync): with the display's refresh known, the release is a
+	// refresh plus the measured phase (renut_engine/display_sync.h); a late frame goes at once, as below.
+	static uint64_t previousRelease = 0;
+	{
+		const auto toNs = [](clock::time_point t) {
+			return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count());
+		};
+		bool anchored = false;
+		const uint64_t release = banjo::display_sync::NextRelease(
+			toNs(now), previousRelease,
+			uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(frameDur).count()), &anchored);
+		if (release) {
+			previousRelease = release;
+			next = clock::time_point(std::chrono::duration_cast<clock::duration>(std::chrono::nanoseconds(release)));
+			if (next > now) {
+				constexpr auto kTail = std::chrono::microseconds(400);
+				for (;;) {
+					now = clock::now();
+					if (now >= next) break;
+					if (next - now > kTail) std::this_thread::sleep_for(next - now - kTail);
+					else std::this_thread::yield();
+				}
+			}
+			banjo::display_sync::NoteRelease(release, anchored);
+			return;
+		}
+		previousRelease = 0;
+	}
+
+	next += frameDur;
 	if (next <= now) {
 		// A slow frame (or the cap was just raised) put us behind: resync to now
 		// rather than bursting to "catch up".

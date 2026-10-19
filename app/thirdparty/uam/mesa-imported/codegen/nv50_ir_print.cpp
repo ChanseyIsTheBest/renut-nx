@@ -1,3 +1,4 @@
+#include <cstdio>
 /*
  * Copyright 2011 Christoph Bumiller
  *
@@ -24,6 +25,11 @@
 #include "codegen/nv50_ir_target.h"
 
 #include <inttypes.h>
+
+// banjo-nx (2026-10-19): the printer writes to stderr (INFO is compiled out of release builds, and Mesa's logger goes to
+// the debugger on Windows); it
+// runs only with dbgFlags set (UAM_IR_DEBUG, tooling).
+#define PRINT_IR(...) fprintf(stderr, __VA_ARGS__)
 
 namespace nv50_ir {
 
@@ -735,7 +741,7 @@ void Instruction::print() const
 
    buf[MIN2(pos, BUFSZ - 1)] = 0;
 
-   INFO("%s (%u)\n", buf, encSize);
+   PRINT_IR("%s (%u)\n", buf, encSize);
 }
 
 class PrintPass : public Pass
@@ -757,26 +763,26 @@ PrintPass::visit(Function *fn)
 {
    char str[16];
 
-   INFO("\n%s:%i (", fn->getName(), fn->getLabel());
+   PRINT_IR("\n%s:%i (", fn->getName(), fn->getLabel());
 
    if (!fn->outs.empty())
-      INFO("out");
+      PRINT_IR("out");
    for (std::deque<ValueRef>::iterator it = fn->outs.begin();
         it != fn->outs.end();
         ++it) {
       it->get()->print(str, sizeof(str), typeOfSize(it->get()->reg.size));
-      INFO(" %s", str);
+      PRINT_IR(" %s", str);
    }
 
    if (!fn->ins.empty())
-      INFO("%s%sin", colour[TXT_DEFAULT], fn->outs.empty() ? "" : ", ");
+      PRINT_IR("%s%sin", colour[TXT_DEFAULT], fn->outs.empty() ? "" : ", ");
    for (std::deque<ValueDef>::iterator it = fn->ins.begin();
         it != fn->ins.end();
         ++it) {
       it->get()->print(str, sizeof(str), typeOfSize(it->get()->reg.size));
-      INFO(" %s", str);
+      PRINT_IR(" %s", str);
    }
-   INFO("%s)\n", colour[TXT_DEFAULT]);
+   PRINT_IR("%s)\n", colour[TXT_DEFAULT]);
 
    return true;
 }
@@ -785,25 +791,25 @@ bool
 PrintPass::visit(BasicBlock *bb)
 {
 #if 0
-   INFO("---\n");
+   PRINT_IR("---\n");
    for (Graph::EdgeIterator ei = bb->cfg.incident(); !ei.end(); ei.next())
-      INFO(" <- BB:%i (%s)\n",
+      PRINT_IR(" <- BB:%i (%s)\n",
            BasicBlock::get(ei.getNode())->getId(),
            ei.getEdge()->typeStr());
 #endif
-   INFO("BB:%i (%u instructions) - ", bb->getId(), bb->getInsnCount());
+   PRINT_IR("BB:%i (%u instructions) - ", bb->getId(), bb->getInsnCount());
 
    if (bb->idom())
-      INFO("idom = BB:%i, ", bb->idom()->getId());
+      PRINT_IR("idom = BB:%i, ", bb->idom()->getId());
 
-   INFO("df = { ");
+   PRINT_IR("df = { ");
    for (DLList::Iterator df = bb->getDF().iterator(); !df.end(); df.next())
-      INFO("BB:%i ", BasicBlock::get(df)->getId());
+      PRINT_IR("BB:%i ", BasicBlock::get(df)->getId());
 
-   INFO("}\n");
+   PRINT_IR("}\n");
 
    for (Graph::EdgeIterator ei = bb->cfg.outgoing(); !ei.end(); ei.next())
-      INFO(" -> BB:%i (%s)\n",
+      PRINT_IR(" -> BB:%i (%s)\n",
            BasicBlock::get(ei.getNode())->getId(),
            ei.getEdge()->typeStr());
 
@@ -814,9 +820,9 @@ bool
 PrintPass::visit(Instruction *insn)
 {
    if (omit_serial)
-      INFO("     ");
+      PRINT_IR("     ");
    else
-      INFO("%3i: ", serial);
+      PRINT_IR("%3i: ", serial);
    serial++;
    insn->print();
    return true;
@@ -840,12 +846,12 @@ Program::print()
 void
 Function::printLiveIntervals() const
 {
-   INFO("printing live intervals ...\n");
+   PRINT_IR("printing live intervals ...\n");
 
    for (ArrayList::Iterator it = allLValues.iterator(); !it.end(); it.next()) {
       const Value *lval = Value::get(it)->asLValue();
       if (lval && !lval->livei.isEmpty()) {
-         INFO("livei(%%%i): ", lval->id);
+         PRINT_IR("livei(%%%i): ", lval->id);
          lval->livei.print();
       }
    }

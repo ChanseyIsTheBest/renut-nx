@@ -1275,7 +1275,8 @@ nv50_ir_generate_code(struct nv50_ir_prog_info *info)
    prog->optimizeSSA(info->optLevel);
    prog->getTarget()->runLegalizePass(prog, nv50_ir::CG_STAGE_SSA);
 
-   if (prog->dbgFlags & NV50_IR_DEBUG_BASIC)
+   // banjo-nx (2026-10-19): bit 0 tested directly (NV50_IR_DEBUG_BASIC is 0 without DEBUG): UAM_IR_DEBUG tooling.
+   if (prog->dbgFlags & 1)
       prog->print();
 
    if (!prog->registerAllocation()) {

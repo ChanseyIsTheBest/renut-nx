@@ -284,6 +284,59 @@ uint64_t ContentHash(const TextureFetch &fetch, HostTexture &t) {
   return hash;
 }
 
+// banjo-nx (2026-10-19, render-thread proposal 1, banjo_renut_store_cards): whether no page of the texture's guest
+// extent (both ranges; their cards are read and cleared) was written since interval 'proven'.
+bool ExtentClean(HostTexture &t, uint64_t proven) {
+  bool clean = proven != UINT64_MAX;
+  for (u32 i = 0; i < 2; ++i) {
+    if (t.sample_pages[i] && t.sample_sizes[i])
+      clean &= GuestRangeCardsClean(GuestPhysicalPtr<const u8>(t.sample_pages[i] << 12), t.sample_sizes[i], proven);
+  }
+  return clean;
+}
+
+// The content check's hash (SampleHash of a tiled texture, ContentHash of a linear one), or the last one taken when
+// the cards prove the bytes unchanged since: then the bytes are those hashed, and so would the hash be.
+uint64_t CheckedHash(const TextureFetch &fetch, HostTexture &t, bool sampled) {
+  KnowGuestExtent(fetch, t);
+  const bool cards = banjo::renut_gpu::StoreCardsOn();
+  if (cards && ExtentClean(t, t.hash_interval)) {
+    t.hash_interval = CardsInterval();
+    // The bytes the hash would have read: all of a linear texture; SampleHash's ends and spans of a tiled one.
+    uint64_t bytes = 0;
+    for (u32 i = 0; i < 2; ++i) {
+      const uint32_t size = t.sample_pages[i] ? t.sample_sizes[i] : 0;
+      if (!sampled) {
+        bytes += size;
+      } else if (size) {
+        const uint32_t n = std::min<uint32_t>(size, kSampleEndBytes);
+        bytes += 2 * n + (size > 2 * n + kSampleProbeBytes ? kSampleProbes * kSampleProbeBytes : 0);
+      }
+    }
+    if (banjo::renut_gpu::StoreCardsVerifyOn()) {
+      const uint64_t hash = sampled ? SampleHash(fetch, t) : ContentHash(fetch, t);
+      if (hash != t.last_hash) {
+        static uint32_t logged = 0;
+        if (logged++ < 32)
+          RGPU_WARN("[cards] texture {:08X} (physical {:08X}, {} bytes) changed under clean cards: a writer of guest "
+                    "memory that marks none (banjo_renut_store_cards_verify)",
+                    t.guest_va, t.sample_pages[0] << 12, bytes);
+        banjo::renut_gpu::CountTextureCards(bytes, 3);
+        t.last_hash = hash;
+        return hash;
+      }
+    }
+    banjo::renut_gpu::CountTextureCards(bytes, 0);
+    return t.last_hash;
+  }
+  const uint64_t hash = sampled ? SampleHash(fetch, t) : ContentHash(fetch, t);
+  t.last_hash = hash;
+  t.hash_interval = cards ? CardsInterval() : UINT64_MAX;
+  if (cards)
+    banjo::renut_gpu::CountTextureCards(0, 1);
+  return hash;
+}
+
 struct LevelSource {
   const uint8_t *base = nullptr;  // start of the level's storage (or its packed tail)
   uint32_t pitch_blocks = 0;      // blocks per row of the storage
@@ -351,6 +404,11 @@ std::vector<PendingFill> g_pending_fills;
 // Records the copies of every level into 't'. The guest data is read now, or
 // when the command list is submitted if 'defer_read'.
 bool Upload(HostTexture &t, const TextureFetch &fetch, bool defer_read) {
+  // banjo-nx (2026-10-19, render-thread proposal 1): the interval the guest bytes are read in: now, or at the next
+  // kick's flush (FlushTextureFillsLocked, right after FlushVertexFillsLocked starts a new interval; a later one is
+  // only more cautious).
+  t.read_interval = CardsInterval() + (defer_read ? 1 : 0);
+  // banjo-nx (2026-10-19, render-thread proposal 3): no g_texture_epoch bump: an upload changes content, not a binding.
   t.resolve_signature = 0;  // banjo-nx (banjo_renut_resolve_skip): not what a resolve left any more
   u32 block_width, block_height;
   FormatBlockSize(fetch.Format(), block_width, block_height);
@@ -457,6 +515,7 @@ uint32_t ExtraLevels(RenderScale scale) {
 bool Create(HostTexture &t, const TextureFetch &fetch, bool render_target,
             plume::RenderFormat rt_format, bool swap_red_blue = false, RenderScale scale = {},
             bool host_levels = false) {
+  ++g_texture_epoch;  // banjo-nx (CPU proposal 2)
   u32 width, height, depth;
   fetch.Size(width, height, depth);
   t.dimension = HostDimension(fetch);
@@ -556,6 +615,8 @@ void MaskedDesc(const TextureFetch &fetch, u32 out[6]) {
 }
 
 void Retire(HostTexture &t) {
+  ++g_texture_epoch;  // banjo-nx (CPU proposal 2)
+  DepthHandOverForgetLocked(t);  // banjo-nx (2026-10-19, banjo_deko3d_depth_handover)
   if (t.slot != UINT32_MAX && t.slot != kInvalidDescriptor)
     Video::FreeTextureSlotLocked(t.slot);
   t.slot = UINT32_MAX;
@@ -653,6 +714,7 @@ uint32_t WordsViewSlot(HostTexture &t, HostTexture &source, u32 swizzle) {
     return UINT32_MAX;
   }
   Video::SetTextureSlotLocked(v.slot, source.words->texture.get(), v.view.get());
+  ++g_texture_epoch;  // banjo-nx (CPU proposal 2): a new view
   source.words_views.push_back(std::move(v));
   return source.words_views.back().slot;
 }
@@ -662,6 +724,7 @@ uint32_t WordsViewSlot(HostTexture &t, HostTexture &source, u32 swizzle) {
 void CopyDepthWords(HostTexture &t, HostTexture &source) {
   if (t.copied_resolve == source.resolves)
     return;
+  ++g_texture_epoch;  // banjo-nx (CPU proposal 2)
   plume::RenderCommandList *cmd = State().command_list;
   TransitionTextureLocked(source.words.get(), plume::RenderTextureLayout::COPY_SOURCE);
   TransitionTextureLocked(&t, plume::RenderTextureLayout::COPY_DEST);
@@ -678,6 +741,8 @@ void CopyDepthWords(HostTexture &t, HostTexture &source) {
 HostTexture *ResolveTarget(u32 texture_va, plume::RenderFormat format, RenderScale scale,
                            const d3d::TextureFetchConstant *header_format, bool depth,
                            TextureFetch &fetch) {
+  // banjo-nx (2026-10-19, render-thread proposal 3): no unconditional g_texture_epoch bump: Create and Retire bump it,
+  // and so does a resolve target entry that changes (below).
   if (!texture_va)
     return nullptr;
   if (!header_format) {
@@ -719,7 +784,11 @@ HostTexture *ResolveTarget(u32 texture_va, plume::RenderFormat format, RenderSca
   slot->gpu_written = true;
   slot->uploaded = true;
   slot->used_frame = g_frame;
-  g_resolve_targets[fetch.BasePage()] = slot.get();
+  HostTexture *&entry = g_resolve_targets[fetch.BasePage()];
+  if (entry != slot.get()) {
+    entry = slot.get();
+    ++g_texture_epoch;  // banjo-nx (2026-10-19, render-thread proposal 3): ResolvedAlias's answer changes
+  }
   return slot.get();
 }
 
@@ -771,15 +840,16 @@ void RefreshLinearLocked(HostTexture &t, const TextureFetch &fetch) {
     t.uploaded = Upload(t, fetch, true);
   };
   const bool verify_due = g_frame - t.verified_frame >= kLinearVerifyFrames;
+  // banjo-nx (2026-10-19, render-thread proposal 1): every hash through CheckedHash (the cards).
   if (!t.uploaded) {
-    upload(ContentHash(fetch, t));
+    upload(CheckedHash(fetch, t, false));
     t.verified_frame = g_frame;
   } else if (t.lock_driven) {
     const bool watched = g_frame - t.unlock_frame < kUnlockWatchFrames;
     if (t.unlocked) {
-      upload(ContentHash(fetch, t));
+      upload(CheckedHash(fetch, t, false));
     } else if (watched || verify_due) {
-      const uint64_t hash = ContentHash(fetch, t);
+      const uint64_t hash = CheckedHash(fetch, t, false);
       if (hash != t.content_hash) {
         upload(hash);
         t.lock_driven = watched;
@@ -789,15 +859,23 @@ void RefreshLinearLocked(HostTexture &t, const TextureFetch &fetch) {
     }
   } else if (t.dynamic) {
     if (verify_due) {
-      const uint64_t hash = ContentHash(fetch, t);
+      const uint64_t hash = CheckedHash(fetch, t, false);
       t.dynamic = hash != t.content_hash;
       t.changes = 0;
       t.content_hash = hash;
       t.verified_frame = g_frame;
     }
-    t.uploaded = Upload(t, fetch, true);
+    // banjo-nx (2026-10-19, render-thread proposal 1): not uploaded again while the cards prove no page written since
+    // the last upload read it (the GPU's copy holds those bytes).
+    KnowGuestExtent(fetch, t);
+    if (banjo::renut_gpu::StoreCardsOn() && !banjo::renut_gpu::StoreCardsVerifyOn() &&
+        ExtentClean(t, t.read_interval)) {
+      banjo::renut_gpu::CountTextureCards(uint64_t(t.sample_sizes[0]) + t.sample_sizes[1], 2);
+    } else {
+      t.uploaded = Upload(t, fetch, true);
+    }
   } else {
-    const uint64_t hash = ContentHash(fetch, t);
+    const uint64_t hash = CheckedHash(fetch, t, false);
     if (hash != t.content_hash) {
       upload(hash);
       t.dynamic = ++t.changes >= kDynamicChanges;
@@ -900,10 +978,14 @@ void EvictColdTexturesLocked(uint64_t reserve) {
 
 } // namespace
 
-uint64_t TextureFrameLocked() { return g_frame; }  // banjo-nx: banjo_renut_diag_draw_log_s
+uint64_t g_texture_frame = 1;  // banjo-nx (2026-10-19): g_frame, read inline by TextureFrameLocked
+
+uint64_t g_texture_epoch = 1;  // banjo-nx (2026-10-19, CPU proposal 2)
+uint64_t g_depth_epoch = 1;    // banjo-nx (2026-10-19, render-thread proposal 3)
 
 void AdvanceTextureFrameLocked() {
   ++g_frame;
+  g_texture_frame = g_frame;
   ApplyUnlocksLocked();
   if (g_frame % kEvictCheckFrames == 0)
     EvictIdleTexturesLocked();
@@ -959,9 +1041,21 @@ void ReleaseHostTextureLocked(u32 texture_va) {
   g_textures.erase(it);
 }
 
+// banjo-nx (2026-10-19, banjo_deko3d_barrier_lean): a layout only read in, both sides: deko3d has no image layouts,
+// and two reads need no ordering.
+bool ReadOnlyLayout(plume::RenderTextureLayout layout) {
+  return layout == plume::RenderTextureLayout::SHADER_READ || layout == plume::RenderTextureLayout::DEPTH_READ ||
+         layout == plume::RenderTextureLayout::COPY_SOURCE || layout == plume::RenderTextureLayout::RESOLVE_SOURCE;
+}
+
 void TransitionTextureLocked(HostTexture *texture, plume::RenderTextureLayout layout) {
   if (!texture || !texture->texture || texture->layout == layout)
     return;
+  if (IsDeko3D() && banjo::renut_gpu::Deko3DBarrierLeanOn() && ReadOnlyLayout(texture->layout) &&
+      ReadOnlyLayout(layout)) {
+    texture->layout = layout;
+    return;
+  }
   plume::RenderCommandList *cmd = Video::CommandListLocked();
   if (!cmd)
     return;
@@ -973,7 +1067,7 @@ void TransitionTextureLocked(HostTexture *texture, plume::RenderTextureLayout la
   texture->layout = layout;
 }
 
-TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetch) {
+TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetch, BindEffects *fx) {
   TextureBinding binding;
   binding.dimension = HostDimension(device_fetch);
   binding.slot = NullSlot(binding.dimension);
@@ -1016,8 +1110,19 @@ TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetc
     if (resolved->words)
       banjo::renut_gpu::CountDepthFloatSampled();  // banjo-nx (2026-10-18): a depth resolve's float target sampled
     TransitionTextureLocked(resolved, plume::RenderTextureLayout::SHADER_READ);
+    if (fx) {
+      fx->transition[0] = resolved;
+      fx->float_sampled = resolved->words != nullptr;
+    }
     binding.dimension = resolved->dimension;
     binding.slot = SlotForSwizzle(*resolved, fetch.Swizzle());
+    // banjo-nx (2026-10-19, banjo_deko3d_depth_handover): its content where it is.
+    if (resolved->handed_from || resolved->held_current) {
+      const uint32_t handed = DepthHandOverSlotLocked(
+          *resolved, SwizzleMapping(fetch.Swizzle(), resolved->view_swap_red_blue, resolved->host_format), fx);
+      if (handed != UINT32_MAX)
+        binding.slot = handed;
+    }
     binding.stacked = resolved->stacked;
     binding.scale = resolved->scale;
     binding.lod_scale = resolved->extra_levels ? resolved->scale : RenderScale{};
@@ -1047,8 +1152,11 @@ TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetc
   // What a depth resolve wrote to the memory (only the GPU has it), which is
   // at the resolve's scale; guest data is at the guest size.
   HostTexture *depth_source = !(slot && slot->gpu_written) ? DepthWordsSource(fetch) : nullptr;
-  if (depth_source)
+  if (depth_source) {
     EnsureDepthWordsLocked(*depth_source);  // banjo-nx (banjo_renut_depth_words_lazy)
+    if (fx)
+      fx->depth_source = true;  // banjo-nx (2026-10-19, render-thread proposal 3)
+  }
   const RenderScale scale = depth_source ? depth_source->scale : RenderScale{};
   if (slot && !slot->gpu_written && slot->scale != scale) {
     Retire(*slot);
@@ -1101,6 +1209,10 @@ TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetc
       t.copied_resolve = 0;  // its own texture has not got them: copied in full if the view is not used later
       TransitionTextureLocked(depth_source->words.get(), plume::RenderTextureLayout::SHADER_READ);
       banjo::renut_gpu::CountDepthWords(true);
+      if (fx) {
+        fx->transition[0] = depth_source->words.get();
+        fx->words_viewed = true;
+      }
       if (banjo::renut_gpu::ResolveTraceOn() && t.trace_frame != g_frame) {
         t.trace_frame = g_frame;  // banjo-nx (2026-10-19): which resolves' words are read, by the view
         RGPU_INFO("[trace] sample depth words (view) {:08X} ({}x{}) from the resolve of {:08X}", texture_va, t.width,
@@ -1125,7 +1237,7 @@ TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetc
     if (!fetch.Tiled()) {
       RefreshLinearLocked(t, fetch);
     } else {
-      const uint64_t hash = SampleHash(fetch, t);
+      const uint64_t hash = CheckedHash(fetch, t, true);  // banjo-nx (2026-10-19, render-thread proposal 1)
       if (!t.uploaded || hash != t.content_hash) {
         t.content_hash = hash;
         t.uploaded = Upload(t, fetch, false);
@@ -1135,8 +1247,19 @@ TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetc
   TransitionTextureLocked(&t, plume::RenderTextureLayout::SHADER_READ);
   if (t.words)
     banjo::renut_gpu::CountDepthFloatSampled();  // banjo-nx (2026-10-18): a depth resolve's float target sampled
+  if (fx) {
+    fx->transition[0] = &t;
+    fx->float_sampled = t.words != nullptr;
+  }
   binding.dimension = t.dimension;
   binding.slot = SlotForSwizzle(t, fetch.Swizzle());
+  // banjo-nx (2026-10-19, banjo_deko3d_depth_handover): its content where it is.
+  if (t.handed_from || t.held_current) {
+    const uint32_t handed = DepthHandOverSlotLocked(
+        t, SwizzleMapping(fetch.Swizzle(), t.view_swap_red_blue, t.host_format), fx);
+    if (handed != UINT32_MAX)
+      binding.slot = handed;
+  }
   binding.stacked = t.stacked;
   binding.scale = t.scale;
   binding.lod_scale = t.extra_levels ? t.scale : RenderScale{};
@@ -1154,13 +1277,16 @@ void TextureGuestExtent(const TextureFetch &fetch, uint32_t pages[2], uint32_t s
     bool valid;
   };
   static_assert(sizeof(fetch.dword) == sizeof(Entry::key));
-  thread_local Entry memo[1024] = {};
+  // banjo-nx (2026-10-19, render-thread proposal 4): a plain static table of 256 (12 KB): both callers run on the render
+  // thread (the draw's export check, KnowGuestExtent), and the thread-local one (48 KB, more than the A57's L1) cost a
+  // call to read the thread pointer at every access (-mtp=soft).
+  static Entry memo[256] = {};
   uint32_t key[6];
   std::memcpy(key, fetch.dword, sizeof(key));
   uint32_t hash = 0;
   for (uint32_t word : key)
     hash = (hash ^ word) * 0x9E3779B1u;
-  Entry &entry = memo[hash >> 22];
+  Entry &entry = memo[hash >> 24];
   if (entry.valid && std::memcmp(entry.key, key, sizeof(key)) == 0) {
     std::memcpy(pages, entry.pages, sizeof(entry.pages));
     std::memcpy(sizes, entry.sizes, sizeof(entry.sizes));
@@ -1222,7 +1348,12 @@ HostTexture *GetDepthResolveTextureLocked(u32 texture_va, RenderScale scale,
     }
     t->words = std::move(words);
   }
-  g_depth_words[fetch.BasePage()] = t;
+  HostTexture *&words_entry = g_depth_words[fetch.BasePage()];
+  if (words_entry != t) {
+    words_entry = t;
+    ++g_texture_epoch;  // banjo-nx (2026-10-19, render-thread proposal 3): DepthWordsSource's answer changes
+  }
+  ++g_depth_epoch;  // banjo-nx (2026-10-19): the words of this destination may change with this resolve
   ++t->resolves;
   return t;
 }

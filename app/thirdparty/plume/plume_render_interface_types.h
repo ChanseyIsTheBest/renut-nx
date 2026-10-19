@@ -167,6 +167,8 @@ namespace plume {
         BC7_UNORM_SRGB,
         // Stencil only, 8 bits (Vulkan; UnleashedRecomp's Switch renderer uses it as a coverage mask).
         S8_UINT,
+        // banjo-nx (2026-10-19): 24-bit unorm depth with 8-bit stencil, 4 bytes a pixel (deko3d Z24S8; the Xenos D24S8).
+        D24_UNORM_S8_UINT,
         MAX
     };
 
@@ -568,6 +570,7 @@ namespace plume {
         case RenderFormat::R32_FLOAT:
         case RenderFormat::R32_UINT:
         case RenderFormat::R32_SINT:
+        case RenderFormat::D24_UNORM_S8_UINT:
             return 4;
         case RenderFormat::R8G8_TYPELESS:
         case RenderFormat::R8G8_UNORM:
@@ -650,6 +653,7 @@ namespace plume {
         case RenderFormat::R32_TYPELESS:
         case RenderFormat::D32_FLOAT:
         case RenderFormat::D32_FLOAT_S8_UINT:
+        case RenderFormat::D24_UNORM_S8_UINT:
         case RenderFormat::R32_FLOAT:
         case RenderFormat::R32_UINT:
         case RenderFormat::R32_SINT:
@@ -705,6 +709,7 @@ namespace plume {
         case RenderFormat::D16_UNORM:
         case RenderFormat::D32_FLOAT:
         case RenderFormat::D32_FLOAT_S8_UINT:
+        case RenderFormat::D24_UNORM_S8_UINT:
             return true;
         default:
             return false;
@@ -712,7 +717,8 @@ namespace plume {
     }
 
     constexpr bool RenderFormatIsStencil(RenderFormat format) {
-        return format == RenderFormat::D32_FLOAT_S8_UINT || format == RenderFormat::S8_UINT;
+        return format == RenderFormat::D32_FLOAT_S8_UINT || format == RenderFormat::D24_UNORM_S8_UINT ||
+               format == RenderFormat::S8_UINT;
     }
 
     constexpr RenderTextureViewDimension RenderTextureDimensionToView(const RenderTextureDimension dimension) {

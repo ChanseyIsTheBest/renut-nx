@@ -25,7 +25,7 @@ namespace renut::gpu {
 // banjo-nx (2026-10-18): 256 registers and a zero register after them (tools/deko3d_glsl_opt.py, pass bonerow: a
 // relative read clamped to 256 reads zeros instead of selecting them).
 constexpr uint32_t kFloatConstantsUboBytes = 256 * 16 + 16;
-constexpr uint32_t kSharedConstantsUboBytes = 1344;  // sizeof(SharedConstants), render/draw.cpp
+constexpr uint32_t kSharedConstantsUboBytes = 1360;  // sizeof(SharedConstants), render/draw.cpp (2026-10-19: + pixel origin)
 
 struct UploadAllocation {
   plume::RenderBufferReference ref;  // buffer + offset, for copies / views
@@ -53,9 +53,24 @@ public:
   // banjo-nx: publishes what was written since the last call (host_cached; nothing otherwise). Before every submission
   // of the slot's command list.
   void Publish();
+  // banjo-nx (2026-10-19, render-thread proposal 23): what Publish() would clean now, handed over instead (another
+  // core cleans it, RingCleaner in backend/video.cpp): each chunk's [published, written), then marked published.
+  struct Range {
+    plume::RenderBuffer *buffer;
+    uint64_t begin, end;
+  };
+  void HandOff(std::vector<Range> &out);
   // The slot's fence has been waited: nothing uses the ring's memory.
   void Reset();
   UploadAllocation Allocate(uint64_t size, uint64_t alignment = 256);
+  // banjo-nx (2026-10-19, render-thread proposal 10): 'size' bytes, with 'room' bytes (>= size) left in the chunk from
+  // the allocation's start (a uniform buffer bound at a fixed size over a smaller allocation stays inside the chunk);
+  // only 'size' is taken, so only that is published.
+  UploadAllocation AllocateWithRoom(uint64_t size, uint64_t room, uint64_t alignment = 256);
+  // The chunk the next allocation goes to, if it fits there (FetchCopy reuse).
+  const plume::RenderBuffer *CurrentBuffer() const {
+    return current_ < chunks_.size() ? chunks_[current_].buffer.get() : nullptr;
+  }
   UploadAllocation Upload(const void *data, uint64_t size, uint64_t alignment = 256);
   uint64_t Bytes() const;
 

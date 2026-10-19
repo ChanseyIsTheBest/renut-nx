@@ -20,6 +20,7 @@
 #include "renut_engine/gpu/guest/guest_memory.h"
 #include "renut_engine/gpu/backend/queued.h"
 #include "renut_engine/gpu/backend/render_thread.h"
+#include "renut_engine/gpu/banjo_renut_tuning.h"
 
 namespace renut::gpu {
 
@@ -215,6 +216,22 @@ std::shared_ptr<HostCommandBuffer> NewBuffer() {
 std::unordered_map<u32, DeviceRecording> g_recording_devices;
 std::vector<PendingVertices> g_pending_vertices;
 
+// banjo-nx (2026-10-19, CPU proposal 3, banjo_renut_cpu_memos): NewOp's lookups remembered per recording thread, so an
+// op takes g_record_mutex only when something changed. g_record_generation is bumped (under the mutex) whenever a
+// buffer is made, replaced or released; a DeviceRecording never moves (map nodes, never erased). g_pending_count
+// mirrors g_pending_vertices.size(): with anything pending, NewOp takes the lock to copy it in first.
+std::atomic<uint64_t> g_record_generation{1};
+std::atomic<size_t> g_pending_count{0};
+struct RecordCache {
+  u32 device_va = 0, command_buffer = 0;
+  uint64_t generation = 0;
+  HostCommandBuffer *buffer = nullptr;
+  DeviceRecording *set = nullptr;
+};
+thread_local RecordCache t_record_cache;
+
+void SyncPendingCount() { g_pending_count.store(g_pending_vertices.size(), std::memory_order_release); }
+
 u32 RecordingBuffer(u32 device_va) {
   const auto *word = GuestPtr<const be_u32>(device_va + d3d::kDeviceOffsetCommandBuffer);
   return word ? u32(*word) : 0u;
@@ -322,14 +339,25 @@ Op *NewOp(u32 device_va, OpKind kind, HostCommandBuffer **out_buffer) {
     return nullptr;
   HostCommandBuffer *found = nullptr;
   DeviceRecording *found_set = nullptr;
-  {
+  RecordCache &cache = t_record_cache;
+  const bool memo = banjo::renut_gpu::CpuMemosOn();
+  if (memo && cache.device_va == device_va && cache.command_buffer == command_buffer &&
+      cache.generation == g_record_generation.load(std::memory_order_acquire) &&
+      g_pending_count.load(std::memory_order_acquire) == 0) {
+    found = cache.buffer;
+    found_set = cache.set;
+  } else {
     std::lock_guard lock(g_record_mutex);
     FlushDevicePending(device_va);
     auto &slot = g_buffers[command_buffer];
-    if (!slot)
+    if (!slot) {
       slot = NewBuffer();
+      g_record_generation.fetch_add(1, std::memory_order_acq_rel);
+    }
     found = slot.get();
     found_set = &g_recording_devices[device_va];
+    if (memo)
+      cache = {device_va, command_buffer, g_record_generation.load(std::memory_order_relaxed), found, found_set};
   }
   HostCommandBuffer &buffer = *found;
   DeviceRecording &set = *found_set;
@@ -376,6 +404,7 @@ void FlushPending(Match match) {
       ++i;
     }
   }
+  SyncPendingCount();
 }
 
 void FlushDevicePending(u32 device_va) {
@@ -422,6 +451,9 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
   const uint64_t replay = ++replays;
   uint64_t vs_dirty = ~uint64_t(0), ps_dirty = ~uint64_t(0);
   u8 *state = g_replay_state[depth];
+  // banjo-nx (2026-10-19, CPU proposal 18): the draws' predication set once for the buffer, not around every draw:
+  // only draws read it (ComputeViewport), and a nested run puts this one back when it ends.
+  const u32 previous_predication = SetReplayPredicationLocked(predication);
   for (const Op &op : buffer.ops) {
     ApplyState(state, buffer.arena.data() + op.state, op.plain_dirty, op.vs_dirty, op.ps_dirty);
     vs_dirty |= op.vs_dirty;
@@ -435,9 +467,7 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
         call.up_indices = buffer.arena.data() + op.up_indices;
       // The draw reads its inherited constants from the running device.
       const ReplayConstants constants{running, op.vs_set, op.ps_set, &vs_dirty, &ps_dirty, replay};
-      const u32 previous = SetReplayPredicationLocked(predication);
       DrawStateLocked(state, call, &constants);
-      SetReplayPredicationLocked(previous);
       break;
     }
     case OpKind::Clear:
@@ -459,6 +489,7 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
       break;
     }
   }
+  SetReplayPredicationLocked(previous_predication);
 }
 
 // The buffer and those it runs, nested up to kMaxRunDepth, with their pending
@@ -492,6 +523,7 @@ void BeginRecording(u32 device_va, u32 command_buffer_va) {
   });
   // A queued run may still hold the old recording.
   auto &slot = g_buffers[command_buffer_va];
+  g_record_generation.fetch_add(1, std::memory_order_acq_rel);  // banjo-nx: NewOp's per-thread lookups
   if (!slot || slot.use_count() > 1) {
     slot = NewBuffer();
   } else {
@@ -534,6 +566,7 @@ void RecordDeferredDraw(u32 device_va, const DrawCall &call, const u8 *scratch, 
   std::lock_guard lock(g_record_mutex);
   g_pending_vertices.push_back(
       {device_va, RecordingBuffer(device_va), op->up_vertices, scratch, bytes});
+  SyncPendingCount();
 }
 
 void RecordClear(u32 device_va, u32 flags, const ClearRect *rect, const float color[4],
@@ -613,6 +646,7 @@ void QueueRunCommandBuffer(u32 device_va, u32 command_buffer_va) {
 void ReleaseCommandBuffer(u32 command_buffer_va) {
   std::lock_guard lock(g_record_mutex);
   if (g_buffers.erase(command_buffer_va)) {
+    g_record_generation.fetch_add(1, std::memory_order_acq_rel);  // banjo-nx: NewOp's per-thread lookups
     for (size_t i = 0; i < g_pending_vertices.size();) {
       if (g_pending_vertices[i].command_buffer == command_buffer_va) {
         g_pending_vertices[i] = g_pending_vertices.back();
@@ -621,6 +655,7 @@ void ReleaseCommandBuffer(u32 command_buffer_va) {
         ++i;
       }
     }
+    SyncPendingCount();
   }
 }
 

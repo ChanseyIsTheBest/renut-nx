@@ -69,6 +69,33 @@ std::unordered_map<uint64_t, std::vector<CachedPipeline>> g_pipelines;
 // which a compare of the key finds without hashing it.
 PipelineKey g_last_key{};
 plume::RenderPipeline *g_last_pipeline = nullptr;
+
+// banjo-nx (2026-10-19, CPU proposal 6, banjo_renut_pipeline_memo): what GetPipelineLocked returned for a key, in a
+// 64-entry direct-mapped table before the XXH3 hash and the map: the built pipeline; for a specialised key still being
+// built, the generic one it draws with until the prebuild epoch moves (kind 1); for one that failed, its generic one
+// (kind 2; failures stay failed). Pipelines are never destroyed, so an entry cannot dangle.
+struct PipelineMemo {
+  PipelineKey key{};
+  plume::RenderPipeline *pipeline = nullptr;
+  uint64_t epoch = 0;
+  uint8_t kind = 0;
+};
+// banjo-nx (2026-10-19, render-thread proposal 6): 512 sets of 2 ways (was 64 entries direct-mapped: the console binds
+// 450-1,050 pipelines a frame out of a few hundred keys, and the memo thrashed). Way 0 is the most recent.
+constexpr uint32_t kPipelineMemoSets = 512;
+PipelineMemo g_pipeline_memo[kPipelineMemoSets][2];
+
+inline uint32_t PipelineMemoIndex(const PipelineKey &key) {
+  uint64_t w[8];
+  std::memcpy(w, &key, sizeof(w));  // the shaders, the layout hash, topology, formats
+  uint64_t h = w[0] * 0x9E3779B97F4A7C15ull ^ w[1] * 0xC2B2AE3D27D4EB4Full ^ w[2] ^ (w[3] << 17) ^ (w[4] >> 3) ^
+               (w[5] << 29) ^ w[6] ^ (w[7] >> 11);
+  uint32_t b;
+  std::memcpy(&b, reinterpret_cast<const char *>(&key) + offsetof(PipelineKey, bool_values), sizeof(b));
+  h ^= uint64_t(b) * 0xFF51AFD7ED558CCDull ^ uint64_t(key.alpha_func) << 40 ^ uint64_t(key.blend_control[0]) << 7 ^
+       uint64_t(key.depth_control) << 23;
+  return uint32_t((h ^ (h >> 31) ^ (h >> 47)) & (kPipelineMemoSets - 1));
+}
 // banjo-nx (2026-10-18): bumped each time a prebuild job is done (any thread).
 std::atomic<uint64_t> g_prebuild_epoch{0};
 // banjo-nx (2026-10-18), render thread: specialised keys a worker is building, with the generic pipeline their draws
@@ -888,9 +915,47 @@ bool BuildDrawLayout(VideoState &s) {
   return true;
 }
 
+static plume::RenderPipeline *GetPipelineSlow(const PipelineKey &key, const PipelineInputs &inputs, uint8_t &kind,
+                                              uint64_t &memo_epoch);
+
 plume::RenderPipeline *GetPipelineLocked(const PipelineKey &key, const PipelineInputs &inputs) {
   if (g_last_pipeline && std::memcmp(&g_last_key, &key, sizeof(key)) == 0)
     return g_last_pipeline;
+  const bool memo_on = banjo::renut_gpu::PipelineMemoOn();
+  const uint32_t set = PipelineMemoIndex(key);
+  PipelineMemo *ways = g_pipeline_memo[set];
+  if (memo_on) {
+    for (uint32_t w = 0; w < 2; ++w) {
+      PipelineMemo &m = ways[w];
+      if (m.pipeline && std::memcmp(&m.key, &key, sizeof(key)) == 0 &&
+          (m.kind != 1 || m.epoch == g_prebuild_epoch.load(std::memory_order_acquire))) {
+        if (m.kind)
+          banjo::renut_gpu::CountBoolSpec(banjo::renut_gpu::BoolSpecEvent::kGeneric);
+        plume::RenderPipeline *hit = m.pipeline;
+        if (w)
+          std::swap(ways[0], ways[1]);  // the most recent in way 0
+        return hit;
+      }
+    }
+  }
+  uint8_t kind = 0;
+  uint64_t memo_epoch = 0;
+  plume::RenderPipeline *result = GetPipelineSlow(key, inputs, kind, memo_epoch);
+  if (memo_on && result) {
+    // The least recent (way 1) goes; the new one takes way 0. (GetPipelineSlow may have filled this set for a generic
+    // key: both are kept.)
+    ways = g_pipeline_memo[set];
+    ways[1] = ways[0];
+    ways[0].key = key;
+    ways[0].pipeline = result;
+    ways[0].kind = kind;
+    ways[0].epoch = memo_epoch;
+  }
+  return result;
+}
+
+static plume::RenderPipeline *GetPipelineSlow(const PipelineKey &key, const PipelineInputs &inputs, uint8_t &kind,
+                                              uint64_t &memo_epoch) {
   const uint64_t hash = HashKey(key);
   auto &bucket = g_pipelines[hash];
   for (auto &cached : bucket) {
@@ -910,6 +975,8 @@ plume::RenderPipeline *GetPipelineLocked(const PipelineKey &key, const PipelineI
                                                pend->second.generic &&
                                                std::memcmp(&pend->second.key, &key, sizeof(key)) == 0) {
       banjo::renut_gpu::CountBoolSpec(banjo::renut_gpu::BoolSpecEvent::kGeneric);
+      kind = 1;
+      memo_epoch = epoch;
       return pend->second.generic;
     }
     std::unique_ptr<plume::RenderPipeline> ready;
@@ -938,6 +1005,10 @@ plume::RenderPipeline *GetPipelineLocked(const PipelineKey &key, const PipelineI
       p.key = key;
       p.epoch = epoch;
       p.generic = pipeline;
+      kind = 1;
+      memo_epoch = epoch;
+    } else {
+      kind = 2;  // failed: the generic one from now on
     }
     return pipeline;
   }

@@ -6,6 +6,9 @@
 #include "renut_engine/gpu/backend/video.h"
 
 #include <cstdio>
+#include <mutex>
+#include <deque>
+#include <condition_variable>
 #include <cstring>
 #include <filesystem>
 #include <system_error>
@@ -67,8 +70,12 @@
 
 namespace renut::gpu {
 
-VideoState &State() {
+// banjo-nx (2026-10-19, CPU proposal 5): State() is inline (video.h): a load of this pointer, set by the first call.
+VideoState *g_state = nullptr;
+
+VideoState &StateSlow() {
   static VideoState s;
+  g_state = &s;
   return s;
 }
 
@@ -443,6 +450,130 @@ void DrainSlot(VideoState &s, uint32_t slot) {
   s.uploads[slot].Reset();
 }
 
+// ---------------------------------------------------------------------------
+// banjo-nx (2026-10-19): the ring cleaner (render-thread proposal 23) and the kick submits (input latency)
+// ---------------------------------------------------------------------------
+// The upload ring is CPU-cached memory: what the CPU wrote is cleaned to memory before the GPU reads it
+// (UploadRing::Publish at a submit). At each kick, once the kick's fills are written, the ranges written since the last
+// hand-off go to a thread on the background core (a clean by address reaches the line in any core's cache); a submit
+// waits for the ranges its lists use, and takes over any the thread has not started (so a busy background core never
+// holds the render thread up). Nothing writes a range after it is handed off: the ring only grows, and the fills of a
+// kick are written before its hand-off.
+// The kick submits: the list recorded up to a kick ends there (once it holds kKickSubmitDraws draws, at most
+// kKickLists times a frame) and goes to the GPU at the next kick (its ranges are cleaned by then), or at the present,
+// before the frame's last list; the GPU runs the commands in the order they were recorded either way.
+namespace {
+
+constexpr uint32_t kKickSubmitDraws = 200;
+
+class RingCleaner {
+public:
+  // The ranges, cleaned in order; the ticket that Wait takes for them.
+  uint64_t Enqueue(std::vector<UploadRing::Range> &&ranges) {
+    if (ranges.empty())
+      return 0;
+    std::lock_guard lock(mutex_);
+    Start();
+    for (const UploadRing::Range &r : ranges)
+      queue_.push_back({r, ++last_ticket_});
+    const uint64_t ticket = last_ticket_;
+    cv_.notify_one();
+    return ticket;
+  }
+
+  // Every range up to 'ticket' (all of them for UINT64_MAX) is clean: those not started are cleaned here, and one the
+  // thread is cleaning is waited for. (Tickets are in order: a range up to 'ticket' is queued, being cleaned, or done.)
+  void Wait(uint64_t ticket) {
+    std::unique_lock lock(mutex_);
+    if (ticket == UINT64_MAX)
+      ticket = last_ticket_;
+    for (;;) {
+      while (!queue_.empty() && queue_.front().ticket <= ticket) {
+        const Job job = queue_.front();
+        queue_.pop_front();
+        lock.unlock();
+        Clean(job.range);
+        banjo::renut_gpu::CountKickSubmit(2);
+        lock.lock();
+      }
+      if (working_ == 0 || working_ > ticket)
+        return;
+      render_thread::WaitScope wait;
+      done_cv_.wait(lock, [&] { return working_ == 0 || working_ > ticket; });
+    }
+  }
+
+private:
+  struct Job {
+    UploadRing::Range range;
+    uint64_t ticket;
+  };
+
+  static void Clean(const UploadRing::Range &r) {
+    const plume::RenderRange range(r.begin, r.end);
+    r.buffer->unmap(0, &range);  // plume: cleans the range of a persistently mapped buffer
+  }
+
+  void Start() {
+    if (started_)
+      return;
+    started_ = true;
+    banjo::renut_gpu::StartLongLivedThread(
+        [] { Instance().Run(); }, 64 * 1024);
+  }
+
+  void Run() {
+    banjo::renut_gpu::OnBackgroundThreadStart("ring cleaner");
+    std::unique_lock lock(mutex_);
+    for (;;) {
+      cv_.wait(lock, [this] { return !queue_.empty(); });
+      const Job job = queue_.front();
+      queue_.pop_front();
+      working_ = job.ticket;
+      lock.unlock();
+      Clean(job.range);
+      banjo::renut_gpu::CountKickSubmit(1);
+      lock.lock();
+      working_ = 0;
+      done_cv_.notify_all();
+    }
+  }
+
+public:
+  static RingCleaner &Instance() {
+    static RingCleaner cleaner;
+    return cleaner;
+  }
+
+private:
+  std::mutex mutex_;
+  std::condition_variable cv_, done_cv_;
+  std::deque<Job> queue_;
+  uint64_t last_ticket_ = 0, working_ = 0;  // working_: the ticket of the range being cleaned, 0 for none
+  bool started_ = false;
+};
+
+bool UseRingCleaner() {
+  return IsDeko3D() && banjo::renut_gpu::RingCleanerOn();
+}
+
+// Every range written so far is clean (handed to the cleaner and waited for, the rest by Publish).
+void PublishAll(VideoState &s, uint32_t slot) {
+  if (UseRingCleaner()) {
+    std::vector<UploadRing::Range> ranges;
+    s.uploads[slot].HandOff(ranges);
+    RingCleaner::Instance().Enqueue(std::move(ranges));
+    RingCleaner::Instance().Wait(UINT64_MAX);
+  }
+  s.uploads[slot].Publish();
+}
+
+plume::RenderCommandList *SlotList(VideoState &s, uint32_t slot) {
+  return s.slot_list[slot] ? s.slot_list[slot] : s.command_lists[slot].get();
+}
+
+} // namespace
+
 namespace {
 
 // After the slot's fence has been waited: its frame's GPU time, the sum of its
@@ -506,6 +637,9 @@ void WaitSlotLocked(VideoState &s, uint32_t slot) {
   s.submitted[slot] = false;
   CollectGpuTime(s, slot);
   gpu_profile::Collect(s, slot);
+  // banjo-nx (2026-10-19, banjo_deko3d_kick_submit): every list of the slot's frame has run: its kick lists are free.
+  s.kick_lists_used[slot] = 0;
+  s.slot_list[slot] = nullptr;
 }
 
 void WaitAllSubmitted(VideoState &s) {
@@ -528,18 +662,26 @@ void SubmitAndWaitLocked(VideoState &s) {
   FinishRecordingLocked(s);
   EndListTiming(s, false);
   banjo::renut_gpu::record::Drain();  // banjo-nx (banjo_renut_record_worker): played on the real list first
-  s.command_lists[cur]->end();
-  s.uploads[cur].Publish();  // banjo-nx: banjo_renut_upload_cached
-  const plume::RenderCommandList *lists[] = {s.command_lists[cur].get()};
-  s.queue->executeCommandLists(lists, 1, nullptr, 0, nullptr, 0, s.fences[cur].get());
+  plume::RenderCommandList *current = SlotList(s, cur);
+  current->end();
+  PublishAll(s, cur);  // banjo-nx: banjo_renut_upload_cached (and the cleaner's ranges, 2026-10-19)
+  // banjo-nx (2026-10-19, banjo_deko3d_kick_submit): the list ended at the last kick first.
+  const plume::RenderCommandList *lists[] = {s.pending_list ? s.pending_list : current, current};
+  const uint32_t count = s.pending_list ? 2 : 1;
+  s.pending_list = nullptr;
+  s.queue->executeCommandLists(lists, count, nullptr, 0, nullptr, 0, s.fences[cur].get());
   {
     render_thread::WaitScope wait;
     s.queue->waitForCommandFence(s.fences[cur].get());
   }
   s.submitted[cur] = false;
   // The slot's upload ring and retired objects stay: the rest of the frame
-  // records into the same slot.
+  // records into the same slot. banjo-nx: every list of it has run, so its first list is free again.
+  s.kick_lists_used[cur] = 0;
+  s.slot_list[cur] = nullptr;
+  s.command_list = banjo::renut_gpu::record::Wrap(s.command_lists[cur].get());
   s.command_list->begin();
+  s.list_draws = 0;
   ++s.list_generation;
   BeginListTiming(s);
 }
@@ -551,14 +693,18 @@ void SubmitAndAdvance(VideoState &s, plume::RenderCommandSemaphore *wait,
     FinishRecordingLocked(s);
     EndListTiming(s, true);
     banjo::renut_gpu::record::Drain();  // banjo-nx (banjo_renut_record_worker)
-    s.command_lists[cur]->end();
+    plume::RenderCommandList *current = SlotList(s, cur);
+    current->end();
     s.list_open = false;
     s.command_list = nullptr;
-    s.uploads[cur].Publish();  // banjo-nx: banjo_renut_upload_cached
-    const plume::RenderCommandList *lists[] = {s.command_lists[cur].get()};
+    PublishAll(s, cur);  // banjo-nx: banjo_renut_upload_cached (and the cleaner's ranges, 2026-10-19)
+    // banjo-nx (2026-10-19, banjo_deko3d_kick_submit): the list ended at the last kick first.
+    const plume::RenderCommandList *lists[] = {s.pending_list ? s.pending_list : current, current};
+    const uint32_t count = s.pending_list ? 2 : 1;
+    s.pending_list = nullptr;
     plume::RenderCommandSemaphore *waits[] = {wait};
     plume::RenderCommandSemaphore *signals[] = {signal};
-    s.queue->executeCommandLists(lists, 1, wait ? waits : nullptr, wait ? 1 : 0,
+    s.queue->executeCommandLists(lists, count, wait ? waits : nullptr, wait ? 1 : 0,
                                  signal ? signals : nullptr, signal ? 1 : 0,
                                  s.fences[cur].get());
     s.submitted[cur] = true;
@@ -728,15 +874,68 @@ bool Video::EnsureCommandListLocked() {
     return false;
 
   // banjo-nx (banjo_renut_record_worker, package 28b): the proxy over the slot's list, played by the worker.
-  s.command_list = banjo::renut_gpu::record::Wrap(s.command_lists[s.frame].get());
+  s.command_list = banjo::renut_gpu::record::Wrap(detail::SlotList(s, s.frame));
   s.command_list->begin();
   s.list_open = true;
+  s.list_draws = 0;  // banjo-nx (2026-10-19, banjo_deko3d_kick_submit)
   ++s.list_generation;
   detail::BeginListTiming(s);
 
   if (!s.null_texture_initialized)
     s.null_texture_initialized = InitializeNullTextures(s);
   return true;
+}
+
+void Video::NoteDrawLocked() {
+  ++State().list_draws;
+}
+
+void Video::KickLocked() {
+  auto &s = State();
+  if (!s.list_open || !IsDeko3D())
+    return;
+  const uint32_t cur = s.frame;
+  // The ring written up to this kick (its fills included) to the cleaner.
+  uint64_t ticket = 0;
+  if (detail::UseRingCleaner()) {
+    std::vector<UploadRing::Range> ranges;
+    s.uploads[cur].HandOff(ranges);
+    ticket = detail::RingCleaner::Instance().Enqueue(std::move(ranges));
+  }
+  // The list ended at the last kick: its memory is clean (its ranges were handed off then).
+  if (s.pending_list) {
+    if (detail::UseRingCleaner())
+      detail::RingCleaner::Instance().Wait(s.pending_ticket);
+    else
+      s.uploads[cur].Publish();
+    const plume::RenderCommandList *lists[] = {s.pending_list};
+    s.queue->executeCommandLists(lists, 1, nullptr, 0, nullptr, 0, nullptr);
+    s.pending_list = nullptr;
+    banjo::renut_gpu::CountKickSubmit(0);
+  }
+  // The open list ends here when it holds enough draws; the frame goes on in a kick list of the slot.
+  if (!banjo::renut_gpu::KickSubmitOn() || s.list_draws < detail::kKickSubmitDraws ||
+      s.kick_lists_used[cur] >= VideoState::kKickLists)
+    return;
+  std::unique_ptr<plume::RenderCommandList> &next = s.kick_lists[cur][s.kick_lists_used[cur]];
+  if (!next) {
+    next = s.queue->createCommandList();
+    if (!next)
+      return;
+  }
+  detail::EndListTiming(s, false);
+  banjo::renut_gpu::record::Drain();
+  plume::RenderCommandList *current = detail::SlotList(s, cur);
+  current->end();
+  s.pending_list = current;
+  s.pending_ticket = detail::UseRingCleaner() ? ticket : 0;
+  ++s.kick_lists_used[cur];
+  s.slot_list[cur] = next.get();
+  s.command_list = banjo::renut_gpu::record::Wrap(next.get());
+  s.command_list->begin();
+  s.list_draws = 0;
+  ++s.list_generation;
+  detail::BeginListTiming(s);
 }
 
 plume::RenderCommandList *Video::CommandListLocked() {

@@ -20,7 +20,14 @@ enum class Backend { D3D12, Vulkan, Deko3D };
 
 // Resolved once from renut_gpu_backend on first call; stable afterwards, so a
 // change from the settings takes effect on the next start.
-Backend ActiveBackend();
+namespace detail {
+extern uint8_t g_backend_plus1;  // the backend + 1 once resolved
+Backend LatchBackend();
+}  // namespace detail
+inline Backend ActiveBackend() {
+  const uint8_t b = detail::g_backend_plus1;
+  return b ? static_cast<Backend>(b - 1) : detail::LatchBackend();
+}
 inline bool IsVulkan() { return ActiveBackend() == Backend::Vulkan; }
 // banjo-nx: the deko3d back end.
 inline bool IsDeko3D() { return ActiveBackend() == Backend::Deko3D; }

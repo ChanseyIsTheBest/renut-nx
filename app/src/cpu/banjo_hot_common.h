@@ -19,6 +19,7 @@
 #include <cstring>
 
 #include <rex/platform.h>
+#include <rex/system/xmemory.h>  // banjo-nx (2026-10-19): rex::memory::MarkStoreCardsAt
 #include <rex/ppc/context.h>
 
 namespace banjo::hand {
@@ -108,6 +109,12 @@ struct WriteLog {
   }
 };
 
+// banjo-nx (2026-10-19): a range a hand-written native writes (outside the stack) marks its store cards, as the guest
+// code's stores would (rex/system/xmemory.h; Renut proves its cached vertex and index copies by them).
+[[gnu::always_inline]] inline void Card(uint8_t* base, uint32_t addr, uint32_t len) {
+  rex::memory::MarkStoreCardsAt(base, addr, len);
+}
+
 // The copy that runs: nothing is recorded, nothing stops it. Every member folds to a constant.
 struct Fast {
   [[gnu::always_inline]] constexpr bool Note(uint32_t, uint32_t) const { return true; }
@@ -153,3 +160,17 @@ struct Counting {
 #define BANJO_HOT_STORE_D_U16(r, d, y) (s.Note((u32)(r) + (u32)(d), 2) ? (void)(REX_STORE_D_U16(r, d, y)) : (void)0)
 #define BANJO_HOT_STORE_D_U32(r, d, y) (s.Note((u32)(r) + (u32)(d), 4) ? (void)(REX_STORE_D_U32(r, d, y)) : (void)0)
 #define BANJO_HOT_STORE_D_U64(r, d, y) (s.Note((u32)(r) + (u32)(d), 8) ? (void)(REX_STORE_D_U64(r, d, y)) : (void)0)
+// banjo-nx (2026-10-19): the stores outside the stack, which tools/store_cards.py renames to these: they mark their
+// store cards (REX_CARD of the generated pch), as the generated code's do.
+#define BANJO_HOT_STORE_U8_C(x, y) (s.Note((u32)(x), 1) ? (void)(REX_STORE_U8(x, y), REX_CARD(x)) : (void)0)
+#define BANJO_HOT_STORE_U16_C(x, y) (s.Note((u32)(x), 2) ? (void)(REX_STORE_U16(x, y), REX_CARD(x)) : (void)0)
+#define BANJO_HOT_STORE_U32_C(x, y) (s.Note((u32)(x), 4) ? (void)(REX_STORE_U32(x, y), REX_CARD(x)) : (void)0)
+#define BANJO_HOT_STORE_U64_C(x, y) (s.Note((u32)(x), 8) ? (void)(REX_STORE_U64(x, y), REX_CARD(x)) : (void)0)
+#define BANJO_HOT_STORE_D_U8_C(r, d, y) \
+  (s.Note((u32)(r) + (u32)(d), 1) ? (void)(REX_STORE_D_U8(r, d, y), REX_CARD((u32)(r) + (u32)(d))) : (void)0)
+#define BANJO_HOT_STORE_D_U16_C(r, d, y) \
+  (s.Note((u32)(r) + (u32)(d), 2) ? (void)(REX_STORE_D_U16(r, d, y), REX_CARD((u32)(r) + (u32)(d))) : (void)0)
+#define BANJO_HOT_STORE_D_U32_C(r, d, y) \
+  (s.Note((u32)(r) + (u32)(d), 4) ? (void)(REX_STORE_D_U32(r, d, y), REX_CARD((u32)(r) + (u32)(d))) : (void)0)
+#define BANJO_HOT_STORE_D_U64_C(r, d, y) \
+  (s.Note((u32)(r) + (u32)(d), 8) ? (void)(REX_STORE_D_U64(r, d, y), REX_CARD((u32)(r) + (u32)(d))) : (void)0)

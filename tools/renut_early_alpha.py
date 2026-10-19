@@ -34,7 +34,10 @@ _var_width = ea.var_width
 
 # Renut's per-draw values main() reads directly (shared constants): random per trial in the self-check, as the tool
 # treats its own per-draw vectors.
-UNIFORM_WIDTHS = {'g_ResolutionScale': 1, 'g_ViewportSize': 2, 'g_ScreenOffset': 2, 'g_ScreenScale': 2}
+# banjo-nx (2026-10-19): g_PixelOrigin, the Jinjo Bingo fix's tile corner (Renut 574b488). Missing from this list, every
+# shader reading the pixel position lost its early alpha copy ("unsupported: variable g_PixelOrigin", 3604 shaders):
+# package 35's fur shells about twice as slow on the console.
+UNIFORM_WIDTHS = {'g_ResolutionScale': 1, 'g_ViewportSize': 2, 'g_ScreenOffset': 2, 'g_ScreenScale': 2, 'g_PixelOrigin': 2}
 ea.UNIFORM_VECTORS.update(UNIFORM_WIDTHS)
 
 

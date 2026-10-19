@@ -149,6 +149,16 @@ struct RecompilerConfig {
   // Used where VMX mode is known to be current: there the plain forms would switch the mode off and back, and the
   // any-mode helpers they otherwise go through cost a test and a conversion each.
   bool fpCopyPairs = false;
+  // banjo-nx (2026-10-19, CPU proposal 15): with fpCopyPairs, a store of loaded bits whatever the mode, and through
+  // other instructions: going back from the stfs / stfsx in its block, the first instruction that writes its register
+  // must be the lfs / lfsx of it or an fneg / fabs / fnabs of the register in place (bit 31 of the bits flipped,
+  // cleared or set: the double's sign is the single's), and nothing between is a branch, call or trap (other
+  // instructions, float and vector ones too, may stand there: they write other registers). An lfs / lfsx whose bits
+  // such a store writes takes the copy form as well, so the bits local is always written: the two decisions are the
+  // same test. The forms need no mode: SingleToDoublePure is exact in either, and the stored bits are what the plain
+  // conversions give with the mode off (the culling loop of sub_829A6DE8: lfs, fneg, stfs paid two range checks and
+  // two conversions).
+  bool fpCopyForwarding = false;
   // sa2-nx (second CPU round): with fpCopyPairs, also in every copy-only function (no instruction that needs FPU
   // mode, every lfs / stfs form an lfs / lfsx or a store of loaded bits), whatever the mode: such a function then
   // has no mode statement at all, and a caller in VMX mode no longer pays a switch into it and one back. A BET, and

@@ -33,6 +33,8 @@ flat tree (app/generated), with its localized native copies as the last step (20
   - tools/ro_constants_cfg.py (2026-10-16): the read-only constants over the control-flow graph (after a label);
   - tools/localize_native.py --list: the localized native copies of the hot functions of
     app/src/cpu/hot/localized.txt, into app/generated/hot (app/src/cpu/banjo_hot_guest.cpp includes them);
+  - tools/store_cards.py (2026-10-19): every guest store outside the stack also marks its 4 KB page's store card, last
+    of all (Renut proves its cached vertex and index copies by the cards; REX_STORE_CARDS_OFF compiles them out);
   - app/generated/codegen_flavor.txt (the build's name in the "[enhancements]" log line).
 
 ro_constants.py and the entry modes of flush_mode_flow.py need the generator's image dump, out/renut_image.bin: the
@@ -84,6 +86,8 @@ def main():
     # cpu_aggressive (2026-10-16): the late rewrites below change statements the analyses parse (r1l for ctx.r1,
     # REX_LR_WRITE_SAME, computed gotos, hoisted checks): on a tree that was processed before they are taken back out
     # first, so every analysis sees the text it was written for. On a fresh codegen these find nothing.
+    # banjo-nx (2026-10-19): the store cards were the last step: out first.
+    run(tool('store_cards.py'), '--gen', gen, '--restore')
     run(tool('switch_goto.py'), '--gen', gen, '--restore')
     run(tool('r1_local.py'), '--gen', gen, '--restore')
     run(tool('lr_preserve.py'), '--gen', gen, '--out', os.path.join(ROOT, 'out', 'cpu_aggressive_proofs'), '--restore')
@@ -171,7 +175,10 @@ def main():
     # inline copies of the tiny leaf functions each file calls in another (REX_INLINE_LEAVES_OFF), the last of all.
     run(tool('vsel_neon.py'), '--gen', gen)
     run(tool('hot_layout.py'), '--gen', gen, '--list', os.path.join(APP, 'config', 'hot_functions.txt'))
-    run(tool('inline_leaves.py'), '--gen', gen)
+    run(tool('inline_leaves.py'), '--gen', gen, '--hot', os.path.join(APP, 'config', 'hot_edges.txt'))
+    # banjo-nx (2026-10-19, CPU proposal 1): the store cards, after everything else (the inline copies included): every
+    # store outside the stack marks its page for Renut's cached vertex and index copies (REX_STORE_CARDS_OFF).
+    run(tool('store_cards.py'), '--gen', gen)
     if scratch:
         print(f'post_codegen: optimised codegen steps done on {gen}')
         return

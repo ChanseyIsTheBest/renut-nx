@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <string>
 
 #include <rex/types.h>
 
@@ -58,6 +59,10 @@ bool WaitForFenceProgress(std::chrono::milliseconds timeout);
 // number of frames the render thread has finished.
 constexpr uint64_t kMaxFramesAhead = 1;
 uint64_t QueueFrame(std::function<void()> work);
+// banjo-nx (2026-10-19, banjo_late_input): the late input delay (rex::latency's frame read delay), and its line for the
+// 10 s report.
+void InstallLateInput();
+std::string LateInputReport();
 uint64_t FramesDone();
 
 // Waits until everything queued so far has run.

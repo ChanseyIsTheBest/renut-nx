@@ -11,9 +11,11 @@
 #include <rex/cvar.h>
 
 #include "renut_engine/gpu/backend/backend.h"
+#include "renut_engine/gpu/banjo_renut_tuning.h"
 #include "renut_engine/gpu/d3d/d3d.h"
 #include "renut_engine/gpu/render/format.h"
 #include "renut_engine/gpu/render/graphics_options.h"
+#include "renut_engine/gpu/render/textures.h"
 #include "renut_engine/gpu/guest/guest_memory.h"
 #include "renut_engine/gpu/guest/widescreen.h"
 #include "renut_engine/gpu/log.h"
@@ -76,7 +78,21 @@ std::unordered_map<uint64_t, std::unique_ptr<HostSurface>> g_targets;
 std::unordered_map<u32, uint64_t> g_surface_keys;
 std::unordered_map<uint64_t, uint32_t> g_target_users;
 std::vector<CachedFramebuffer> g_framebuffers;
+// banjo-nx (2026-10-19, render-thread proposal 8): the last framebuffers looked up, checked before the search of every
+// framebuffer made (a linear search with an 80-byte compare at every draw's BindTargets); emptied whenever a cached
+// framebuffer is retired (g_framebuffer_epoch).
+struct RecentFramebuffer {
+  FramebufferKey key;
+  plume::RenderFramebuffer *framebuffer = nullptr;
+  uint64_t epoch = 0;
+};
+RecentFramebuffer g_recent_framebuffers[4];
+uint64_t g_framebuffer_epoch = 1;
 uint64_t g_next_generation = 1;
+// banjo-nx (2026-10-19, banjo_deko3d_depth24): the D3D depth formats each EDRAM depth view has been bound as (1 D24S8,
+// 2 D24FS8). The host format is part of a target's key, so a view used as both would get two targets where the console
+// has one memory: once a view has been bound as D24FS8, every surface over it takes the 32-bit float format.
+std::unordered_map<uint64_t, uint8_t> g_depth_view_formats;
 // SetTilingExtentLocked; 0 x 0 when not tiling.
 uint32_t g_tiling_width = 0;
 uint32_t g_tiling_height = 0;
@@ -92,6 +108,7 @@ void ForgetFramebuffers(const HostSurface *surface) {
       Video::RetireLocked(std::move(g_framebuffers[i].framebuffer));
       g_framebuffers[i] = std::move(g_framebuffers.back());
       g_framebuffers.pop_back();
+      ++g_framebuffer_epoch;
     } else {
       ++i;
     }
@@ -100,7 +117,32 @@ void ForgetFramebuffers(const HostSurface *surface) {
 
 // Retires the target and everything made over it (deferred past in-flight
 // frames).
+// banjo-nx (2026-10-19, CPU proposal 8, banjo_renut_cpu_memos): GetHostSurfaceLocked's result per surface VA and the
+// three descriptor words it reads, valid while nothing it reads has changed (g_surface_epoch: bumped by every target
+// built, retired, unused or rebound, the resolution scale latched and the tiling extent set).
+struct SurfaceMemo {
+  u32 va = 0, size = 0, info = 0, format = 0;
+  uint64_t epoch = 0;
+  HostSurface *surface = nullptr;
+};
+SurfaceMemo g_surface_memo[64];  // banjo-nx (2026-10-19, render-thread proposal 8): 64, indexed by a hash of the VA
+uint64_t g_surface_epoch = 1;
+
+void FreeDepthViews(std::vector<DepthImage::View> &views) {
+  for (DepthImage::View &v : views) {
+    if (v.slot != UINT32_MAX && v.slot != kInvalidDescriptor)
+      Video::FreeTextureSlotLocked(v.slot);
+    Video::RetireLocked(std::move(v.view));
+  }
+  views.clear();
+}
+
 void RetireTarget(HostSurface &surface) {
+  if (surface.depth && surface.handed)
+    DepthHandOverBeforeRetireLocked(&surface);  // banjo-nx (2026-10-19, banjo_deko3d_depth_handover)
+  FreeDepthViews(surface.handover_views);
+  surface.stencil_used = false;
+  ++g_surface_epoch;
   ForgetFramebuffers(&surface);
   if (surface.sample_slot != UINT32_MAX)
     Video::FreeTextureSlotLocked(surface.sample_slot);
@@ -139,7 +181,19 @@ bool BuildTarget(HostSurface &surface, const d3d::SurfaceDesc &desc, uint32_t mi
   surface.depth = d3d::IsDepthFormat(surface.format_word);
   surface.samples = SampleCount(surface.info_word);
   if (surface.depth) {
-    surface.format = DepthTargetFormat();
+    surface.format = DepthTargetFormat(surface.format_word);  // banjo-nx (2026-10-19, banjo_deko3d_depth24)
+    if (banjo::renut_gpu::Depth24On()) {
+      // As GetHostSurfaceSlow keys it: a view ever bound as D24FS8 is 32-bit float for every surface over it.
+      const auto it = g_depth_view_formats.find(TargetKey(desc, true, plume::RenderFormat::UNKNOWN, scale));
+      if (it != g_depth_view_formats.end() && (it->second & 2))
+        surface.format = DepthTargetFormat();
+    }
+    if (surface.format != DepthTargetFormat()) {
+      static uint32_t logged = 0;
+      if (logged++ < 16)
+        RGPU_INFO("Depth target {:08X}: {}x{} x{} samples, 24-bit unorm depth with stencil (banjo_deko3d_depth24)",
+                  surface.guest_va, surface.width, surface.height, u32(surface.samples));
+    }
   } else {
     surface.format = SurfaceColorFormat(desc);
   }
@@ -200,11 +254,14 @@ void LatchResolutionScaleLocked() {
     RGPU_INFO("Render resolution {}x{} ({:.3g}x)", scale.Size(GuestScreenWidth()), scale.Size(720),
               scale.Factor());
     g_resolution_scale = scale;
+    ++g_surface_epoch;
     g_resolution_latched = true;
   }
 }
 
 void SetTilingExtentLocked(uint32_t width, uint32_t height) {
+  if (g_tiling_width != width || g_tiling_height != height)
+    ++g_surface_epoch;
   g_tiling_width = width;
   g_tiling_height = height;
 }
@@ -216,6 +273,7 @@ void UnuseTarget(uint64_t key) {
   if (users == g_target_users.end() || --users->second)
     return;
   g_target_users.erase(users);
+  ++g_surface_epoch;
   if (auto it = g_targets.find(key); it != g_targets.end()) {
     RetireTarget(*it->second);
     g_targets.erase(it);
@@ -254,6 +312,8 @@ void ColorAliasesLocked(const HostSurface *surface, std::vector<HostSurface *> &
   }
 }
 
+HostSurface *GetHostSurfaceSlow(u32 surface_va, const d3d::SurfaceDesc *desc);
+
 HostSurface *GetHostSurfaceLocked(u32 surface_va) {
   if (!surface_va)
     return nullptr;
@@ -264,15 +324,54 @@ HostSurface *GetHostSurfaceLocked(u32 surface_va) {
   if (!desc)
     return nullptr;
 
+  const bool memo = banjo::renut_gpu::CpuMemosOn();
+  SurfaceMemo &m = g_surface_memo[(surface_va * 0x9E3779B1u) >> 26];
+  if (memo && m.epoch == g_surface_epoch && m.va == surface_va && m.size == desc->Size &&
+      m.info == desc->SurfaceInfo && m.format == desc->Format) {
+    // the same as the lookup's: the surface bound now
+    m.surface->size_word = desc->Size;
+    m.surface->info_word = desc->SurfaceInfo;
+    m.surface->format_word = desc->Format;
+    return m.surface;
+  }
+  HostSurface *result = GetHostSurfaceSlow(surface_va, desc);
+  if (memo && result) {
+    m.va = surface_va;
+    m.size = desc->Size;
+    m.info = desc->SurfaceInfo;
+    m.format = desc->Format;
+    m.epoch = g_surface_epoch;
+    m.surface = result;
+  }
+  return result;
+}
+
+HostSurface *GetHostSurfaceSlow(u32 surface_va, const d3d::SurfaceDesc *desc) {
   const bool depth = d3d::IsDepthFormat(desc->Format);
-  const plume::RenderFormat format = depth ? DepthTargetFormat() : SurfaceColorFormat(*desc);
+  plume::RenderFormat format = depth ? DepthTargetFormat(desc->Format) : SurfaceColorFormat(*desc);
   // The render resolution, or the finer one graphics_options gives it.
   const RenderScale scale = SurfaceRenderScale(*desc, g_resolution_scale);
+  if (depth && banjo::renut_gpu::Depth24On()) {
+    // banjo-nx (2026-10-19, banjo_deko3d_depth24): one view, one format (g_depth_view_formats).
+    uint8_t &seen = g_depth_view_formats[TargetKey(*desc, true, plume::RenderFormat::UNKNOWN, scale)];
+    const uint8_t bit = (desc->Format & 0x3F) == 23 ? 2 : 1;
+    if ((seen | bit) == 3 && seen != 3) {
+      static uint32_t logged = 0;
+      if (logged++ < 8)
+        RGPU_WARN("Depth view of surface {:08X} bound as both D24S8 and D24FS8: 32-bit float from now on "
+                  "(banjo_deko3d_depth24)", surface_va);
+    }
+    seen |= bit;
+    if (seen & 2)
+      format = DepthTargetFormat();
+  }
   const uint64_t key = TargetKey(*desc, depth, format, scale);
   auto [bound, first_use] = g_surface_keys.try_emplace(surface_va, key);
   if (first_use) {
     ++g_target_users[key];
+    ++g_surface_epoch;
   } else if (bound->second != key) {
+    ++g_surface_epoch;
     // The header was rewritten (or the VA reused without Destroy reaching
     // us): the surface is a view of other EDRAM now.
     UnuseTarget(bound->second);
@@ -303,6 +402,7 @@ HostSurface *GetHostSurfaceLocked(u32 surface_va) {
     slot = std::make_unique<HostSurface>();
     slot->guest_va = surface_va;
   }
+  ++g_surface_epoch;
   if (!BuildTarget(*slot, *desc, min_width, min_height, scale))
     return nullptr;
   // No defined content yet; D3D12 wants a new target discarded (or cleared)
@@ -341,6 +441,7 @@ void ReleaseHostSurfaceLocked(u32 surface_va) {
     return;
   const uint64_t key = it->second;
   g_surface_keys.erase(it);
+  ++g_surface_epoch;
   UnuseTarget(key);
 }
 
@@ -385,6 +486,12 @@ uint32_t SurfaceStencilSlotLocked(HostSurface *surface) {
 void TransitionSurfaceLocked(HostSurface *surface, plume::RenderTextureLayout layout) {
   if (!surface || !surface->texture || surface->layout == layout)
     return;
+  // banjo-nx (2026-10-19, banjo_deko3d_barrier_lean): from one read layout to another: no barrier (textures.cpp).
+  if (IsDeko3D() && banjo::renut_gpu::Deko3DBarrierLeanOn() && ReadOnlyLayout(surface->layout) &&
+      ReadOnlyLayout(layout)) {
+    surface->layout = layout;
+    return;
+  }
   plume::RenderCommandList *cmd = Video::CommandListLocked();
   if (!cmd)
     return;
@@ -398,6 +505,108 @@ void TransitionSurfaceLocked(HostSurface *surface, plume::RenderTextureLayout la
   surface->layout = layout;
 }
 
+void SwapDepthImageLocked(HostSurface &surface, DepthImage &image) {
+  ++g_surface_epoch;
+  std::swap(surface.texture, image.texture);
+  std::swap(surface.layout, image.layout);
+  std::swap(surface.generation, image.generation);
+  std::swap(surface.sample_view, image.sample_view);
+  std::swap(surface.sample_slot, image.sample_slot);
+  std::swap(surface.stencil_view, image.stencil_view);
+  std::swap(surface.stencil_slot, image.stencil_slot);
+  std::swap(surface.handover_views, image.views);
+  image.host_width = surface.scale.Size(surface.width);
+  image.host_height = surface.scale.Size(surface.height);
+  image.format = surface.format;
+  image.samples = surface.samples;
+  image.format_word = surface.format_word;
+}
+
+bool MakeDepthImageLocked(const HostSurface &surface, DepthImage &image) {
+  plume::RenderDevice *device = Video::Device();
+  const uint32_t w = surface.scale.Size(surface.width), h = surface.scale.Size(surface.height);
+  image.texture = device->createTexture(
+      plume::RenderTextureDesc::DepthTarget(w, h, surface.format, plume::RenderMultisampling(surface.samples)));
+  if (!TextureCreated(image.texture.get())) {
+    image.texture.reset();
+    ReportDeviceLost(device);
+    return false;
+  }
+  image.texture->setName("renut depth surface (hand-over)");
+  image.layout = plume::RenderTextureLayout::UNKNOWN;
+  image.generation = g_next_generation++;
+  image.host_width = w;
+  image.host_height = h;
+  image.format = surface.format;
+  image.samples = surface.samples;
+  image.format_word = surface.format_word;
+  return true;
+}
+
+void RetireDepthImageLocked(DepthImage &image) {
+  // The framebuffers a surface made over this image (cached by its generation).
+  for (size_t i = 0; i < g_framebuffers.size();) {
+    if (g_framebuffers[i].key.depth && g_framebuffers[i].key.depth_generation == image.generation) {
+      Video::RetireLocked(std::move(g_framebuffers[i].framebuffer));
+      g_framebuffers[i] = std::move(g_framebuffers.back());
+      g_framebuffers.pop_back();
+      ++g_framebuffer_epoch;
+    } else {
+      ++i;
+    }
+  }
+  FreeDepthViews(image.views);
+  if (image.sample_slot != UINT32_MAX && image.sample_slot != kInvalidDescriptor)
+    Video::FreeTextureSlotLocked(image.sample_slot);
+  image.sample_slot = UINT32_MAX;
+  Video::RetireLocked(std::move(image.sample_view));
+  if (image.stencil_slot != UINT32_MAX && image.stencil_slot != kInvalidDescriptor)
+    Video::FreeTextureSlotLocked(image.stencil_slot);
+  image.stencil_slot = UINT32_MAX;
+  Video::RetireLocked(std::move(image.stencil_view));
+  Video::RetireLocked(std::move(image.texture));
+}
+
+void TransitionDepthImageLocked(DepthImage &image, plume::RenderTextureLayout layout) {
+  if (!image.texture || image.layout == layout)
+    return;
+  if (IsDeko3D() && banjo::renut_gpu::Deko3DBarrierLeanOn() && ReadOnlyLayout(image.layout) && ReadOnlyLayout(layout)) {
+    image.layout = layout;
+    return;
+  }
+  plume::RenderCommandList *cmd = Video::CommandListLocked();
+  if (!cmd)
+    return;
+  cmd->barriers(plume::RenderBarrierStage::GRAPHICS, plume::RenderTextureBarrier(image.texture.get(), layout));
+  image.layout = layout;
+}
+
+uint32_t DepthImageViewSlotLocked(plume::RenderTexture *texture, plume::RenderFormat format,
+                                  std::vector<DepthImage::View> &views, const plume::RenderComponentMapping &mapping) {
+  if (!texture)
+    return kInvalidDescriptor;
+  for (const DepthImage::View &v : views) {
+    if (v.mapping.r == mapping.r && v.mapping.g == mapping.g && v.mapping.b == mapping.b && v.mapping.a == mapping.a)
+      return v.slot;
+  }
+  // The depth format views the depth plane (deko3d samples it in the red channel), with the destination's mapping.
+  plume::RenderTextureViewDesc desc = plume::RenderTextureViewDesc::Texture2D(format);
+  desc.componentMapping = mapping;
+  DepthImage::View v;
+  v.mapping = mapping;
+  v.view = texture->createTextureView(desc);
+  if (!v.view)
+    return kInvalidDescriptor;
+  v.slot = Video::AllocateTextureSlotLocked();
+  if (v.slot == kInvalidDescriptor) {
+    Video::RetireLocked(std::move(v.view));
+    return kInvalidDescriptor;
+  }
+  Video::SetTextureSlotLocked(v.slot, texture, v.view.get());
+  views.push_back(std::move(v));
+  return views.back().slot;
+}
+
 plume::RenderFramebuffer *GetFramebufferLocked(HostSurface *const *colors, uint32_t color_count,
                                                HostSurface *depth) {
   FramebufferKey key;
@@ -407,9 +616,29 @@ plume::RenderFramebuffer *GetFramebufferLocked(HostSurface *const *colors, uint3
   }
   key.depth = depth;
   key.depth_generation = depth ? depth->generation : 0;
+  // banjo-nx (2026-10-19, render-thread proposal 8): the recent ones first, the found one moved to the front.
+  for (uint32_t i = 0; i < 4; ++i) {
+    RecentFramebuffer &r = g_recent_framebuffers[i];
+    if (r.epoch == g_framebuffer_epoch && r.framebuffer && r.key == key) {
+      plume::RenderFramebuffer *found = r.framebuffer;
+      if (i) {
+        const RecentFramebuffer hit = r;
+        for (uint32_t j = i; j > 0; --j)
+          g_recent_framebuffers[j] = g_recent_framebuffers[j - 1];
+        g_recent_framebuffers[0] = hit;
+      }
+      return found;
+    }
+  }
+  auto remember = [&key](plume::RenderFramebuffer *framebuffer) {
+    for (uint32_t j = 3; j > 0; --j)
+      g_recent_framebuffers[j] = g_recent_framebuffers[j - 1];
+    g_recent_framebuffers[0] = {key, framebuffer, g_framebuffer_epoch};
+    return framebuffer;
+  };
   for (auto &cached : g_framebuffers) {
     if (cached.key == key)
-      return cached.framebuffer.get();
+      return remember(cached.framebuffer.get());
   }
 
   const plume::RenderTexture *attachments[d3d::kMaxRenderTargets] = {};
@@ -427,7 +656,7 @@ plume::RenderFramebuffer *GetFramebufferLocked(HostSurface *const *colors, uint3
     return nullptr;
   }
   g_framebuffers.push_back({key, std::move(framebuffer)});
-  return g_framebuffers.back().framebuffer.get();
+  return remember(g_framebuffers.back().framebuffer.get());
 }
 
 } // namespace renut::gpu

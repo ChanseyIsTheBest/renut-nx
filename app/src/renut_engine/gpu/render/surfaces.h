@@ -25,6 +25,31 @@
 
 namespace renut::gpu {
 
+// banjo-nx (2026-10-19, banjo_deko3d_depth_handover): a depth target's image and what is made over it (its generation,
+// layout, sample and stencil views), which moves between a surface and a depth resolve destination that holds the
+// surface's content (render/draw.cpp, "Depth hand-over"). 'views' are a destination's views of it, by component
+// mapping (the fetch swizzle as the destination's own R32 views take it).
+struct DepthImage {
+  std::unique_ptr<plume::RenderTexture> texture;
+  plume::RenderTextureLayout layout = plume::RenderTextureLayout::UNKNOWN;
+  uint64_t generation = 0;
+  std::unique_ptr<plume::RenderTextureView> sample_view;
+  uint32_t sample_slot = UINT32_MAX;
+  std::unique_ptr<plume::RenderTextureView> stencil_view;
+  uint32_t stencil_slot = UINT32_MAX;
+  struct View {
+    plume::RenderComponentMapping mapping;
+    std::unique_ptr<plume::RenderTextureView> view;
+    uint32_t slot = UINT32_MAX;
+  };
+  std::vector<View> views;
+  // The target it was made for or last taken from: a surface takes it back only when these are its own.
+  uint32_t host_width = 0, host_height = 0;
+  plume::RenderFormat format = plume::RenderFormat::UNKNOWN;
+  plume::RenderSampleCounts samples = plume::RenderSampleCount::COUNT_1;
+  u32 format_word = 0;
+};
+
 struct HostSurface {
   u32 guest_va = 0;  // the first surface over the view
   // Header words of the surface over the view bound most recently.
@@ -55,6 +80,13 @@ struct HostSurface {
   // banjo-nx (2026-10-18): a depth/stencil target's stencil view and its slot (SurfaceStencilSlotLocked).
   std::unique_ptr<plume::RenderTextureView> stencil_view;
   uint32_t stencil_slot = UINT32_MAX;
+  // banjo-nx (2026-10-19, banjo_deko3d_depth_handover): the current image's views for destinations that sample it
+  // (DepthImage::views; they go with the image), how many destinations hold its content, and whether anything has
+  // used its stencil (a draw with the stencil test, a stencil clear): a clear of the depth alone hands the image over
+  // only when nothing has. A stencil nothing writes is undefined either way (a depth resolve's words read it as is).
+  std::vector<DepthImage::View> handover_views;
+  uint32_t handed = 0;
+  bool stencil_used = false;
 
   // gpu_profile labels of draws with it as the first target: color only,
   // color with depth, depth only. Made on first use.
@@ -114,6 +146,21 @@ void SurfaceMemoryLocked(size_t &targets, uint64_t &bytes);
 
 // banjo-nx (2026-10-19): the live surface with this generation, or nullptr (rebuilt or gone since).
 HostSurface *SurfaceByGenerationLocked(uint64_t generation);
+
+// banjo-nx (2026-10-19, banjo_deko3d_depth_handover): exchanges the surface's image (its texture, generation, layout
+// and views) with 'image'. Framebuffers are cached by surface and generation, so each image keeps its own.
+void SwapDepthImageLocked(HostSurface &surface, DepthImage &image);
+// A new image of the surface's size, format and samples for SwapDepthImageLocked; false when it cannot be made.
+bool MakeDepthImageLocked(const HostSurface &surface, DepthImage &image);
+// Retires the image, its views and the framebuffers made over it (deferred past in-flight frames).
+void RetireDepthImageLocked(DepthImage &image);
+// Moves the image into 'layout' with a barrier on the open command list.
+void TransitionDepthImageLocked(DepthImage &image, plume::RenderTextureLayout layout);
+// The slot of a view of the image with 'mapping' (made on first use, kept in 'views'), or kInvalidDescriptor.
+uint32_t DepthImageViewSlotLocked(plume::RenderTexture *texture, plume::RenderFormat format,
+                                  std::vector<DepthImage::View> &views, const plume::RenderComponentMapping &mapping);
+// render/draw.cpp: a depth target is about to go; the destinations that still hold its content get it first.
+void DepthHandOverBeforeRetireLocked(HostSurface *surface);
 
 // Framebuffer over up to 4 color targets plus depth; cached per target set.
 plume::RenderFramebuffer *GetFramebufferLocked(HostSurface *const *colors, uint32_t color_count,

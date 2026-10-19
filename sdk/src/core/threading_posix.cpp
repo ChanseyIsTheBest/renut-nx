@@ -1807,6 +1807,7 @@ class PosixConditionHandle : public T, public PosixWaitHandle {
 
   PosixCondition<T>& condition() override { return handle_; }
   void* native_handle() const override { return handle_.native_handle(); }
+  void* posix_wait_handle() override { return static_cast<PosixWaitHandle*>(this); }  // banjo-nx (2026-10-19)
 
  protected:
   PosixCondition<T> handle_;
@@ -1831,8 +1832,13 @@ PosixConditionHandle<Event>::PosixConditionHandle(bool manual_reset, bool initia
 template <>
 PosixConditionHandle<Thread>::PosixConditionHandle(pthread_t thread) : handle_(thread) {}
 
+// banjo-nx (2026-10-19, CPU proposal 21): WaitHandle::posix_wait_handle instead of a dynamic_cast (the same object).
+inline PosixWaitHandle* AsPosixWaitHandle(WaitHandle* handle) {
+  return handle ? static_cast<PosixWaitHandle*>(handle->posix_wait_handle()) : nullptr;
+}
+
 WaitResult Wait(WaitHandle* wait_handle, bool is_alertable, std::chrono::milliseconds timeout) {
-  auto posix_wait_handle = dynamic_cast<PosixWaitHandle*>(wait_handle);
+  auto posix_wait_handle = AsPosixWaitHandle(wait_handle);
   if (posix_wait_handle == nullptr) {
     return WaitResult::kFailed;
   }
@@ -1868,8 +1874,8 @@ WaitResult Wait(WaitHandle* wait_handle, bool is_alertable, std::chrono::millise
 WaitResult SignalAndWait(WaitHandle* wait_handle_to_signal, WaitHandle* wait_handle_to_wait_on,
                          bool is_alertable, std::chrono::milliseconds timeout) {
   auto result = WaitResult::kFailed;
-  auto posix_wait_handle_to_signal = dynamic_cast<PosixWaitHandle*>(wait_handle_to_signal);
-  auto posix_wait_handle_to_wait_on = dynamic_cast<PosixWaitHandle*>(wait_handle_to_wait_on);
+  auto posix_wait_handle_to_signal = AsPosixWaitHandle(wait_handle_to_signal);
+  auto posix_wait_handle_to_wait_on = AsPosixWaitHandle(wait_handle_to_wait_on);
   if (posix_wait_handle_to_signal == nullptr || posix_wait_handle_to_wait_on == nullptr) {
     return WaitResult::kFailed;
   }
@@ -1906,7 +1912,7 @@ std::pair<WaitResult, size_t> WaitMultiple(WaitHandle* wait_handles[], size_t wa
   std::vector<PosixConditionBase*> conditions;
   conditions.reserve(wait_handle_count);
   for (size_t i = 0u; i < wait_handle_count; ++i) {
-    auto handle = dynamic_cast<PosixWaitHandle*>(wait_handles[i]);
+    auto handle = AsPosixWaitHandle(wait_handles[i]);
     if (handle == nullptr) {
       return std::make_pair(WaitResult::kFailed, 0);
     }

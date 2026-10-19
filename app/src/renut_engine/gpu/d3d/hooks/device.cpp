@@ -13,6 +13,8 @@
  * render thread has read the batch's data; D3D's fence waits wait for that
  * (BlockOnFence_hook), and Swap waits when the game gets a frame too far ahead.
  */
+#include <rex/frame_latency.h>  // banjo-nx (2026-10-19)
+#include "renut_engine/display_sync.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -848,6 +850,8 @@ void D3DDevice_RunCommandBuffer_hook(u32 device_va, u32 command_buffer,
 // render_thread::kMaxFramesAhead ahead.
 void D3DDevice_Swap_hook(u32 device_va, u32 front_buffer, u32 /*parameters*/) {
   renut::frame_stats::OnGameFrame();
+  rex::latency::NoteGuestSwap();  // banjo-nx (2026-10-19, input latency): the probe
+  const uint64_t swap_ordinal = rex::latency::SwapCount();
   FlushDeferredVertices(device_va);
 
   // What the original does after handing the frame to the video hardware:
@@ -870,7 +874,7 @@ void D3DDevice_Swap_hook(u32 device_va, u32 front_buffer, u32 /*parameters*/) {
     KickFence(device);
   }
 
-  render_thread::QueueFrame([front_buffer] {
+  render_thread::QueueFrame([front_buffer, swap_ordinal] {
     PresentImage image;
     {
       std::lock_guard lock(State().mutex);
@@ -884,6 +888,8 @@ void D3DDevice_Swap_hook(u32 device_va, u32 front_buffer, u32 /*parameters*/) {
     MaybeReportMemory();
     // The front buffer is the texture the game resolved the frame into.
     Video::Present(image.texture ? &image : nullptr);
+    rex::latency::NotePresented(swap_ordinal);  // banjo-nx (2026-10-19, input latency)
+    banjo::display_sync::NotePresented(swap_ordinal);  // banjo-nx (2026-10-19, latency batch 3)
   });
   RunReadyCallbacks();
 

@@ -158,6 +158,18 @@ bool UnwatchHotReadPage(uint64_t host_address) {
 }  // namespace
 #endif
 
+u8* g_store_cards = nullptr;  // banjo-nx (2026-10-19): the store cards (xmemory.h)
+
+#if !REX_PLATFORM_SWITCH
+namespace {
+std::atomic<uint64_t> g_host_card_bytes[3];
+}
+void NoteHostStoreCards(u32 guest_address, u32 length) noexcept {
+  g_host_card_bytes[guest_address >= 0x7F000000u ? 0 : 1].fetch_add(length, std::memory_order_relaxed);
+  g_host_card_bytes[2].fetch_add(1, std::memory_order_relaxed);
+}
+#endif
+
 bool Memory::Initialize() {
   file_name_ = fmt::format("xenia_memory_{}", chrono::Clock::QueryHostTickCount());
 
@@ -242,11 +254,13 @@ bool Memory::Initialize() {
                               0x1FD00000, 4096, &heaps_.physical);
 
   // Protect the first and last 64kb of memory.
-  heaps_.v00000000.AllocFixed(0x00000000, 0x10000, 0x10000,
+  // banjo-nx (2026-10-19): the first MB holds the store cards (xmemory.h: g_store_cards), which every guest store
+  // outside the stack writes: readable and writable whatever protect_zero says (a guest access there would have faulted
+  // before, so the game makes none).
+  heaps_.v00000000.AllocFixed(0x00000000, 0x100000, 0x10000,
                               memory::kMemoryAllocationReserve | memory::kMemoryAllocationCommit,
-                              !REXCVAR_GET(protect_zero)
-                                  ? memory::kMemoryProtectRead | memory::kMemoryProtectWrite
-                                  : memory::kMemoryProtectNoAccess);
+                              memory::kMemoryProtectRead | memory::kMemoryProtectWrite);
+  g_store_cards = virtual_membase_;
   heaps_.physical.AllocFixed(0x1FFF0000, 0x10000, 0x10000, memory::kMemoryAllocationReserve,
                              memory::kMemoryProtectNoAccess);
 
@@ -2378,6 +2392,9 @@ bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> globa
     return false;
   }
   length = std::min(length, heap_size_ - heap_relative_address);
+  // banjo-nx (2026-10-19): a host write of physical memory (a file read into it, a decommit or release) marks its
+  // store cards as a guest store would.
+  MarkStoreCards(virtual_address, length);
   if (length == 0) {
     return false;
   }
@@ -2543,3 +2560,11 @@ uint32_t PhysicalHeap::GetPhysicalAddress(uint32_t address) const {
 }
 
 }  // namespace rex::memory
+
+#if !REX_PLATFORM_SWITCH
+// banjo-nx (2026-10-19): the PC diagnostics of the store cards, read and reset (which: 0 physical bytes, 1 other
+// bytes, 2 calls).
+extern "C" uint64_t RexStoreCardsHostBytes(int which) {
+  return rex::memory::g_host_card_bytes[which].exchange(0, std::memory_order_relaxed);
+}
+#endif

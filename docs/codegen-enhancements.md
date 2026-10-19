@@ -219,6 +219,14 @@ by its caller only in the calling convention's terms.
 
 On Banjo's tree: 18,754 plain writes and 15,340 record forms left out, in 13,846 functions.
 
+**The switch-back form (`BANJO_GEN_DEAD_DEFS=OFF`, `REX_DEAD_DEFS_KEEP`) did not compile until 2026-10-19** (found by
+the SA2 port): `REX_DEAD_REC`'s last parameter was named `compare`, and the keep form's body calls
+`cr0.compare<int32_t>(...)`, so the preprocessor replaced that `.compare` with the argument ("CRRegister has no member
+named cr0" at the first record form). The parameter is `record` now, in all three forms. The default and poison forms
+were not affected. For other ports: never name a function-like macro's parameter after a member the macro's body uses;
+build the switch-back form once whenever a tool's macros change, since the default build never expands it. The block
+in the pch is replaced by `install()` at the next codegen run.
+
 **History.** Its first PC builds crashed at start. The record-form and border-stub faults (above) were two causes.
 The last was the mid-asm hooks (fault 4): bisected by file with `tools/dead_defs_bisect.py` (`save`, `set <files>`,
 then a build with `BANJO_DEAD_DEFS_HOLD=1`; 213 files -> 54 -> 27 -> 13 -> 6 -> 3 -> `renut_recomp.120.cpp`), then
@@ -419,6 +427,29 @@ package 27 says whether they moved anything; each has its switch for an A/B buil
 Also measured and not taken in this round: localized copies of the XAudio mixer, sample-rate converters and router
 (they make no calls a copy could inline, and their loops already keep registers in locals: a copy only adds the hook).
 
+## Package 34's codegen round (2026-10-19)
+
+From the CPU report (`docs/cpu-codegen-proposals-2026-10-19.md`, section 0):
+
+- **Store cards** (`tools/store_cards.py`, the last post-codegen step; `BANJO_GEN_STORE_CARDS`, `REX_STORE_CARDS_OFF`):
+  every guest store outside the stack also zeroes its 4 KB page's card (`REX_CARD(ea)` = `base[ea >> 12] = 0`, the
+  cards in the guest window's first MB; one `lsr` and one `strb`, no table base register). 189,225 D-form, 12,955
+  X-form, 21,906 vector, 106 dcbz, 651 compare-and-swap, 1,084 stvlx / stvrx, 19 MMIO-capable and 694 localized-copy
+  stores; 148,169 stores through r1 (or an ea computed from it by the same instruction) left plain. For Renut's cached
+  vertex and index copies (`docs/deko3d-renderer.md` section 15).
+- **`fp_copy_forwarding`** (generator): the lfs -> stfs copy forms in any mode and through instructions that write other
+  registers, in-place fneg / fabs / fnabs followed (`(QuietSingleBits(bits) & keep) ^ flip`); an lfs takes the form
+  whenever one of its stores does (`FeedsCopyStore`, the store's own test). 901 -> 15,693 copy-form stores.
+- **The toml-comment hooks** (`tools/direct_calls.py`): `#` comments of the tomls and CMakeLists no longer name hooks;
+  24 functions (`sub_8294EF68`, `sub_823B59C0`, `sub_823B4C78`, `sub_82CE9250` among them) were on the weak alias only
+  because `renut_config.toml`'s comments named them.
+- **Hot-edge inline copies** (`tools/inline_leaves.py --hot app/config/hot_edges.txt`): the six leaf edges of the
+  console profile, callees up to 128 guest instructions, copied into the callers' files only (2 of the 6 qualify).
+- **Locals opt-out** (`app/config/locals_optout.txt`): `sub_829A6DE8`, `sub_82BDAED0`, `sub_829A1D88`, `sub_82959230`
+  back to locals (the list predates by-value vector locals).
+- PC checks of the round: the `[verify]` self-checks (r1 mirror, link-register write-backs, read-only constants,
+  flush-mode flow) 0 differences; the route plays and renders as before.
+
 ## Checks of the generated code
 
 - **The PC build compares.** Where a step has a run-time form, the PC build keeps the old operation next to the new
@@ -477,6 +508,53 @@ What this port's function-level work suggests for the shared generator and tools
   per-function choice from measured costs.
 - **The build**: a generator that rewrites its outputs (and its manifest) with the same text on every run makes ninja
   recompile everything; give unchanged files their old times back (`post_codegen.py`, `keep_unchanged_times`).
+
+### Loop and leaf locals: choosing the functions (for every port, 2026-10-19)
+
+`loop_locals.py` and `leaf_locals.py` move guest registers out of the context (a memory access each time) into C++
+locals, which the compiler keeps in host registers. That only pays while the locals fit: the A57 has 31 integer and 32
+vector registers, and some of them are taken by `ctx`, `base` and the generated code's temporaries. Past that, GCC
+spills locals to the host stack, and a spill and its reload are memory accesses again, often more of them than the
+context accesses they replaced, plus the moves around them. So the option is a **per-function choice**, made by
+measurement, never a switch for everything and never a guess.
+
+How to use it so it does not go wrong:
+
+1. **Measure every function, both ways, with the build's own compiler line.** `tools/locals_choice.py` compiles each
+   generated file that has locals twice (as built, and with `-DREX_LOOP_LOCALS_OFF -DREX_LEAF_LOCALS_OFF`) and
+   compares each function's A57 code; the functions where the off form is cheaper go into the opt-out list
+   (`app/config/locals_optout.txt`, read by both tools). Banjo's list: 296 of 6,073 functions.
+2. **Read the spills.** The sign of a loser is the stack-relative loads and stores (`[sp, ...]` in `objdump -d`), not
+   the total: a function can get shorter and still spill inside its loop. Look at the loop bodies first.
+3. **Re-measure the whole list when anything changes register pressure:** by-value vector locals
+   (`REX_VECTOR_LOCALS_BY_VALUE`), non-volatile or non-argument locals, a post-codegen step that adds live values
+   (Banjo's store cards add a temporary per store), a compiler update or new flags. A list measured before such a change
+   is stale.
+4. **Never take a function off the list by reasoning.** Banjo's list predated by-value vector locals; the CPU report
+   (2026-10-19) assumed that was why four hot functions had lost and took them off without measuring. Two got better,
+   two got worse:
+
+   | function | what it is | instructions | stack loads/stores | result |
+   |---|---|---|---|---|
+   | `sub_829A6DE8` | culling test, a tight vector loop | 249 -> 183 | 20 -> 6 (loop memory ops 91 -> 29) | keeps locals |
+   | `sub_82959230` | loop | 3,176 -> 2,980 | 768 -> 587 | keeps locals |
+   | `sub_82BDAED0` | script interpreter, about 13,000 instructions, big switch | 13,371 -> 15,459 | 4,426 -> 5,396 | back on the list |
+   | `sub_829A1D88` | large function, many registers live at once | 2,367 -> 2,562 | 406 -> 770 | back on the list |
+
+   The shapes that win: loops with a small live set, vector loops. The shapes that lose: interpreters and large
+   switch functions, long code with many registers live across it.
+5. **Compare with only the list changed.** Two objects that differ in nothing but the opt-out list (same generator,
+   same post-codegen steps, same flags). Banjo's first comparison above also had that round's store cards and float
+   forwarding in the new object; the stack counts still told the story (the cards never touch the stack), but the
+   totals were mixed. For a hot function, also weigh the blocks by a run's counts (`tools/hot_arm_compare.py`), and let
+   the console profile decide.
+   The same two measured again with only the list different (both objects with the cards and the forwarding):
+   `sub_82BDAED0` with locals 15,459 instructions and 5,396 stack loads/stores, without 12,968 and 3,931 (the locals
+   alone +19 % instructions, +1,465 spills and reloads); `sub_829A1D88` with 2,562 and 770, without 2,367 and 406.
+6. **Batch list changes.** The tools never undo a function they converted, so a new list needs a fresh codegen (Banjo:
+   edit the comment in `renut_config.toml`). `keep_unchanged_times` cannot give the unchanged files an mtime older than
+   the generator's inputs (ninja would run the step on every build), so that fresh codegen recompiles every generated
+   file on every platform (on the Switch about 45 minutes with the registration table).
 
 ## Audit
 

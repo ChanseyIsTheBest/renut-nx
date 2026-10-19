@@ -256,6 +256,24 @@ merge, a discard inside) equal on 500 random input sets each. PS GPU-time weight
 branch and join instructions 40 -> 23; the registers fall most: the heavy pixel shaders from 40 to 31-32 (one step of
 8 fewer: up to 64 warps an SM instead of about 51), the fur shader 44 -> 39, the median 40 -> 32.
 
+### 2.30 `dowhile`: `do { ... break; } while(false)` early exits as if / else (2026-10-19)
+SPIRV-Cross writes the early exits of Renut's shaders (the texture-array choice, the early alpha test, the main body's
+fog / colour paths) as a one-pass loop with breaks; Mesa does not unroll it, so uam compiles a loop (PBK, BRK, a
+reconvergence for each exit) and 2.26's equivalent-if matching, which needs a function without loops, never ran in
+those shaders. When the breaks are only the last statement of ifs at the loop's top level (no else) and its last
+statement (a break inside a nested loop or switch is that loop's), it is `if (c) { A } else { rest }`, nested from the
+last exit out, in a block of its own. All 7,355 such blocks of the pixel shaders convert; every shader compiles
+(`--check`); `uamx/difftest_dowhile.py` (two exits, no final break, nested blocks with a discard, a break too deep to
+convert) equal on 500 random input sets each. Fur shader 1038 -> 1024 (903 = 5) and 982 -> 975 (903 = 8), branch
+and join instructions 59 -> 47 and 44 -> 37.
+
+### 2.31 `selsame`: a select inside a select on the same condition (2026-10-19)
+Renut's lights select each term on the light's flag twice, `dk_sel(c, (dk_sel(c, exp2(a), b)), d)`: with the same
+condition text the inner select's other value can never be chosen, so it is `dk_sel(c, exp2(a), d)` (and
+`dk_sel(c, a, dk_sel(c, x, y))` is `dk_sel(c, a, y)`). The conditions are variables or pure expressions (GLSL has no
+calls with effects). The fur shader (903 = 5) 1024 -> about 1018 instructions. Every shader compiles; the cache of the
+package (`deko3d_shaders_41.bin`, 9,188 variants, pruned to the pipelines of the lists, emulator run 54's list included) is made with this pass.
+
 ### The DKSH cache and the console's compiles
 Emulator run 47 (package 34's round-two build) compiled 183 variants during play: 103 were alpha function 903 = 5
 (greater), which the guesses for alpha-less list records lacked (8 and 7): `ALPHA_GUESS` is (8, 7, 5) and the cache is

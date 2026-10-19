@@ -17,10 +17,82 @@ SD card layout:
 Launch with a title takeover (hold R while starting a game, then open the Homebrew Menu), or a forwarder
 with a 39-bit address space. From the Album it will not have enough memory.
 
-Latest changes (this build, 2026-10-18, package 34: CPU fixes, more GPU and shader work)
------------------------------------------------------------------------------------------
-  COPY: banjo-nx.nro (NRO_SIZE bytes, md5 NRO_MD5...), renut.toml (CHANGED: new keys written out, all on), the configs
-  folder (regenerated, 3 new configs) and the NEW deko3d_shaders.bin from the package folder (next to the zip). The
+Latest changes (this build, 2026-10-19 night, package 35b: the fur fix, the limiter on the display's refresh)
+-------------------------------------------------------------------------------------------------------------
+  COPY: banjo-nx.nro (NRO_SIZE bytes, md5 NRO_MD5...), renut.toml and renut_auto.toml (CHANGED: 3 new keys), the
+  configs folder (regenerated: banjo_display_sync_on.toml is new) and the NEW deko3d_shaders.bin from the package
+  folder (next to the zip; package 35's is not used: the shaders changed again). Keep your pipeline_list.bin.
+  1. The fur regression of package 35, fixed. Your package 35 logs: the heavy scenes' GPU went 48-52 -> 52-55 ms a
+     frame, all of it in the blended fur shells (the fur shader 9.0 -> 12.1 ms, three others about twice as slow). The
+     Jinjo Bingo fix added a value the shaders read that the early-alpha tool did not know, so 3,604 shaders lost
+     Renut's early alpha test (a quad whose pixels all fail is discarded before the shader body); the pictures were
+     identical, only slower. The tool knows it now: 3,663 shaders have their early test again, and the heavy scenes
+     should come back to package 34's GPU time less the 1 ms the depth hand-over saves.
+  2. Latency batch 3, OFF by default in this package: in the emulator every run with it on stalled or hung, and the
+     runs without it did not; I have not found why yet. Try it on the console only with
+     configs/banjo_display_sync_on.toml, after the main runs. What it does: the frame limiter (frame_cap = "30")
+     follows the display's refresh. It released frames on its own
+     33.3 ms timer, whose phase to the display slid: an image finished just after a refresh waited almost 16.7 ms more,
+     and now and then one frame was shown for three refreshes and the next for one. Now each frame is released at a
+     refresh plus a phase the game measures (as late as the frames still reach the display at the same refresh);
+     a frame that ends late still goes at once (no 20 fps snapping). Late input's ceiling is now 80 % of the frame
+     interval instead of 30 ms (it was at its ceiling in your 18 fps scenes; this part is on).
+     With the config, a [display] line every 10 s: present -> display and input -> display (when the image is really
+     on the screen, not just handed over), the phase and its misses, and diagnostics for the emulator's stalls.
+  Runs: (a) renut_auto.toml's scripted route, as for package 35: the fur scenes' GPU time is the check of item 1.
+  (b) only if (a) went well: the same route with configs/banjo_display_sync_on.toml. If the game stalls or hangs,
+  send that log (it tells me where); if it runs, the [display] lines give the latency it gains.
+
+Package 35 (2026-10-19 evening: GPU, render thread, Jinjo Bingo, input latency)
+-------------------------------------------------------------------------------
+  COPY: banjo-nx.nro (package 35's), renut.toml and renut_auto.toml (CHANGED: 8 new keys, all on),
+  the configs folder (regenerated, 7 new configs) and the NEW deko3d_shaders.bin from the package folder (next to the
+  zip): every shader changed (the Jinjo Bingo fix below), so the old cache is not used and without the new one the
+  console compiles every shader again during play. Keep your pipeline_list.bin (and send it with the logs if you can).
+  1. GPU (docs/deko3d-renderer.md, section 16), from your package 34 profile (depth resolves 3.3 ms a frame):
+     - shadow maps are no longer copied: the scene samples them straight from their depth buffers, and the shadow pass
+       draws into a second buffer while the first is read (2 of the 5 depth copies a frame gone; "depth hand-over" line);
+     - shadow maps (and the other D24S8 depth buffers) in the Xbox 360's own 24-bit depth format, 4 bytes a pixel
+       instead of 8 (their depth is the console's 24-bit value now, within one 24-bit step of before);
+     - fewer GPU pipeline drains (barriers merged, no cache flush where only writes follow, none between two reads);
+       the deko3d line counts the barriers and now the copy-engine work by kind;
+     - the black clear of the whole screen before the frame is skipped (the frame covers it).
+  2. Render thread (docs/render-thread-proposals-2026-10-19.md, the report from the agent; most of it taken):
+     - texture checks proven by the store cards like the vertex copies (the "store cards" line counts textures too;
+       on the emulator over 99 % of the checks, 0 changed under clean cards);
+     - float constants and the shared constants pushed to the GPU by what changed (pipelined constant-buffer updates)
+       instead of a 5.7 KB upload per draw, and no cache clean of them;
+     - the texture binding memo by texture (it almost never hit: every upload and resolve reset it), the pipeline memo
+       8 times larger, framebuffer / surface / viewport memos, per-shader summaries, the memexport bookkeeping once
+       per draw instead of four times, the upload ring cleaned only where written, the ring clean on core 2, no heap
+       allocation per draw, the GPU profile's labels only on the frames it times, and smaller items;
+     - one proposal was taken out again: holding the renderer's lock across render items hung the emulator at the first
+       loading screen.
+  3. The Jinjo Bingo fix from Renut upstream (Beta-Nut 4, commit 574b488): "jinjo bingo would show a black square
+     instead of the silhouette of the item". A draw the game confines to one tile of the screen gets its pixel
+     position relative to that tile, as on the Xbox 360 (the shaders read it: every shader rebuilt, hence the new
+     deko3d_shaders.bin).
+  4. Input latency:
+     - the GPU gets each frame's work in pieces at the game's kicks (up to 4 a frame) instead of all at the present:
+       it starts sooner, and the frame is shown sooner;
+     - when the render thread is the slower one, the game's frame used to wait at its Swap; the game now reads the
+       controller later by about that wait (less 2 ms), so the frame shows newer input without coming any later;
+     - the [latency] line every 10 s: input -> swap -> present (the means and maxima), and the late input delay.
+     configs/banjo_deko3d_kick_submit_off.toml and banjo_late_input_off.toml are the A/Bs.
+  On the emulator (Ryujinx, the scripted route) the pictures are as before with all of it on.
+  Runs: (a) renut.toml: the intro cutscene, the title screen a minute, the menu, a minute of Spiral Mountain, and if
+  you can a Jinjo Bingo board with an unknown item (it should show the item's silhouette, not a black square); send
+  logs/rex and deko3d.log. The [latency] line gives input -> present every 10 s; tell me how the controls feel against
+  package 34. (b) renut_auto.toml's scripted route (it plays itself), then the same route with
+  configs/banjo_late_input_off.toml and configs/banjo_deko3d_kick_submit_off.toml: the [latency] lines of the three
+  logs compare the latency work, the fps and the GPU profile its cost. (c) If you have time:
+  configs/banjo_deko3d_push_constants_off.toml (the pushed constants' A/B of the render thread) and
+  banjo_deko3d_depth_handover_off.toml (the shadow-map copies back, the GPU's A/B), on the scripted route.
+
+Package 34 (2026-10-19: CPU work from the codegen report, more GPU and shader work)
+-----------------------------------------------------------------------------------
+  COPY: banjo-nx.nro (package 34's), renut.toml (CHANGED: new keys written out, all on), the configs
+  folder (regenerated, 6 new configs) and the NEW deko3d_shaders.bin from the package folder (next to the zip). The
   shader compiler changed again, so the old deko3d_shaders.bin is not used: without the new one the console compiles
   every shader again during play. Keep your pipeline_list.bin (and if you can, send it to me with the logs: the next
   shader cache can then hold every pipeline you have played, not only the emulator's).
@@ -52,9 +124,26 @@ Latest changes (this build, 2026-10-18, package 34: CPU fixes, more GPU and shad
   5. Depth resolves: the "words" copy of each depth resolve (depth and stencil as bytes) is written only for the
      resolves something reads that way (the depth of field's); the shadow maps' and the others' are not: about 14 MB a
      frame less to write. configs/banjo_renut_words_always.toml writes them every time, for the A/B.
+  6. CPU, the codegen report's proposals (docs/cpu-codegen-proposals-2026-10-19.md, section 0 lists what was taken):
+     - the render thread no longer hashes every cached vertex and index copy after each kick (16 MB a frame in
+       gameplay, about a quarter of the render thread in your profile): every game store outside the stack now marks
+       its 4 KB page, and a copy is hashed again only when one of its pages was written. The "store cards" line every
+       10 s counts both. configs/banjo_renut_store_cards_off.toml hashes as before (the A/B of the render thread; the
+       marks themselves cost the game threads a little and stay);
+     - texture bindings, render targets and pipelines looked up once per change instead of every draw; the recording
+       threads take no lock per recorded draw; clears and resolves no longer allocate; the GPU state of a pipeline is
+       sent only in the parts that differ from what is bound. configs/banjo_renut_cpu_memos_off.toml and
+       banjo_renut_pipeline_memo_off.toml are the A/Bs;
+     - the recompiled game code: single floats copied through a register (also negated or made absolute on the way)
+       without two conversions (15,700 places, the culling loop of the drawing threads among them); the hottest calls
+       between generated files inlined; 24 functions that a comment in the codegen config made look "hooked" are
+       inlinable again; the four hottest functions that had their registers kept in memory now use locals; the
+       kernel's waits and exports cheaper.
   Runs: (a) renut.toml: the intro cutscene, the title screen a minute, the menu, a minute of Spiral Mountain; send
   logs/rex and deko3d.log (the GPU profile by shader is on). (b) configs/banjo_deko3d_early_hoist_off.toml, the same
   route: the fur shader's line in the GPU profile tells whether 4 fetches fewer beat 2 registers more.
+  (c) the CPU A/Bs if you have time, each on renut_auto.toml's scripted route (it plays itself):
+  configs/banjo_renut_store_cards_off.toml, then banjo_renut_cpu_memos_off.toml. Send logs/rex after each.
   Optional: configs/banjo_deko3d_uam_gvn_off.toml and _uam_uniform_branches_off turn the compiler's two new passes off
   (they compile their shaders during play: the CPU numbers of those runs do not count, the GPU profile does).
 

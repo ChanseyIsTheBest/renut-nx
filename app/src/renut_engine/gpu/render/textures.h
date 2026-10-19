@@ -26,6 +26,9 @@
 
 namespace renut::gpu {
 
+struct DepthImage;   // render/surfaces.h
+struct HostSurface;
+
 struct HostTexture {
   u32 guest_va = 0;
   u32 desc[6] = {};  // the header fetch constant bits that define the data
@@ -77,6 +80,13 @@ struct HostTexture {
   std::vector<SwizzleView> swizzle_views;
 
   bool gpu_written = false;     // content comes from a Resolve, not guest memory
+  // banjo-nx (2026-10-19, render-thread proposal 1, banjo_renut_store_cards): the last content check's hash and the
+  // card interval it was taken in (a check while no page of the texture was written since reuses it), and the
+  // interval its last deferred upload read the guest bytes in (a dynamic texture is not uploaded again while none
+  // was written since).
+  uint64_t last_hash = 0;
+  uint64_t hash_interval = UINT64_MAX;
+  uint64_t read_interval = UINT64_MAX;
   uint64_t trace_frame = UINT64_MAX;  // banjo-nx: banjo_renut_diag_resolve_trace's frame
   bool uploaded = false;
   uint64_t content_hash = 0;
@@ -129,6 +139,15 @@ struct HostTexture {
     uint32_t slot = UINT32_MAX;
   };
   std::vector<WordsView> words_views;
+  // banjo-nx (2026-10-19, banjo_deko3d_depth_handover; render/draw.cpp, "Depth hand-over"): a depth resolve
+  // destination whose content is not in 'texture' but in the image of the target it was resolved from (handed_from,
+  // which has its generation and writes since), or in 'held' (that image, taken at the target's next whole clear;
+  // held_current). 'held' stays as the image the target takes at the clear after.
+  HostSurface *handed_from = nullptr;
+  uint64_t handed_generation = 0;
+  uint64_t handed_writes = 0;
+  std::shared_ptr<DepthImage> held;
+  bool held_current = false;
 };
 
 struct TextureBinding {
@@ -158,7 +177,9 @@ constexpr uint32_t kMaxExtraLevels = 3;
 // Starts a new frame for content checks.
 void AdvanceTextureFrameLocked();
 // banjo-nx (banjo_renut_diag_draw_log_s): the frame number AdvanceTextureFrameLocked counts.
-uint64_t TextureFrameLocked();
+// banjo-nx (2026-10-19, render-thread proposal 22): inline (called per fetch slot).
+extern uint64_t g_texture_frame;
+inline uint64_t TextureFrameLocked() { return g_texture_frame; }
 
 // D3D::UnlockResource: the CPU has written the resource at 'resource_va'. Any
 // thread; does not need State().mutex.
@@ -170,7 +191,34 @@ void FlushTextureFillsLocked();
 
 // Bindless slot for the texture bound as 'texture_va'. Falls back to the null
 // texture of the fetch constant's dimension when there is nothing to bind.
-TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetch);
+// banjo-nx (2026-10-19, CPU proposal 2): what a bind did besides its result, for FillTextures' memo to do again on a
+// hit: the textures it moved to SHADER_READ and its counters.
+struct BindEffects {
+  HostTexture *transition[2] = {nullptr, nullptr};
+  // banjo-nx (2026-10-19, banjo_deko3d_depth_handover): the target image a destination was sampled through.
+  HostSurface *handover_surface = nullptr;
+  DepthImage *handover_image = nullptr;
+  bool float_sampled = false;  // CountDepthFloatSampled
+  bool words_viewed = false;   // CountDepthWords(true)
+  // banjo-nx (2026-10-19, render-thread proposal 3): the bind went through a depth resolve's words (a view of them, or
+  // a copy; EnsureDepthWordsLocked), which every depth resolve can change: such a memo entry also holds g_depth_epoch.
+  bool depth_source = false;
+};
+// Bumped by everything BindTextureLocked reads besides its arguments and the guest header: a texture created, retired
+// or uploaded, a resolve destination set (every resolve), depth words copied or a view of them made.
+extern uint64_t g_texture_epoch;
+// banjo-nx (2026-10-19, render-thread proposal 3): bumped by every depth resolve (GetDepthResolveTextureLocked).
+// g_texture_epoch is now bumped only by what changes a binding: a texture made or retired, a view or slot made, a
+// resolve destination or depth words entry that changes, depth words copied, a depth hand-over's state; no longer by
+// texture uploads (content) or by resolves into the destination already there.
+extern uint64_t g_depth_epoch;
+TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetch, BindEffects *fx = nullptr);
+
+// banjo-nx (2026-10-19, banjo_deko3d_depth_handover; render/draw.cpp): the slot a depth resolve destination is sampled
+// through while its content is a target's image ('mapping': the fetch swizzle as its own views take it), or UINT32_MAX
+// (its own texture); and a destination that goes stops holding anything.
+uint32_t DepthHandOverSlotLocked(HostTexture &dest, const plume::RenderComponentMapping &mapping, BindEffects *fx);
+void DepthHandOverForgetLocked(HostTexture &dest);
 
 // The guest memory a texture's data spans: pages[0]/sizes[0] its base level,
 // pages[1]/sizes[1] its mip chain (a page is 4 KiB of physical memory; a zero
@@ -207,6 +255,8 @@ void ReleaseHostTextureLocked(u32 texture_va);
 void ReleaseHostTexturesInMemoryLocked(u32 physical, u32 size);
 
 void TransitionTextureLocked(HostTexture *texture, plume::RenderTextureLayout layout);
+// banjo-nx (2026-10-19): a layout a texture is only read in (banjo_deko3d_barrier_lean).
+bool ReadOnlyLayout(plume::RenderTextureLayout layout);
 
 // Rebuilds the host levels of a resolve destination (HostTexture::extra_levels)
 // over 'rect' of level 0, in host texels, after a resolve wrote it. Leaves the

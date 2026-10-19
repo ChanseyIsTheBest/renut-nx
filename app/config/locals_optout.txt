@@ -8,6 +8,14 @@
 # code that only runs after a call of ppc_trap (GCC's copies into the trap path) left out.
 # Listed when the off form is cheaper by more than 2.0 % of the on form: 296 of 6073 functions
 # with locals, on - off = +350789. Static counts of the compiled code, not run-time samples.
+# 2026-10-19 (CPU proposal 12): the list was made before REX_VECTOR_LOCALS_BY_VALUE (vector locals as values, not
+# references to ctx), which is what made the vector-heavy functions lose. The four hottest of the console profile
+# taken off it to be measured again: sub_829A6DE8 (the culling test, 1.70 % of the guest samples), sub_82BDAED0,
+# sub_829A1D88, sub_82959230. Measured on the Switch objects (with that round's other changes): sub_829A6DE8 249 -> 183
+# instructions (loop memory operations 91 -> 29) and sub_82959230 3176 -> 2980 keep their locals; sub_82BDAED0
+# 13371 -> 15459 (stack 4426 -> 5396) and sub_829A1D88 2367 -> 2562 (stack 406 -> 770) spill: back on the list.
+leaf sub_829A1D88
+loop sub_82BDAED0
 leaf rex_LoadTexelBlock_DXT_A5__YAXPBXPAU__vector4__I_Z
 leaf rex_NellyWarpSC36
 leaf rex_PeakPick
@@ -70,8 +78,6 @@ leaf sub_8292B2F0
 leaf sub_829612A8
 leaf sub_8297E5C0
 leaf sub_829A1538
-leaf sub_829A1D88
-leaf sub_829A6DE8
 leaf sub_829F4868
 leaf sub_829FFA98
 leaf sub_82A053E8
@@ -257,7 +263,6 @@ loop sub_8294E1A8
 loop sub_82950B88
 loop sub_82954250
 loop sub_82955568
-loop sub_82959230
 loop sub_8295E1B0
 loop sub_82961BD0
 loop sub_82968EA8
@@ -283,7 +288,6 @@ loop sub_82BD4330
 loop sub_82BD6120
 loop sub_82BD8720
 loop sub_82BD9408
-loop sub_82BDAED0
 loop sub_82BDD080
 loop sub_82BE20A8
 loop sub_82BE22F0

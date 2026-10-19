@@ -76,6 +76,13 @@ enum class CSRState { Unknown, FPU, VMX };
 /**
  * @brief Context passed to instruction builders during code generation.
  */
+/// banjo-nx (fp_copy_forwarding): what the fneg / fabs / fnabs between an lfs and its stfs do to the single's bits:
+/// (bits & keep) ^ flip.
+struct FloatCopySign {
+  uint32_t keep = 0xFFFFFFFFu;
+  uint32_t flip = 0;
+};
+
 struct BuilderContext {
   /// Raw output buffer for code generation
   std::string& out;
@@ -323,7 +330,7 @@ struct BuilderContext {
   /// fp_copy_pairs: this stfs / stfsx writes loaded bits: its register still holds what an lfs / lfsx of the
   /// same block put there (see RecompilerConfig::fpCopyPairs), and the form pays. It writes
   /// rex::ppc::QuietSingleBits of the register's bits local, without a conversion and without a mode statement.
-  bool float_copy_pair_store() const;
+  bool float_copy_pair_store(FloatCopySign* sign = nullptr) const;
 
   /// An lfs/stfs form: true when the conversion must go through rex::ppc::SingleToDoubleAnyMode /
   /// DoubleToSingleAnyMode (fp_moves_modeless with VMX mode current: no switch); otherwise switches to FPU mode as

@@ -236,6 +236,9 @@ def main():
     ap.add_argument('--out', default=os.path.join(ROOT, 'out', 'deko3d_shaders', 'deko3d_shaders.bin'))
     ap.add_argument('--merge', default=None, help='an existing cache whose entries are kept')
     ap.add_argument('--dry-run', action='store_true', help='count the variants (and the merged cache entries among them)')
+    ap.add_argument('--prune', action='store_true',
+                    help='keep only the variants of these lists (a merged cache gives its compiled code, not its other '
+                         'entries): for a package')
     ap.add_argument('--alpha-guess', default=','.join(map(str, ALPHA_GUESS)),
                     help='903 values also made for a list pipeline with no alpha function recorded ("" for none)')
     ap.add_argument('--blend-skip', action='store_true',
@@ -342,6 +345,8 @@ def main():
                 entries[key] = dksh
             if (i + 1) % 200 == 0:
                 print(f'  {i + 1}/{len(work)}', flush=True)
+    if a.prune:
+        entries = {k: v for k, v in entries.items() if k in todo}
     out = bytearray(b'BDKC' + struct.pack('<I', 1) + TAG)
     for key in sorted(entries):
         out += struct.pack('<QI', key, len(entries[key])) + entries[key]
