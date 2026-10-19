@@ -1,0 +1,16 @@
+# banjo-nx: guest functions with a HAND-WRITTEN native (app/src/cpu/hot/banjo_hand_natives.h, namespace
+# banjo::hand::n_<id>). tools/localize_native.py puts each in front of the generated copy of its function wherever
+# that copy is used (docs/enhancements.md, "Hand-written natives").
+#
+#   <address or generated name> [id=<namespace suffix>] [exact=<registers>]
+#
+# exact: registers the original writes that the native leaves exactly as the original does (memcpy reloads r3 with
+# the value it came with). Every other register the original writes is scratch the native does not reproduce: the
+# guard skips it for every hook whose copy contains the native.
+
+82BB4510 exact=r3   # C runtime memcpy
+82BB4A40            # C runtime memset
+8222EFA8            # Direct3D shader float-constant writer, vertex shader block
+8222F0D8            # Direct3D shader float-constant writer, pixel shader block
+8222CB90 exact=r1,r3   # Direct3D state flush: dirty register words into type-0 packets
+8222D0E8 exact=r1,r3   # Direct3D state flush: dirty float-constant blocks into type-0 packets
