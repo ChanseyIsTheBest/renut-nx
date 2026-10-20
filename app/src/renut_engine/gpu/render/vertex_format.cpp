@@ -448,6 +448,7 @@ HostVertexLayout BuildHostVertexLayout(const GuestVertexElement *elements, u32 c
       host.components = 4;
     }
     layout.streams[stream].used = true;
+    layout.used_mask |= 1u << stream;  // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_stream_mask)
     layout.streams[stream].elements.push_back(host);
   }
 

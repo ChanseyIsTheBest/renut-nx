@@ -119,7 +119,7 @@ struct VideoState {
   // game's kicks: the list the slot records into now (command_lists[slot] or one of kick_lists[slot]), the kick lists
   // taken in the slot's frame, the list ended at the last kick and not yet submitted (with the cleaner's ticket for
   // its memory), and the draws recorded into the open list.
-  static constexpr uint32_t kKickLists = 3;
+  static constexpr uint32_t kKickLists = 6;  // banjo-nx (2026-10-20): 3 a frame, 6 with banjo_deko3d_eager_kicks
   std::unique_ptr<plume::RenderCommandList> kick_lists[kFramesInFlight][kKickLists];
   plume::RenderCommandList *slot_list[kFramesInFlight] = {};
   uint32_t kick_lists_used[kFramesInFlight] = {};
@@ -273,6 +273,14 @@ public:
   // Guest D3DDevice_Swap: scan out 'image' (nullptr = no guest image this
   // frame) plus the overlay, submit and present.
   static void Present(const PresentImage *image);
+  // banjo-nx (2026-10-20, banjo_renut_game_gamma): the device's corrected gamma ramp at a Swap (768 big-endian words,
+  // red, green, blue: the 10-bit entry << 6, d3d/hooks/device.cpp StoreGamma); the present applies it when the key is
+  // on. Any thread.
+  static void NoteGameGamma(const uint8_t *ramp);
+  // banjo-nx (2026-10-20, input latency): the guest Swap the next present ends (the render thread, right before it),
+  // and banjo_deko3d_latency_trim's 10 s report line (empty when off).
+  static void NotePresentingSwap(uint64_t swap);
+  static std::string LatencyTrimReport();
   // banjo-nx (2026-10-19, latency batch 3, renut_engine/display_sync.cpp): the guest presents so far, and whether the
   // GPU has finished the frame of the 'index'-th (1-based): 1 yes, 0 not yet, -1 unknown (no such present, or a back
   // end without fence copies). Any thread; PresentDone never waits.

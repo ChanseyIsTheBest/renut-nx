@@ -1,3 +1,4 @@
+#include <cstring>
 #include <cstdlib>
 #include "compiler_iface.h"
 #include "uam_log.h"
@@ -671,8 +672,16 @@ void DekoCompiler::GenerateHeaders()
 extern "C" unsigned nv50_ir_get_banjo_flags();
 extern "C" void nv50_ir_set_banjo_flags(unsigned flags);
 
+extern "C" void nv50_ir_set_banjo_gpr_cap(int cap);
+
 std::unique_ptr<DekoCompiler> DekoCompiler::CompileBest(pipeline_stage stage, const char* glsl, int optLevel)
 {
+	// banjo-nx (2026-10-19, banjo_deko3d_gpr32): a variant with constant 910 = 1 (plume writes its define ahead of the
+	// text) is compiled with 32 GPRs at most: every warp slot of the SM, spilling what does not fit.
+	struct Cap {
+		explicit Cap(const char* text) { nv50_ir_set_banjo_gpr_cap(strstr(text, "SPIRV_CROSS_CONSTANT_ID_910 1u") ? 32 : 0); }
+		~Cap() { nv50_ir_set_banjo_gpr_cap(0); }
+	} cap(glsl);
 	std::unique_ptr<DekoCompiler> best(new DekoCompiler(stage, optLevel));
 	if (!best->CompileGlsl(glsl))
 		return nullptr;

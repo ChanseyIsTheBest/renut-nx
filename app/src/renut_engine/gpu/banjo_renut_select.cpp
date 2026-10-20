@@ -4,6 +4,7 @@
 #include <string>
 
 #include <rex/cvar.h>
+#include <rex/logging/macros.h>
 
 REXCVAR_DEFINE_STRING(banjo_renderer, "native", "Banjo",
                       "Renderer, chosen at boot. native = banjo-nx's own native renderer (the default; the exact "
@@ -19,7 +20,18 @@ namespace banjo::renut_gpu {
 namespace detail {
 int8_t g_active = 0;
 bool LatchActive() {
+#if BANJO_SWITCH_NO_VULKAN
+  // banjo-nx (2026-10-20): a Switch build without the Vulkan driver has only Renut's renderer on deko3d (the native
+  // renderer and the emulated GPU need Vulkan).
+  static const bool active = [] {
+    if (REXCVAR_GET(banjo_renderer) != "renut")
+      REXLOG_WARN("banjo_renderer = \"{}\" needs Vulkan, which this build does not have: Renut's renderer on deko3d "
+                  "instead", REXCVAR_GET(banjo_renderer));
+    return true;
+  }();
+#else
   static const bool active = REXCVAR_GET(banjo_renderer) == "renut";
+#endif
   g_active = active ? 1 : -1;
   return active;
 }

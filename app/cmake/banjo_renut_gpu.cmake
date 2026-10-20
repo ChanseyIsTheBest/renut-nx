@@ -38,6 +38,8 @@ if(REXGLUE_PLATFORM_SWITCH)
     set(PLUME_SWITCH_DEVKITPRO "${DEVKITPRO}" CACHE PATH "" FORCE)
     set(PLUME_SWITCH_NVK_ROOT "${REXGLUE_SWITCH_NVK_SDK}" CACHE PATH "" FORCE)
     set(PLUME_SWITCH_NVK_LIBRARY "${REXGLUE_SWITCH_NVK_SDK}/lib/libvulkan.a" CACHE FILEPATH "" FORCE)
+    # banjo-nx (2026-10-20): no Vulkan driver in the Switch build unless REXGLUE_SWITCH_NVK (sdk/cmake/rexglue_switch.cmake).
+    set(PLUME_SWITCH_NVK_LINK ${REXGLUE_SWITCH_NVK} CACHE BOOL "" FORCE)
     # banjo-nx (2026-10-17): plume's deko3d back end (renut_gpu_backend = "deko3d", docs/deko3d-renderer.md) and the
     # uam it compiles shader variants with on the console.
     set(PLUME_SWITCH_UAM_DIR "${CMAKE_SOURCE_DIR}/thirdparty/uam" CACHE PATH "" FORCE)
@@ -100,5 +102,10 @@ if(COMMAND rexglue_apply_target_settings)
     rexglue_apply_target_settings(banjo_renut_gpu)
 endif()
 renut_gpu_setup(banjo_renut_gpu)
+# banjo-nx (2026-10-20): a Switch build without the Vulkan driver (REXGLUE_SWITCH_NVK OFF) always boots Renut on
+# deko3d, the one renderer that does not need it (banjo_renut_select.cpp, backend.cpp ResolveBackend).
+if(REXGLUE_PLATFORM_SWITCH AND NOT REXGLUE_SWITCH_NVK)
+    target_compile_definitions(banjo_renut_gpu PRIVATE BANJO_SWITCH_NO_VULKAN=1)
+endif()
 target_link_libraries(renut PRIVATE banjo_renut_gpu)
 target_compile_definitions(renut PRIVATE BANJO_RENUT_RENDERER=1)

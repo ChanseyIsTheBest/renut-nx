@@ -12,11 +12,21 @@
  */
 #pragma once
 
+#include <string>
+
 #include <rex/types.h>
 
 #include "renut_engine/gpu/render/draw.h"
 
 namespace renut::gpu {
+
+// banjo-nx (2026-10-20, from sa2-nx, banjo_renut_snapshot_deltas: queued.cpp): a draw keeps only what changed in the device since the
+// previous one. At each Swap: the frame's first draw keeps the whole device again.
+void SnapshotDeltasNewFrame();
+// Something else consumed the device's dirty masks (a command buffer's op): the next draw keeps the whole device.
+void ForgetSnapshotDeltas();
+// The 10 s "[renut] device snapshots" line (empty with the deltas off); resets its counts.
+std::string SnapshotDeltaReport();
 
 // 'up_vertex_bytes' / 'up_index_bytes': the sizes of call.up_vertices /
 // call.up_indices, copied now.

@@ -2519,9 +2519,9 @@ LateAlgebraicOpt::visit(Instruction *i)
 // interpolation cache (nv50_ir_from_tgsi.cpp), 16 choose per fragment shader whether 8 and 32 pay
 // (DekoCompiler::CompileBest), 32 DomCSE (value numbering over the dominator tree), 64 DomCSE only for the costly
 // operations, 128 DomCSE keeps interpolations (equivalent, not replaced), 256 UniformJoins (no SSY / SYNC around a
-// branch on constant buffer values), 512 TexCluster (texture fetches early in their block). 447 by default (all but 64
-// and 512).
-static unsigned banjoFlags = 447;
+// branch on constant buffer values), 512 TexCluster (texture fetches early in their block), 1024 (2026-10-20) a uvec4 of
+// storage buffer 15 as one 128-bit load (nv50_ir_from_tgsi.cpp handleLOAD). 1471 by default (all but 64 and 512).
+static unsigned banjoFlags = 1471;
 } // namespace nv50_ir
 extern "C" void nv50_ir_set_banjo_flags(unsigned flags) { nv50_ir::banjoFlags = flags; }
 extern "C" unsigned nv50_ir_get_banjo_flags() { return nv50_ir::banjoFlags; }
@@ -4964,6 +4964,13 @@ DeadCodeElim::checkSplitLoad(Instruction *ld1)
       return;
 
    ld2 = cloneShallow(func, ld1);
+   // banjo-nx (2026-10-20, SASRT's report): Instruction::clone copies the sources but not their indirect indices, so
+   // the second load lost its address (a global load without one: emitLDG read a null address). Banjo flag 1024's
+   // 128-bit row loads split here when a middle word is dead.
+   for (int s = 0; ld1->srcExists(s); ++s) {
+      ld2->src(s).indirect[0] = ld1->src(s).indirect[0];
+      ld2->src(s).indirect[1] = ld1->src(s).indirect[1];
+   }
    updateLdStOffset(ld2, addr2, func);
    ld2->setType(typeOfSize(size2));
    for (d = 0; d < 4; ++d)
@@ -5027,6 +5034,29 @@ PostRADualIssue::visit(BasicBlock *bb)
 
 // =============================================================================
 
+#ifdef BANJO_LDG_CHECK
+// banjo-nx (2026-10-20, debug builds only): after each pass, any global load or store left without its address.
+class BanjoLdgCheck : public Pass
+{
+public:
+   const char *name = "";
+private:
+   virtual bool visit(BasicBlock *bb)
+   {
+      for (Instruction *i = bb->getEntry(); i; i = i->next) {
+         if ((i->op == OP_LOAD || i->op == OP_STORE) && i->srcExists(0) &&
+             i->src(0).getFile() == FILE_MEMORY_GLOBAL && !i->src(0).isIndirect(0))
+            fprintf(stderr, "banjo: global %s without an address after %s (type %d, offset %d)\n",
+                    i->op == OP_LOAD ? "load" : "store", name, int(i->dType), i->getSrc(0)->reg.data.offset);
+      }
+      return true;
+   }
+};
+#define BANJO_LDG_AFTER(n) { BanjoLdgCheck c; c.name = #n; c.run(this, false, true); }
+#else
+#define BANJO_LDG_AFTER(n)
+#endif
+
 #define RUN_PASS(l, n, f)                       \
    if (level >= (l)) {                          \
       if (dbgFlags & NV50_IR_DEBUG_VERBOSE)     \
@@ -5034,6 +5064,7 @@ PostRADualIssue::visit(BasicBlock *bb)
       n pass;                                   \
       if (!pass.f(this))                        \
          return false;                          \
+      BANJO_LDG_AFTER(n)                        \
    }
 
 bool

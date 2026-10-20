@@ -82,6 +82,8 @@ public:
   // UI thread: frames recorded so far, and dropping the latest (the SDK
   // drew nothing this time, as when its last dialog closed).
   static uint64_t FramesRecorded();
+  // banjo-nx (2026-10-19): whether the latest recorded frame draws anything (a menu or a notification is up).
+  static bool HasLatest();
   static void ClearLatest();
 
   struct Frame;

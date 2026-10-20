@@ -18,9 +18,23 @@
 
 #include "renut_engine/gpu/d3d/d3d.h"
 #include "renut_engine/gpu/guest/guest_memory.h"
+#include "renut_engine/gpu/guest/callbacks.h"  // banjo-nx (from sa2-nx): HookFastPathsOn
 #include "renut_engine/gpu/backend/queued.h"
 #include "renut_engine/gpu/backend/render_thread.h"
 #include "renut_engine/gpu/banjo_renut_tuning.h"
+#include "renut_engine/gpu/render/draw.h"  // banjo-nx (2026-10-20): ChainHint
+
+#include <rex/cvar.h>
+
+// banjo-nx (2026-10-20): sa2-nx's chain reuse (render/draw.cpp, banjo_renut_chain_reuse) for the replayed draws too.
+REXCVAR_DEFINE_BOOL(banjo_renut_chain_reuse_replays, false, "Banjo/Enhancements",
+                    "OFF by default since package 36r, with banjo_renut_chain_reuse. Renut's renderer (banjo_renut_chain_reuse): the draws replayed from the game's recorded command "
+                    "buffers (about three quarters of N&B's draws in play) tell the draw which device chunks their ops "
+                    "changed since the replay's previous draw, so it takes that draw's pipeline key, targets, viewport, "
+                    "texture words and pipeline when nothing they are made from changed (sa2-nx's chain reuse is for the "
+                    "immediate draws only). banjo_renut_chain_reuse_verify checks these too. Off: replayed draws make "
+                    "them all again")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 namespace renut::gpu {
 
@@ -63,6 +77,20 @@ static_assert(kFetchBytes % kChunkBytes == 0 && kPlainChunks <= 64);
 constexpr uint64_t kAllChunks = kPlainChunks == 64 ? ~uint64_t(0) : (uint64_t(1) << kPlainChunks) - 1;
 
 // Chunk i's offset in the device, and its size (the tail's last is short).
+// banjo-nx (2026-10-20, banjo_renut_chain_reuse_replays): an op's chunks (plain_dirty) as draw.h's ChainHint chunks:
+// the fetch constants' twelve are the chain's 18-29 (device bytes 0x480-0x77F), the tail's are the chain's from 30.
+constexpr u32 kChainFirstFetchChunk = kFetchBegin / kChunkBytes;
+static_assert(kFetchBegin % kChunkBytes == 0 && kChainFirstFetchChunk + kFetchChunks == kChainHeadChunks &&
+              kTailBegin == kChainTailBegin && kChainHeadChunks + kTailChunks <= 128);
+void PlainToChain(uint64_t plain, uint64_t out[2]) {
+  out[0] = out[1] = 0;
+  for (; plain; plain &= plain - 1) {
+    const u32 i = u32(std::countr_zero(plain));
+    const u32 c = i < kFetchChunks ? kChainFirstFetchChunk + i : kChainHeadChunks + (i - kFetchChunks);
+    out[c / 64] |= uint64_t(1) << (c % 64);
+  }
+}
+
 constexpr u32 ChunkOffset(u32 i) {
   return i < kFetchChunks ? kFetchBegin + i * kChunkBytes
                           : kTailBegin + (i - kFetchChunks) * kChunkBytes;
@@ -367,6 +395,7 @@ Op *NewOp(u32 device_va, OpKind kind, HostCommandBuffer **out_buffer) {
   set.ps |= ps_dirty;
   for (auto &mask : device->m_Pending)
     mask = 0;
+  ForgetSnapshotDeltas();  // banjo-nx (2026-10-20, from sa2-nx): the masks went to the buffer, not to the next delta (queued.cpp)
 
   Op &op = buffer.ops.emplace_back();
   op.kind = kind;
@@ -454,8 +483,13 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
   // banjo-nx (2026-10-19, CPU proposal 18): the draws' predication set once for the buffer, not around every draw:
   // only draws read it (ComputeViewport), and a nested run puts this one back when it ends.
   const u32 previous_predication = SetReplayPredicationLocked(predication);
+  // banjo-nx (2026-10-20, banjo_renut_chain_reuse_replays): this replay's last draw's hint number and the chunks its ops
+  // applied since then (draw.h ChainHint). A nested run's draws take numbers too, so the draw after it marks every chunk.
+  static const bool hints = REXCVAR_GET(banjo_renut_chain_reuse_replays);
+  uint64_t hint_last = 0, hint_plain = 0;
   for (const Op &op : buffer.ops) {
     ApplyState(state, buffer.arena.data() + op.state, op.plain_dirty, op.vs_dirty, op.ps_dirty);
+    hint_plain |= op.plain_dirty;
     vs_dirty |= op.vs_dirty;
     ps_dirty |= op.ps_dirty;
     switch (op.kind) {
@@ -467,7 +501,19 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
         call.up_indices = buffer.arena.data() + op.up_indices;
       // The draw reads its inherited constants from the running device.
       const ReplayConstants constants{running, op.vs_set, op.ps_set, &vs_dirty, &ps_dirty, replay};
+      banjo::renut_gpu::CountDrawSource(1);
+      if (hints) {
+        const uint64_t seq = NextChainSeq();
+        g_chain_hint.seq = seq;
+        if (hint_last && seq == hint_last + 1)
+          PlainToChain(hint_plain, g_chain_hint.changed);
+        else
+          g_chain_hint.changed[0] = g_chain_hint.changed[1] = ~uint64_t(0);
+        hint_last = seq;
+        hint_plain = 0;
+      }
       DrawStateLocked(state, call, &constants);
+      g_chain_hint = {};  // only for the draw itself
       break;
     }
     case OpKind::Clear:
@@ -618,6 +664,10 @@ void RecordRun(u32 device_va, u32 command_buffer_va) {
 }
 
 void FlushRecordedVertices(u32 device_va) {
+  // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_callbacks_fast): every hook calls this first; nothing pending (always so without
+  // command buffers, SA2's case) needs no lock. g_pending_count is kept under g_record_mutex (SyncPendingCount).
+  if (HookFastPathsOn() && g_pending_count.load(std::memory_order_acquire) == 0)
+    return;
   std::lock_guard lock(g_record_mutex);
   FlushDevicePending(device_va);
 }

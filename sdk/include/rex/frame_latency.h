@@ -26,6 +26,9 @@ void NoteInputRead();
 void NoteGuestSwap();
 // The renderer presented the image of the guest's `swap`-th Swap (1-based, counted the same way as the Swaps).
 void NotePresented(uint64_t swap);
+// banjo-nx (2026-10-20): the GPU has finished the image of the guest's `swap`-th Swap (seen now): the report's "input
+// -> GPU done", the earliest the display can show the frame (the present above is when it was handed over).
+void NoteGpuDone(uint64_t swap);
 // The Swaps so far.
 uint64_t SwapCount();
 // The time (std::chrono::steady_clock nanoseconds) of the first controller read of the frame the 'swap'-th Swap ends;

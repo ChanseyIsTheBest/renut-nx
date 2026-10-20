@@ -24,6 +24,7 @@ namespace plume {
 
     // The push constants' UBO binding in every stage, and the address window's storage binding (tools/deko3d_glsl.py).
     static constexpr uint32_t PushUboSlot = 5;
+    static constexpr uint32_t TexSizeUboSlot = 3;  // banjo-nx (2026-10-19, txq)
     static constexpr uint32_t AddressWindowSlot = 15;
     static constexpr uint32_t CommandBlockSize = 1u << 20;
     static constexpr uint32_t TransientBlockSize = 256u << 10;
@@ -137,6 +138,11 @@ namespace plume {
         // draw's own range (Deko3DBindFetchData).
         graphicsUbo[PushUboSlot] = {device->pushAddr, Deko3DDevice::PushSize};
         graphicsUboValid |= 1u << PushUboSlot;
+        // banjo-nx (2026-10-19, GPU, txq): the texture size buffer, for the shaders whose usage has UBO bit 3.
+        graphicsUbo[TexSizeUboSlot] = {device->texSizeAddr, Deko3DDevice::TexSizeSize};
+        graphicsUboValid |= 1u << TexSizeUboSlot;
+        boundImageSetObj = nullptr;
+        texSizeValid = 0;
         // Whatever the GPU holds of descriptors and shader code from before is dropped.
         dkCmdBufBarrier(cmd, DkBarrier_None, DkInvalidateFlags_Descriptors | DkInvalidateFlags_Shader);
         descriptorEpoch = currentEpoch();
@@ -348,6 +354,32 @@ namespace plume {
                 handles[k] = (texture & 0xFFFFFu) | (sampler & 0xFFF00000u);
                 same = same && handles[k] == boundTex[st][k];
             }
+            // banjo-nx (2026-10-19, GPU, txq): the sizes of the bindings the shader reads from the texture size
+            // buffer (entry k for the pixel stage, 32 + k for the vertex stage), updated where they changed. Also when
+            // the handles are the same: a descriptor slot may hold another texture now.
+            if (p->txqMask[st]) {
+                const uint32_t base = st == 2 ? 0u : 32u;
+                for (uint32_t mask = p->txqMask[st]; mask;) {
+                    const uint32_t k = uint32_t(__builtin_ctz(mask));
+                    mask &= mask - 1;
+                    if (k >= n || k >= 32)
+                        continue;
+                    const uint32_t id = handles[k] & 0xFFFFFu;
+                    uint32_t size[4] = {0, 0, 0, 0};
+                    if (boundImageSetObj && id < boundImageSetObj->imageSizes.size()) {
+                        const auto &dims = boundImageSetObj->imageSizes[id];
+                        size[0] = dims[0];
+                        size[1] = dims[1];
+                        size[2] = dims[2];
+                    }
+                    const uint32_t e = base + k;
+                    if (((texSizeValid >> e) & 1) && !memcmp(texSizeShadow[e], size, sizeof(size)))
+                        continue;
+                    dkCmdBufPushConstants(cmd, device->texSizeAddr, Deko3DDevice::TexSizeSize, e * 16, 16, size);
+                    memcpy(texSizeShadow[e], size, sizeof(size));
+                    texSizeValid |= uint64_t(1) << e;
+                }
+            }
             if (same)
                 continue;
             dkCmdBufBindTextures(cmd, GraphicsStages[st], 0, handles, n);
@@ -483,6 +515,7 @@ namespace plume {
                 cl.boundImageSet = addr;
                 cl.boundImageCount = set->imageCount;
             }
+            cl.boundImageSetObj = set;  // banjo-nx (2026-10-19, txq): its sizes
         }
         if (set->samplerBlock) {
             const DkGpuAddr addr = dkMemBlockGetGpuAddr(set->samplerBlock);
@@ -1026,6 +1059,19 @@ namespace plume {
             cl->graphicsSsbo[AddressWindowSlot] = e;
             cl->graphicsSsboValid |= 1u << AddressWindowSlot;
             cl->ssboBoundStages[AddressWindowSlot] = 0;
+        }
+        return true;
+    }
+
+    bool Deko3DBindStorage(RenderCommandList *commandList, uint32_t slot, uint64_t address, uint32_t size) {
+        Deko3DCommandList *cl = static_cast<Deko3DCommandList *>(commandList);
+        if (!cl || !address || slot >= 14)
+            return false;
+        const DkBufExtents e = {address, std::max<uint32_t>(alignUp(size, 16), 16)};
+        if (!(cl->graphicsSsboValid & (1u << slot)) || cl->graphicsSsbo[slot].addr != e.addr || cl->graphicsSsbo[slot].size != e.size) {
+            cl->graphicsSsbo[slot] = e;
+            cl->graphicsSsboValid |= 1u << slot;
+            cl->ssboBoundStages[slot] = 0;
         }
         return true;
     }

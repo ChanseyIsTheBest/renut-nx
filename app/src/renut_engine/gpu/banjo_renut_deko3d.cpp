@@ -87,7 +87,9 @@ const PackageEntry *Find(Package &p, uint64_t hash) {
 
 // ---- the DKSH cache next to the NRO: "BDKC", version, the compiler's tag, then records (u64 key, u32 size, DKSH)
 // uam 1.1.0 with SwitchWakerHD's 8 patches and banjo-nx's passes (bnx3, 2026-10-18: with the value numbering).
-constexpr char kCacheTag[16] = "uam110-sw8-bnx3";
+// banjo-nx (2026-10-20): bnx4 with uam banjo flag 1024 (the 128-bit bone rows) in the default flags: a cache
+// compiled before is another compiler's.
+constexpr char kCacheTag[16] = "uam110-sw8-bnx4";
 
 constexpr uint32_t kDkshMagic = 0x48534B44u;  // "DKSH", the first word of every record's data
 
@@ -107,7 +109,7 @@ void LoadCache() {
   // banjo-nx (2026-10-18): the code uam makes with other flags (banjo_deko3d_uam_prmt, banjo_deko3d_uam_gvn off) has a
   // cache of its own.
   const unsigned flags = Deko3DUamFlags();
-  c.path = NextToExecutable(flags == 447u ? std::string("deko3d_shaders.bin")
+  c.path = NextToExecutable(flags == 1471u ? std::string("deko3d_shaders.bin")
                                           : "deko3d_shaders_f" + std::to_string(flags) + ".bin").string();
   c.file = std::fopen(c.path.c_str(), "r+b");
   bool fresh = c.file == nullptr;
@@ -263,6 +265,10 @@ void InstallShaderCache() {
           c.index[key] = {c.end + 12, size};
           c.end += long(record.size());
           c.added++;
+          // banjo-nx (2026-10-20, Peggle 2's report): fflush only hands the record to the file system service, which
+          // may keep it buffered; a process closed with HOME (or stopped in the emulator) lost the last records and
+          // compiled them again at every start. fsync writes it to the card (libnx: fsFileFlush), once per compile.
+          fsync(fileno(c.file));
         }
         else {
           // The SD card full or failing: the records so far keep being read; no more are written (a part of this
@@ -308,8 +314,10 @@ bool BoolSpecMask(uint64_t hash, uint32_t mask[8]) {
 
 void SaveShaderCache() {
   std::lock_guard<std::mutex> lock(g_cache.mutex);
-  if (g_cache.file)
+  if (g_cache.file) {
     std::fflush(g_cache.file);
+    fsync(fileno(g_cache.file));  // banjo-nx (2026-10-20): to the card, not only to the file system service
+  }
 }
 
 }  // namespace banjo::renut_gpu::deko3d

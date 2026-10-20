@@ -57,6 +57,12 @@ namespace {
 Backend ResolveBackend() {
 #if defined(_WIN32)
   return REXCVAR_GET(renut_gpu_backend) == "d3d12" ? Backend::D3D12 : Backend::Vulkan;
+#elif defined(PLUME_DEKO3D) && BANJO_SWITCH_NO_VULKAN
+  // banjo-nx (2026-10-20): no Vulkan driver in this Switch build (switch_vulkan_stubs.c): deko3d whatever the config.
+  if (REXCVAR_GET(renut_gpu_backend) != "deko3d")
+    RGPU_WARN("renut_gpu_backend = \"{}\" needs Vulkan, which this build does not have: deko3d instead",
+              REXCVAR_GET(renut_gpu_backend));
+  return Backend::Deko3D;
 #elif defined(PLUME_DEKO3D)
   return REXCVAR_GET(renut_gpu_backend) == "deko3d" ? Backend::Deko3D : Backend::Vulkan;
 #else

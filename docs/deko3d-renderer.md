@@ -538,3 +538,344 @@ GPU-bound ones (swap -> present 66-95 ms: finished frames queue behind the GPU; 
   thread waited on the display thread's mutex while it tested a fence) and a larger stack did not settle it. Not
   explained yet; `configs/banjo_display_sync_on.toml` is the console try. Futari's version of the thread is the
   reference that it can work.
+
+## 19. The night of 2026-10-19: GPU for the heaviest scene, the colour flash
+
+The target (the user): the heaviest scene of the scripted route at 30 fps without drops, at least 25, the same
+pixels. Its GPU time on the console (package 34 state, stock handheld 460.8 MHz): 51.6 ms a frame on average; 30 fps
+needs about 33, 25 fps about 40. The breakdown of those frames: the fur family about 17 ms (2F36's 21 blended shells
+8.8 ms at 1280x720 and 1.9 ms in the HUD's 96x96 box; C92B, B3C1, D40E, 2D82), the lit materials about 15 ms (27-34
+texture fetches each, 24 of them shadow taps over three cascades), depth resolves 3.2 ms (2.15 since package 35),
+colour resolves 1.9 ms, shadow-map draws about 2.5 ms, A5E2 (one full-screen pass) 1.9 ms.
+
+- **Texture size buffer** (`banjo_deko3d_txq_constants`, tools/deko3d_glsl_opt.py pass txq, constant 908): A5E2's
+  1.94 ms matches its texture work exactly (8 texture operations a pixel over 921,600 pixels at the 2 SMs' 4 a clock
+  at 460.8 MHz: 2.0 ms), and 4 of the 8 are `textureSize(t, 0)` queries. Plume deko3d records each descriptor's
+  level-0 size when it writes the view (`Deko3DDescriptorSet::imageSizes`) and keeps a 64-entry uniform buffer at
+  binding 3 up to date with pipelined updates for the bindings a shader queries (the banjo-dk line's `txq=`); the
+  shaders read the size there. A5E2 8 -> 4 texture operations, 259A 3 -> 2, the fur family 1 fewer. 908 = 0 is the
+  old query (the A/B, in the cache), 908 = 2 runs both and paints magenta where they differ (the verify).
+- **Depth tested before discarding shaders** (`banjo_deko3d_early_z`, pass earlyz, constant 909): a pixel shader with a
+  discard has the SPH's kills_pixels bit; in a draw that writes neither depth nor stencil (RB_DEPTHCONTROL bits 0 and
+  2) `layout(early_fragment_tests)` gives the same pixels (the discard has nothing to undo; the renderer has no
+  occlusion queries) and spares the shader the pixels the depth test rejects: particles and other blended effects.
+  Not the fur: its shells, blended or not, write depth (RB_DEPTHCONTROL 0x00708746 / 0x00708767). 2026-10-20: a stencil
+  test that cannot write (write mask 0, or every op of both faces KEEP) counts as writing nothing (7 more pipelines;
+  the stencil-tested blended materials such as 3A25 REPLACE on pass with mask 0xC6, so they keep the late test).
+  The DKSH differs only in the header's early-fragment-tests byte.
+- **The fur family with 32 GPRs** (`banjo_deko3d_gpr32`, off: an A/B, constant 910, tools/gpr32_shaders.txt): 33-40
+  GPRs leave about 48 of the SM's 64 warp slots, 32 all of them; uam's CompileBest caps the register file for a variant
+  whose text defines 910 = 1 (thread-local cap read by TargetNVC0::getFileSize). The fur shader: 39 -> 32 GPRs, 15
+  loads and 5 stores of spills, 1020 -> 1037 instructions. Whether the occupancy pays for the spills is for the
+  console.
+- Measured and not taken: specialising the stacked-texture flags (2-5 % fewer fur instructions, no register change);
+  gathers for the shadow taps (the tap offsets are game constants: not provably the same texels); per-sample shading
+  of the HUD's 4x box (the shaders shade per pixel already).
+- **The colour flash** (`banjo_renut_stall_present`, off): while the game stalls (loading) the overlay pump re-presented
+  the last front buffer every 16 ms; a texture the game freed or remade meanwhile is, on deko3d, a new image whose
+  memory nobody cleared (Vulkan's came zeroed): a full-screen frame of other data, more often in the slow emulator.
+  Now nothing is presented during a stall unless a menu or notification is up (the display keeps the last frame, as the
+  console does), and a front buffer no resolve wrote is never shown. A `[flash]` warning also names any texture sampled
+  with nothing written to it (an upload from guest memory that failed). Not caught on video yet (two recordings of the
+  flash guard's moment showed none): the console run says.
+- **The colour flash, a second cause** (`banjo_renut_device_swizzle`, on, package 36c): caught in a RenderDoc capture
+  of Ryujinx (run rdc84, frame 5437): the whole frame washed yellow. `tools/rdc_draws.py` showed two of the bloom
+  chain's 80x45 draws reading their source through the swizzle 1,1,0,0 and Z,X,X,1 where the other captures read the
+  same texture as RGBA. BindTextureLocked reads the texture header in guest memory at render time and kept it whenever
+  it described the same data as the device's fetch constant (SameData: base, size, dimension), swizzle included; the
+  game builds the bloom levels' headers as temporaries and had rewritten this one for a later pass. The swizzle now
+  comes from the device's fetch constant (SetTexture's copy, what the GPU reads); a `[flash] ... sampled through the
+  device's swizzle` line logs the first 16 and the periodic report counts them (`[flash] device swizzle: N binds in M
+  frames`, with the key off too). Not rare: emulator run 85 hit it in every frame of the jigsaw transition into the main
+  menu (stack header 0x701CF9F8: X,Y,1,1 where the device has X,X,X,1, i.e. blue and alpha forced to 1), the likely
+  cause of package 30's "menu glow cuts out at 30 fps" (the game thread further ahead of the render thread at the cap)
+  and its cyan flashes. Final form (36c): SetTexture copies the header's dwords 0, 3 and 5 unchanged and changes only
+  dword 4's mip levels (d3d_native_state.cpp), so a same-data header differing in 0, 3 or 5 is stale and the whole
+  device fetch constant is used (a run's counts: dword 4 tens of thousands, by design; dword 3 a few dozen; dword 5
+  once; dword 0 never). Run emu88 logged the bloom level's header at 93D = 1,1,0,0 (the yellow) against the device's
+  60A: the flash, prevented.
+- Shader compiles in play: the console's second run of package 35 compiled 0 (the first 12, then appended to the SD's
+  cache); the pipeline list's prebuild at boot and loading is what precompiles. The next cache should be built from
+  the console's own pipeline_list.bin.
+- **Skinning, 2026-10-20** (tools/deko3d_glsl_opt.py passes bonesel and aw4; 324 vertex shaders): the fur vertex
+  shader runs once a shell (21 shells a frame at 1280x720 and 21 in the HUD's 96x96 box, whose draws cost 89 us each
+  on the console for a few thousand pixels: the vertex work). bonesel: a predicated bone's rows `D = mix(P, L, c)` feed
+  only its own sum `mix(A, (D * w) + A, c)`, which keeps A whenever D would be P, so the sum reads L (the data selects
+  go: 36 a vertex). aw4: each bone row's four address-window words W..W+3 are one `uvec4` read of a second view of the
+  same binding at W >> 2, where W is provably a multiple of 4: the fetch data's offset, slot bases and size are
+  16-byte multiples (render/draw.cpp's copies; the renderer counts draws where they are not and warns, expected 0),
+  and the per-vertex part is `int(floor(x)) * K` with K a multiple of 4. uam still splits the uvec4 into four 32-bit
+  loads, so the gain is the index arithmetic. The fur vertex shader: 594 -> 509 instructions, 56 -> 48 GPRs; its
+  depth-only (shadow map) variant 473 -> 388, 43 -> 35.
+- **Selects whose other arm nobody reads, 2026-10-20** (pass guardsel, both stages): a value read only where a
+  condition holds (inside the chosen arm of selects on it, or inside `if (c)` blocks, directly or through the values it
+  feeds) cannot show what a select on that condition in its own definition gives when it does not hold, so that select
+  is its chosen arm. Renut's lights select every term on the light's flag and add it only under the same flag: 20
+  selects a lit shader (fur 775 -> 763 instructions in the heavy scene's variant), A5E2 153 -> 137. A greatest fixpoint
+  over every variable's readers; the conditions must have one value a run (assigned once, or once in each arm of one
+  if / else); not in bodies with loops.
+- Point lights are about a third of the lit shaders (the fur's heavy-scene variant 775 instructions, 516 with the
+  lights off). deadcomp + a second guardsel round take ten more selects a lit shader (fur 714). The lights' work in
+  branches on their reach is an A/B, off (`banjo_deko3d_light_branch`, constant 911, the 24 heaviest lit shaders):
+  the game picks lights per object, so characters are usually inside all of them, large surfaces less so; the
+  console's A/B says whether whole warps skip often enough (docs/deko3d-shader-optimisations.md 2.38, 2.39).
+- **The game's gamma ramp is not applied** (found 2026-10-20 from the Peggle 2 port's note): N&B loads a ramp of about
+  x^1.17 (10-bit entries [64] = 192, [128] = 459, [255] = 1019; the identity is 257 / 514 / 1023), which the 360's
+  display and banjo-nx's native renderer apply (me_native_system.cpp NoteGammaRampWrite). Renut's hooks store it at
+  device+0x3A9C (d3d/hooks/device.cpp StoreGamma) and present_ps.hlsl applies only `pow(c, 1)`: the deko3d builds are
+  brighter in the midtones than the console. Futari (x^1.14) and Peggle 2 (x^1.17) measured the same in theirs.
+  `banjo_renut_game_gamma` (off: it changes the picture, the user decides; configs/banjo_renut_game_gamma_on.toml):
+  the Swap hook hands the device's ramp to the renderer (`Video::NoteGameGamma`), which keeps it in a 256 x 1 RGBA32F
+  texture (uploaded only when the ramp changes, logged once as "[renut] game gamma ramp applied") and present_ps.hlsl
+  looks each channel's 8-bit value up in it (param1 = 1 + its bindless slot; 0 = off, the output as before). Exact as
+  the 360's display: the 10-bit entry for each 8-bit value, then the swapchain's 8 bits. The log's entries match the
+  native renderer's ([64] = 192, [128] = 459, [255] = 1019). Pitfall (emulator run 78, black picture; the SA2 port found
+  the cause): Ryujinx follows a bindless handle only back to a constant-buffer load, so a slot computed in the shader
+  (`uint(param1) - 1`) read zero there; the slot now goes in as raw bits (`asuint(param1)`, 0 = off). The ramp is
+  uploaded every frame (4 KB). Run 81: right.
+
+### Where the heaviest scene stands, and what is left (2026-10-20 morning)
+
+Measured (2026-10-20, the console, package 36g with skin once on, renut_auto.toml's scripted route, against package 35
+on the same route): the dialogue scene's periods 52.7-55.0 -> 42.4-43.9 ms of GPU a frame (18-19 -> 22-23 fps), the
+heaviest period 67.3 -> 55.8 ms (14.8 -> 17.7 fps), the whole route's mean 32.2 -> 28.5 ms. Of the heaviest period's
+55.6 ms the fur family is 22.6 ms (2F36 alone 10.9 ms main view, 0.9 ms portrait), the lit 3A25 / 0BBB / 2D82 about 7
+ms, depth and colour resolves 4.1 ms (the main depth resolved twice a frame with its words for the depth of field;
+about 20 colour resolves, none of an unchanged source), shadow maps 2.3 ms (about 500 draws, a few us each: per-draw
+cost, not shading). What is left exact: the console's A/Bs (skin once, light branch, gpr32). The 40 ms of 25 fps in
+the dialogue scene is within reach of fewer fur shells (not exact, the user's call) or the docked clock.
+The estimate below was written before these measurements.
+
+Package 34/35's heaviest frames: 51.6 ms of GPU at the stock handheld 460.8 MHz (the GPU busy the whole frame: 52.0 ms
+of work in a 52.4 ms frame, so nothing is gained by feeding it sooner). Tonight's exact work (packages 36, 36b) is
+estimated at about 3 ms of it (weighted pixel-shader instructions -5.4 %, vertex -10.1 %, A5E2's texture work halved):
+about 48-49 ms, 20-21 fps. 25 fps (40 ms) and 30 fps (33 ms) are out of reach with the same pixels at that clock; the
+console's stock docked clock (768 MHz) would put the same frames near 29 ms.
+
+Next, in order, once the console's runs of 36b are in:
+- `configs/banjo_renut_diag_fur_vertex_only.toml` measures the fur draws without their pixel work. If the vertex share
+  is large (estimate ~5 ms: 21 shells re-skin the same mesh, twice with the dialogue portrait), skin once a frame and
+  let the shells read it (a compute or vertex pass writing positions and normals to a buffer; exact only if the
+  skinning instructions compile the same, to be proven with tools/difftest), and 128-bit bone-row loads (aw4 rows
+  through their own binding plus a uam flag letting MemoryOpt merge loads it knows are 16-byte aligned; a misaligned
+  128-bit load faults, so the renderer must refuse draws whose fetch data is off 16 bytes before submitting them).
+  Measured 2026-10-20 (tools/difftest/uam_ops.py, the fur VS B814D7237E615990 generic): without uam flag 2 (the
+  global-load merge block) 596 -> 560 instructions, LDG 48 -> 12, GPRs 48 -> 50. Dropping flag 2 for every shader is
+  NOT safe: Renut's vertex fetch reads words at vertex * stride + offset with strides of any multiple of 4, so merged
+  64/128-bit loads could be misaligned. Done in package 36d (docs/deko3d-shader-optimisations.md 2.41, uam flag 1024,
+  `banjo_deko3d_uam_wide_rows`): a 4-component load of buffer 15 (only the aw4 view) is one 128-bit load, aligned by
+  construction (the binding starts on 256 bytes, a row is element n of 16 bytes), so no refusal is needed. The console
+  profile shows these vertex shaders memory-bound (the fur in the 96x96 portrait: 89 us a draw), so more than the
+  1 % the instruction count suggested; the console's A/B decides.
+- The light-branch A/B (`banjo_deko3d_light_branch`) and the 32-GPR A/B decide whether occupancy or branch skipping
+  pays on lit shaders. Package 36c makes both in-run A/Bs (`banjo_renut_ab_target` 15 / 16; configs
+  `banjo_deko3d_light_branch_ab.toml`, `banjo_deko3d_gpr32_ab.toml`): the off half's pipelines are keys of their own
+  (PipelineKey.reserved bits 0 / 1, built without constant 911 / 910), so one run gives both GPU times of the same
+  scenes.
+- Not exact, for the user to choose: fewer fur shells (~6 ms for half; package 36c has it as `banjo_renut_fur_shells`,
+  default 1 = every shell: N draws every Nth of each fur part's draws in a frame (the game draws every part once a
+  shell, shell by shell), the first always, render/draw.cpp
+  DrawStateLocked; configs/banjo_renut_fur_shells_2.toml), the dialogue portrait every other frame (~1.4 ms while it
+  shows), fewer lights on the outer shells, or a GPU clock above stock.
+
+## 20. Input latency without vsync: the latency trim (2026-10-20, package 36e)
+
+Package 35's `[latency]` lines showed where the GPU-bound scenes lose their input: swap -> present 66-95 ms at 18 fps,
+finished frames queued behind the GPU. The pipeline: the game thread may run one frame ahead of the render thread
+(`kMaxFramesAhead`), the render thread one frame ahead of the GPU (`kFramesInFlight` = 2: after submitting frame k,
+`SubmitAndAdvance` waits only for frame k-1). Where the GPU is the limit, the render thread finishes recording frame
+k+1 about (GPU frame - recording) before the GPU can start it, 30 ms and more in the heaviest scenes, and late input
+(section 17) cannot see that wait: the game thread is released when the render thread finishes, not when the GPU
+needs the next frame.
+
+- `banjo_deko3d_latency_trim` (off; configs/banjo_deko3d_latency_trim_on.toml), backend/video.cpp: each kick
+  submission signals a fence (plume's `Deko3DCopyFence`, waited with the new `Deko3DFenceCopyWait`, render thread
+  only: no fence polling thread, which is what made the vsync thread of section 18 hang Ryujinx). After a frame is
+  submitted and presented (`Video::Present`, `detail::LatencyTrimLocked`), the render thread waits until the GPU has
+  finished all but the frame's last part (its last kick list): the next frame is recorded, and the game thread released,
+  that much later, while the GPU still has the last part to run. The frame's first kick list then goes to the GPU at its
+  own kick (the ring cleaner waited for) instead of at the next one, so the GPU gets the next frame's work as soon as
+  possible. If the GPU still finishes a held-back frame before the next one sends it work (it would sit idle), holding
+  back stops for 60 frames. Same pixels; the GPU's work is unchanged.
+- The probe (sdk/src/core/frame_latency.cpp) now has `NoteGpuDone`: the `[latency]` line ends with "input -> GPU done"
+  (the earliest the display can show the frame; seen at the kicks, the presents and the slot waits, a few ms late at
+  most), and with the key on a "latency trim" line: frames held back, the mean hold, how often the GPU ran dry.
+- Expected: about a GPU frame less the last part's time off input -> GPU done in GPU-bound scenes (the heaviest: ~30-40
+  ms); nothing where the frame cap or the CPU is the limit (the hold returns at once).
+- Not taken: one frame in flight (`kFramesInFlight` = 1, the GPU idle while each frame's first part is recorded), the
+  vsync-locked release (section 18).
+- It needs kick lists: a list ends at a kick once it holds `kKickSubmitDraws` (200) draws, so a game drawing a few
+  dozen a frame (Peggle 2) never holds back. N&B's GPU-bound frames have well over a thousand.
+- PC (D3D12, 2026-10-20 check): the probe's "input -> GPU done" works there too (noted at the slot waits); the trim
+  itself is deko3d only.
+
+### At the frame cap: eager kicks (2026-10-20, package 36i, `banjo_deko3d_eager_kicks`, an A/B)
+
+The console's 36g logs at 30 fps (the cap the limit, GPU 24-27 ms, render thread 14-19 ms): input -> swap 12.5 ms
+(the game's frame), swap -> present 14 ms (the render thread replaying it), input -> GPU done 54.6 ms: the GPU finishes
+about 28 ms after the present, a whole GPU frame. The three stages run one after the other: a kick list goes to the GPU
+at the kick after the one it ended at (its upload memory cleaned in between), the game kicks 4-5 times a frame and
+lists end at 200 draws, at most 3 a frame (about 2 a frame were submitted at kicks), so most of the frame reaches the
+GPU at the present. Late input does nothing there (the frame cap's wait is already just before the controller read).
+
+- `banjo_deko3d_eager_kicks` (on since 36i at the user's request; configs/banjo_deko3d_eager_kicks_off.toml the old way,
+  _ab.toml = in-run A/B target 18; the cvar's own default stays off for other ports): lists
+  end at a kick once they hold 100 draws, up to 6 a frame (VideoState::kKickLists 6; 3 with the key off), and each
+  goes to the GPU at its own kick, its ranges cleaned first (the ring cleaner waited for, as the latency trim's first
+  list). The GPU then works while the render thread replays; expected 8-14 ms off input -> GPU done at the cap, the
+  render thread paying the cleaner waits. The same commands in the same order.
+- Not done (larger): replaying the frame's draws as the game issues them rather than after its swap (most of the 14 ms
+  middle stage); releasing frames on a vblank phase measured without the vsync thread (about 6 ms of display wait on
+  average), console-only.
+
+## 21. Precompiled shaders that stay precompiled (2026-10-20, package 36f)
+
+Emulator runs compiled the same 4-7 shader variants at every start although the DKSH cache keeps what the console
+compiles. Three causes, found with a new log line (plume_deko3d.cpp: "uam: run-time variant (stage S, N bytes):
+constants" for every run-time compile; scratchpad match_rt.py turns them back into shader names and cache keys):
+- The cache file and the pipeline list were flushed but not synced: fflush only hands the data to the file system
+  service, which keeps it buffered, and a game closed with HOME (or stopped in the emulator) lost the run's records
+  (Peggle 2 found it for the cache). The cache now fsyncs each new record (one per compile); the pipeline list
+  (render/pipeline.cpp, now a FILE*) syncs at most once a second, and a second after its last record
+  (`SyncPipelineListLocked`, the render thread at each present).
+- Old list records (Renut's blend skip from before package 30) were built ahead with constant 900, which no draw uses
+  any more: three variants compiled at boot for nothing. Loaded keys are now normalised to the configuration
+  (blend skip, output trim, alpha function, bools, the A/B bits), so they deduplicate with the keys draws make.
+- New combinations of the game's bool constants (banjo_gpu_bool_spec) appear as play reaches new states: those compile
+  on the prebuild worker while the generic pipeline draws (no stall), and with the two fixes above they are compiled
+  once, kept in the cache and listed for the next start (and for the next cache built from the console's list).
+- 2026-10-20 (after package 36g): the "run-time variant" line names the shader too: "(stage S, N bytes, base M bytes
+  HASH): defines" (the text without the inserted defines: its size and FNV-1a 64; only the inserted defines are
+  listed). `tools/deko3d_variant_cache.py --runtime-log <renut_NNN.log>` matches each line to its GLSL file and adds the
+  variant, so a console's logs alone complete the next cache (36g's first console run compiled 13 such variants, kept
+  on the card; their lines predate the base hash).
+
+## 22. The fur skinned once a frame (2026-10-20, package 36g, `banjo_deko3d_skin_once`, an exact A/B)
+
+Package 35's console profile of the heaviest frames (55.9 ms): the fur family about 21.5 ms. The main view's 2F36 draws
+cost about 560 us each (pixel work: 24 draws, 13.5 ms); the 96x96 dialogue portrait's about 93 us each, of which the
+pixels are perhaps 30-50 us, so a fur draw's vertex work is plausibly 40-60 us: about 4 ms a frame over the fur's ~110
+draws. Every fur part is drawn once a shell, shell by shell, and every draw re-skins the same vertices: 12 bone rows
+loaded (12 128-bit loads since 36d) and blended, byte-order selects and all, before the shell offset uses them.
+
+- tools/deko3d_glsl_opt.py pass `skinonce` (the vertex shaders of tools/skinonce_shaders.txt: B814D7237E615990,
+  12399EE21A0440AE, 146DA1F10B7D746E, 7F73E48B8EA43715): the three skinned matrix rows (the last bone's
+  `vec4 _R = mix(_P, (row * weights.wwww) + _P, _C)`) and their backward slice in main. With constant 913 = 1 the rows
+  are loaded from a storage buffer at binding 13 (three vec4 a vertex at gl_VertexID * 3) where the draw's shared word
+  v[84].z (SharedConstants::pad_1352[0]) is 2, and computed by the slice, which moves into the other branch, where it is
+  0 or 1 (1 also stores them). The code after the rows is the same text. Without the constant (the key off) the
+  shader is its old text, main and all (`#if DK_SKIN_ONCE`): the same DKSH bytes, checked for all four. The pass refuses a
+  shader whose slice reads the float constants (the shell offset is there), textures, the instance or a shared word
+  outside the key.
+- uam (banjo flag 1024, extended): a vec4 load of storage buffer 13 is one 128-bit load, a vec4 store one 128-bit store
+  (aligned: the renderer's regions start on 256 bytes). Read path of B814: 475 -> 231 instructions, 50 -> 30 GPRs, 3
+  loads; write path 481 (the original and 3 stores). 12399: 409 -> 165; 146D: 495 -> 251; 7F73: 483 -> 241.
+- render/draw.cpp `FurSkinLocked` (after BindStreams, deko3d with pushed constants only): a part's first draw of the
+  frame writes (mode 1) into a region of the slot's skin buffer; a later draw reads (mode 2) only when everything the
+  skinning reads is the same: the vertex shader, the bound vertex data (a hash of each stream's GPU address, size,
+  stride and slot, taken in BindStreams: the upload ring never hands out a range twice in a frame), the index buffer
+  view and draw range, the bone data by its guest bytes (each fetch copy's source, size and endian mode, and a
+  memcmp of the bytes there now against a snapshot taken when the rows were written: every kick copies the bone data
+  again to another offset of the upload ring, so the copy's GPU address differs shell to shell; emulator run 107 with
+  the address as the key: 348 writes, 0 reads) and the vertex-fetch part of SharedConstants with the copies' offsets
+  left out
+  (kSkinShared: booleans v[32-33], fetch data, slots and size v[35-60], tessellation and bound fetches v[65-81],
+  flt_max; the pass refuses a shader whose slice reads any other shared word), so the fur's other pixel shaders on the
+  same mesh (2B31 shares B814) read the rows too. The mode
+  word is pushed with the shared constants (one more 64-byte line). Before the first read after writes, a buffer barrier
+  (DkBarrier_Primitives with the shader and image caches invalidated): one or two a frame. Not for tessellated,
+  instanced or memexport draws. pipeline.cpp gives the pipelines constant 913 under the same condition (key on and not
+  the A/B off half: PipelineKey.reserved bit 2, set only for the four vertex shaders).
+- The periodic report: "[renut] skin once (banjo_deko3d_skin_once): W fur draws skinned and wrote their rows, R read
+  them, P skinned as before, N without room". Expected: R about 11-20 times W.
+- Exact: the stored rows are the bits the writer computed with the original arithmetic (the slice is unchanged text);
+  a bone index inside the palette reads the same bytes in the writer and the reader (compared); an index past the
+  palette (none in valid meshes) reads whatever follows the copy in the upload chunk, which already differs draw to
+  draw without the key;
+  a reader would have computed the same bits from the same inputs, which the key compares; the code after the rows is
+  the same text in every variant. What is not checked by a tool: that uam compiles that shared code the same with
+  the rows loaded as with the rows computed (no transformation in nv50_ir crosses the rows' selects; the difftest
+  tools run pixel shaders only).
+- Configs: `banjo_deko3d_skin_once_off.toml` (the old way; on by default since 36g at the user's request),
+  `banjo_deko3d_skin_once_ab.toml` (in-run A/B target 17). Cache 53 has both variants of the four shaders.
+- Measured: emulator run 108, 85,394 writes and 817,012 reads (12 a write: the shells), no fallback. Console, package
+  36g against 35 on the scripted route (several packages' changes together): the dialogue scene 52.7-55.0 -> 42.4-43.9
+  ms of GPU, the heaviest period 67.3 -> 55.8 ms; the 96x96 portrait's fur 93 -> 40-59 us a draw (vertex work).
+- Tried and taken out: the 23 skinned vertex shaders of the depth-only draws (the shadow maps). Emulator run 109: in
+  10 s 8,101 draws wrote rows, 1,685 read them and 5,563 found the 64-entry table full. A mesh is mostly drawn once a
+  cascade with other inputs (bone data differed in most near misses), so the writes (stores, a longer shader) would
+  mostly be paid for nothing; and their entries filled the frame's table, so the fur fell back to skinning every
+  shell (448,685 fur draws "as before" over the run). With the fur alone the table never fills.
+
+## 23. No Vulkan driver in the Switch build (2026-10-20, package 36m, the user's request)
+
+The Switch NRO no longer links Mesa's NVK (libvulkan.a, expat, libdrm_nouveau): 88.9 MB -> 74.4 MB. deko3d is the only
+renderer it can run. `REXGLUE_SWITCH_NVK` (sdk/cmake/rexglue_switch.cmake, default OFF) and `PLUME_SWITCH_NVK_LINK`
+(thirdparty/plume, set from it in cmake/banjo_renut_gpu.cmake) put the driver back. Without it:
+
+- `sdk/src/ui/switch_vulkan_stubs.c` answers the four Vulkan entry points still referenced (`vkGetInstanceProcAddr`,
+  `vkDestroyInstance`, `vk_icdGetInstanceProcAddr`, `vk_icdNegotiateLoaderICDInterfaceVersion`) with "no driver" and
+  defines `posix_memalign` (Mesa used to, for FFmpeg). The first call writes one line to stderr; the deko3d path makes
+  none.
+- `BANJO_SWITCH_NO_VULKAN` (banjo_renut_gpu): `banjo_renderer` is always "renut" and `renut_gpu_backend` always
+  "deko3d"; a config asking for the native renderer or Vulkan gets a warning in the log and runs deko3d.
+- plume's Switch `VulkanInterface` returns invalid instead of calling a NULL `vkEnumerateInstanceExtensionProperties`.
+- The packages leave out the 59 configs that ask for a Vulkan renderer (the native renderer's, `banjo_renut_vulkan`)
+  and renut_normal.toml, banjo_diagnostics.toml and banjo_fragments.toml (the native renderer's).
+- Not taken out: the native renderer's code and ReXGlue's Xenos plugin are still in the NRO (Renut's hooks share
+  addresses with the native ones; the plugin is linked whole-archive). Both are idle on deko3d.
+
+## 24. GPU work of 2026-10-20 evening: what the console's data leaves, and the A/B pack (package 36q)
+
+The console's 36m run, heaviest window (54.6 ms of GPU a frame, 18 fps): the fur family 18.8 ms (2F36 10.4 main view +
+0.9 the portrait's box, C92B 3.9, D40E 1.9, B3C1 1.8), the lit materials (3A25, 0BBB, 2D82, 49A9...) most of the rest
+(500-800 instructions, 26-34 texture fetches each), depth resolves 2.2 ms, colour resolves 1.9 ms, shadow maps 2.2 ms
+(about 490 draws, vertex work), A5E2 1.2 ms. The compiled code of the hottest variants was read (tools/difftest
+dump_variants.py, uam_ops.py, shtool): the shadow taps are two FMAs a coordinate with the rotation shared by the
+cascades, one cascade runs per pixel (the game's fall-through), the early test's fetches are merged with the main
+body's by uam (33 texture instructions where 37 are written), two selects with the same arms a shader. Nothing large
+is left at the instruction level.
+
+The barriers a gameplay frame (36m, per frame): about 30 primitives, 50 fragments and 15-18 full ones. The full ones:
+about 10 copy-engine copies of exported (memexport) vertex data into the frame's fetch buffer (render/draw.cpp
+UploadVertexFetchData, a full barrier before each group), 5 MSAA resolves on the 2D engine (the dialogue portrait's
+4x box: disable_msaa covers only the scene's target) and 0-3 texture uploads.
+
+Measured and not taken:
+- **Read-only binds keeping a depth hand-over** (a draw that writes neither depth nor stencil leaving the resolve in the
+  target's image, and sampling it while it only tests it): emulator run 123b, 0 such binds on the whole route. Every
+  bind of the main depth after its resolve is a depth-writing draw, so the copy is needed; the main depth's resolves
+  are followed by depth-writing draws, and the third (with the words, for the depth of field) by a clear in two halves.
+- **Drawn resolves into cube faces** (a 2D view of the layer as the target): the cube (the environment map, six
+  128x128 faces) is resolved about once a level, not a frame (6 image copies in the whole 36m run).
+- **A compute copy for the exported fetch data**: on Maxwell a switch between graphics and compute work in one queue
+  drains the pipeline like a full barrier.
+- Not exact, the user's call: the portrait box without its 4x MSAA (5 2D-engine resolves and their full barriers a
+  frame, and 4 samples a pixel of its fur).
+
+**The A/B pack** (`banjo_renut_ab_targets`, banjo_renut_tuning.cpp): a list of in-run A/B targets; each in turn is
+switched off and on for one `banjo_renut_ab_s` period each, and the 10 s report has a "[renut A/B] ... (target N,
+banjo_renut_ab_targets)" line for each. `configs/banjo_gpu_ab_pack.toml` turns banjo_deko3d_light_branch and
+banjo_deko3d_gpr32 on and rotates over 15 and 16: one scripted run measures both (their GPU ms on and off). The fur
+family is on both lists, so cache 56 adds the variants with both constants (910 = 911 = 1; tools/deko3d_variant_cache.py).
+
+## 25. banjo_late_input_gpu removed (2026-10-20, package 36s, the user's call)
+
+Packages 36l-36r had a second late-input slack, `banjo_late_input_gpu` (with `banjo_late_input_gpu_margin_us`): how
+long each frame's first GPU work waited for the GPU to finish the frame before, plus the delay its controller read
+already had; the next reads were delayed by the least of 16 frames less the margin. Package 36s removes it, its keys,
+its configs and in-run A/B target 19 (now "none"). Plain late input (`banjo_late_input`, the render thread's slack)
+stays. The console's runs on the scripted route (36k/36r off, 36m/36q on), controller read -> GPU done:
+
+| Scene | Off | On |
+|---|---|---|
+| 30 fps cap, GPU 24-28 ms a frame | 52-57 ms | 52-57 ms (delay 0-1.5 ms) |
+| GPU-bound, GPU 42-45 ms | 99 ms, 22.9 fps | 85 ms, 22.0 fps |
+| Heaviest, GPU 55-57 ms | 132 ms, 17.7 fps | 104 ms, 17.5 fps |
+| t220 scene, GPU 33 ms (just holds 30) | 71-81 ms, 29.7-30.0 fps | 70 ms, 24.3 fps |
+
+At the cap with spare GPU nothing waits in the GPU queue, so it measures no slack and cannot help; where 30 fps is just
+reachable its slack (which includes the delay already applied, the waits seen late at the kicks) ratcheted the delay
+up to 29 ms and the frames missed their slot. The gain was only where the frame rate was already far below 30. The
+lag left at the cap is the work itself (game thread + recording + GPU) and the wait for the display's refresh; only a
+read timed from the refresh could take the latter. sa2-nx, futari-nx, Peggle 2 and SASRT were told to remove it too.

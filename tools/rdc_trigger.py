@@ -5,6 +5,7 @@
 # "200,230"), RDC_FRAMES (frames per capture, default 1), RDC_IDENT (target ident, default: the first one found).
 # The captures go where renderdoccmd's --capture-file said; trigger.txt lists their paths.
 import os
+import shutil
 import time
 import traceback
 
@@ -57,6 +58,18 @@ try:
             if msg.type == rd.TargetControlMessageType.NewCapture:
                 taken += 1
                 say("capture", msg.newCapture.captureId, msg.newCapture.path, "frame", msg.newCapture.frameNumber)
+                # banjo-nx (2026-10-20): RenderDoc deletes a capture it handed to this connection when the connection
+                # closes (run 75 lost all of them): a copy next to trigger.txt.
+                try:
+                    dest = os.path.join(OUT, "capture_%02d_frame%d.rdc" % (taken, msg.newCapture.frameNumber))
+                    for _ in range(50):
+                        if os.path.exists(msg.newCapture.path):
+                            break
+                        time.sleep(0.1)
+                    shutil.copyfile(msg.newCapture.path, dest)
+                    say("copied to", dest)
+                except Exception as e:
+                    say("copy failed", e)
             elif msg.type == rd.TargetControlMessageType.Disconnected:
                 say("disconnected")
                 break

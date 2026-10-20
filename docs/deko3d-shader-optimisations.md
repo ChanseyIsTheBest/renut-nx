@@ -274,12 +274,140 @@ condition text the inner select's other value can never be chosen, so it is `dk_
 calls with effects). The fur shader (903 = 5) 1024 -> about 1018 instructions. Every shader compiles; the cache of the
 package (`deko3d_shaders_41.bin`, 9,188 variants, pruned to the pipelines of the lists, emulator run 54's list included) is made with this pass.
 
+### 2.32 `txq`: texture sizes from a buffer (2026-10-19, constant 908)
+`textureSize(t, 0)` is a texture instruction (TXQ) on Maxwell, at the texture units' rate. Plume deko3d records each
+descriptor's level-0 size when it writes the view and keeps a 64-entry uniform buffer (binding 3) current for the
+bindings a shader queries (the banjo-dk line's `txq=` mask; pipelined updates only when a size changed). The pass reads
+`g_UboTexSize.v[binding]` instead; 908 = 0 is the query (the A/B), 908 = 2 runs both and paints magenta where they
+differ (verified in the emulator: none). A5E2 8 -> 4 texture operations, 259A 3 -> 2, the fur family one fewer.
+
+### 2.33 `earlyz`: depth tested before a discarding shader (2026-10-19, constant 909)
+`layout(early_fragment_tests)` under 909 = 1, which render/pipeline.cpp gives draws that write neither depth nor
+stencil (2026-10-20: or a stencil test that cannot write): the discard has nothing to undo, so the pixels are the same,
+and hidden pixels skip the shader. The fur shells write depth: particles and other blended effects gain.
+
+### 2.34 `gpr32`: 32 registers for the listed shaders (2026-10-19, constant 910, off: an A/B)
+uam's CompileBest caps the register file at 32 for a variant whose text defines 910 = 1 (tools/gpr32_shaders.txt): the
+fur shader 39 -> 32 GPRs (64 warps a SM instead of 48) for 15 spill loads and 5 stores.
+
+### 2.35 `bonesel`: a predicated bone's data select (2026-10-20, vertex)
+A predicated bone's rows `D = mix(P, L, c)` (the fetch when the weight is not zero, else the register's old value) feed
+its sum `mix(A, (D * w) + A, c)`, which keeps A whenever D would be P: the sum reads L, and the data selects go once
+nothing else reads them (36 a vertex for three predicated bones). 324 vertex shaders. The fur vertex shader 594 -> 558
+instructions, 56 -> 48 GPRs. Since guardsel (2.37, which runs first) the data selects are already gone by the time
+bonesel runs (the next bone's data select reads D only in its arm not taken, which nothing reads): bonesel stays for
+texts guardsel leaves alone (a body with a loop).
+
+### 2.36 `aw4`: a bone row as one uvec4 read (2026-10-20, vertex)
+The four address-window words of a bone row, W..W+3, read through a second `uvec4` view of the same binding at
+`(byte offset) >> 4` where W is provably a multiple of 4: the fetch data's offset, its slot bases and its size are
+16-byte multiples (render/draw.cpp; the renderer counts draws that are not and warns), and the per-vertex part is
+`int(floor(x)) * K` with K a multiple of 4. uam still splits the read into four 32-bit loads (its SSBO path does not
+merge them), so what goes is the index arithmetic: the fur vertex shader 558 -> 509 (depth-only variant 473 -> 388,
+43 -> 35 GPRs). 3,792 rows qualify.
+
+### 2.37 `guardsel`: a select whose other arm nobody reads (2026-10-20, both stages)
+A value read only where a condition holds (inside the chosen arm of selects on it, or in `if (c)` blocks, directly or
+through the values it feeds; the never-taken arm of a select on a literal is no read) never shows what a select on that
+condition inside its own definition gives otherwise: the select is its chosen arm. A greatest fixpoint over the
+readers; a read whose conditions contradict each other is no read. The conditions must have one value a run (assigned
+once, or once in each arm of one if / else; `bvecN(c)` and `c && c` are c); implications between them count: x = a && b
+gives x => a, x = !a gives x => !a, a condition assigned in both arms of an if / else implies what both arms imply (with
+the arm's own block condition, `float(!c) == 0.0` read as c; an arm assigning false implies anything), so Renut's light
+flag `_1529` (the spot test's result or the attenuation test) implies the attenuation test `_1474`. Bodies with loops are
+left alone.
+
+Renut's lights select every term on the attenuation test and the light's flag, carry the old values from light to light
+in the arms not taken, and add each light only under its flag: the carried values are never read where it matters, so
+69 selects go in each lit shader. Fur shader (heavy scene's variant) 775 -> 734 instructions, generic 1132 -> 1056 and
+39 -> 37 GPRs; A5E2 153 -> 137.
+
+Verification: `tools/difftest/difftest_game.py <before.glsl> <after.glsl> <trials> <N=value ...>` (tools/difftest/README.md) compiles both with
+uam, decompiles each DKSH with Ryujinx's translator (`shtool`), runs them in Python on random inputs and constant buffers
+(textures: a fixed function of binding and coordinates; every instruction's result rounded to float32) and compares
+the outputs and discards bit for bit. The fur shader: 1,000 trials equal (a deliberately wrong arm in one light is
+caught); `tools/difftest/batch_gs.py` runs the heavy lit shaders with their logged constants (section 2.37's table below). An earlier
+run without the float32 rounding showed 1-ULP differences that were the interpreter's (Python doubles), not the shaders'.
+
+### 2.38 `deadcomp`: a constructor's component overwritten before it is read (2026-10-20)
+`vec4 x = vec4(a, b, c, d);` followed in the same block, before any read of x, by `x.w = e;`: d is never read, so it
+becomes 0.0. Renut's lights build each light's vector with the previous light's .w and overwrite it at once; with that
+read gone, guardsel (which tracks whole variables) sees the previous light's values unread where its flag is off and
+drops ten more selects a lit shader: fur (heavy scene's variant) 734 -> 714 instructions (775 at the start of the
+night), generic 1056 -> 1036. Differential test equal (fur 600 trials, 3A25 300).
+
+### 2.39 `lightbranch`: a light's work in a branch on its reach (2026-10-20, constant 911, A/B, off)
+After guardsel and deadcomp a light's work is read only where its attenuation test c holds, except the two sums it adds
+to (`acc2 = mix(acc, x + acc, bvec3(f))` with f => c). The statements after `bool c = ...;` up to the last whose
+results are read later go into `if (g_banjoLightBranch == 0u || c)`, with an else giving each sum its previous value.
+911 = 0 (default): the if folds away, the same code as before (3A25: 745 instructions either way). 911 = 1
+(`banjo_deko3d_light_branch`, configs/banjo_deko3d_light_branch_on.toml): real branches (3A25 745 -> 766 static,
+SSY / BRA / SYNC), so a warp whose pixels are all out of a light's reach skips its ~35 instructions (4 of them MUFU).
+Not over texture fetches, derivatives, discards or outputs. Only the 24 heaviest lit shaders of the console profile
+(tools/lightbranch_shaders.txt; 14 of them have lights the pass can wrap; the cache has their 911 = 1 variants). Every light of 3A25 and 2F36 (5 each) is
+wrapped; differential tests equal for 911 = 0 and 1 (3A25 400 trials, fur 500). Whether it pays depends on how often
+whole warps are out of a light's reach (the game picks lights per object, so a character is usually inside all of
+them; large surfaces less so): the console's A/B says.
+
+### 2.40 `nullps`: a measurement of the fur's vertex share (2026-10-20, constant 912, diagnostic)
+The fur family (tools/nullps_shaders.txt: 2F36, C92B, B3C1, D40E) gets `if (g_banjoNullPs != 0u) { discard; }` as its
+first statement. 912 = 0 (default) folds it away (the same code); `banjo_renut_diag_null_ps`
+(configs/banjo_renut_diag_fur_vertex_only.toml, with the per-shader GPU profile) gives 1: every pixel thread ends at
+its first instruction (Maxwell's KIL ends the thread), so the profile's fur lines show the draws' vertex shading,
+rasterisation and pixel launches alone. The estimate from package 35's profile (the HUD portrait's 96x96 draws cost
+89 us each for a few thousand pixels) is ~5 ms of the fur's ~18 ms; the console says. The fur vanishes in that run.
+
+### 2.41 uam flag 1024: the aw4 bone rows as 128-bit loads (2026-10-20, package 36d, `banjo_deko3d_uam_wide_rows`)
+Why: package 35's console profile shows the skinned vertex shaders memory-bound, not arithmetic-bound: the fur drawn 21
+times into the 96x96 dialogue portrait costs 1.88 ms (89 us a draw for a few thousand pixels), the shadow maps 2.1 ms
+with no pixel shader. 2.36's aw4 view reads a bone row as one uvec4 of storage buffer 15, but uam split it into four
+32-bit loads and banjo flag 2 keeps MemoryOpt from merging global loads (Renut's vertex fetch reads words at vertex *
+stride + offset, strides any multiple of 4: a merged 64/128-bit access there could be misaligned).
+What: uam's TGSI front end (nv50_ir_from_tgsi.cpp handleLOAD) emits a whole xyzw load of buffer 15 with the identity
+swizzle as one TYPE_B128 load (four defs; the register allocator keeps them consecutive). Only the aw4 view is a uvec4
+buffer, and its loads are 16-byte aligned by construction: the renderer's fetch-data binding starts on 256 bytes and a
+row is element n of 16 bytes. Default flags 447 -> 1471; the DKSH cache tag uam110-sw8-bnx3 -> bnx4 (a cache compiled
+before is another compiler's); the off key uses deko3d_shaders_f447.bin (cache 47 retagged: the patched uam at flags 447
+compiles byte for byte as the old one).
+Exact: the same words are loaded (the decompile: the 48 loads at offsets 0/4/8/12 of 12 row addresses become 12
+128-bit loads at the same addresses); every shader without aw4 rows compiles byte for byte as before (40 of 40 checked).
+Numbers (316 aw4 vertex shaders, generic variants): instructions 183,456 -> 172,092 (-6.2 %), global loads 15,456 ->
+4,080 (-74 %); GPRs up in 312 shaders (about 2), across an 8-register step in 61, the fur VS among them (48 -> 50: 42 ->
+36 warps a SM). Fewer load instructions should outweigh that for memory-bound shaders; the console A/B
+(configs/banjo_deko3d_uam_wide_rows_off.toml) decides.
+A crash it exposed (SASRT's report, fixed in package 36e): Mesa's DeadCodeElim::checkSplitLoad splits a partly used
+load in two (here a 128-bit row whose middle word is dead), and Instruction::clone copies sources without their
+indirect indices, so the second load lost its address and emitLDG read a null indirect (uam crashed). checkSplitLoad now
+copies the indices. Debug builds can name such a pass: -DBANJO_LDG_CHECK prints "global load without an address after
+<pass>" after every optimisation pass.
+
+### The night's round in numbers (2026-10-20, package 36b against 35b)
+`tools/deko3d_shader_stats.py` over package 35's pipeline list, weighted by package 35's console GPU profile (1,468 ms
+of frames): pixel shaders 519 -> 491 GPU-time-weighted instructions (-5.4 %; median 677 -> 636), vertex shaders
+361 -> 324 (-10.1 %). The heaviest: fur 2F36 686 -> 645 (39 -> 37 GPRs), A5E2 145 -> 123 (8 -> 4 texture operations,
+19 -> 16 GPRs), C92B 646 -> 603, 3A25 654 -> 604, 0BBB 879 -> 792, 8CF6 848 -> 764, 698F 616 -> 526. Shaders without
+point lights (49A9, 2D82, 2FA0, 1AB6 with their logged constants) change little. Every shipped heavy shader was checked
+against package 36's with tools/difftest/verify_final.py (19 runs of 300 trials, 911 = 0 and 1: all equal).
+Estimated GPU time of the heaviest scene: about 3 ms of its 51.6 (the pixel work ALU-bound, the vertex work of the fur
+shells and shadow maps), so about 48-49 ms handheld; the console's runs say.
+
 ### The DKSH cache and the console's compiles
 Emulator run 47 (package 34's round-two build) compiled 183 variants during play: 103 were alpha function 903 = 5
 (greater), which the guesses for alpha-less list records lacked (8 and 7): `ALPHA_GUESS` is (8, 7, 5) and the cache is
 made from the run's version-4 list as well (it records each pipeline's function). The cache tag is `uam110-sw8-bnx3`
 (the compiler changed again); a cache of other flags (a toml key turning a uam pass off) is
 `deko3d_shaders_f<flags>.bin` (PRMT off: f446), compiled by the console as it goes.
+
+### 2.42 `skinonce`: the fur skinned once a frame (2026-10-20, package 36g, constant 913, A/B)
+docs/deko3d-renderer.md section 22 has the renderer's side. The pass (tools/skinonce_shaders.txt: the four fur
+vertex shaders) moves the skinning's backward slice into a branch and loads the three skinned rows from storage
+buffer 13 instead where the draw says so; the key-off text is the old main under `#if DK_SKIN_ONCE` (byte-identical
+DKSH). Read path: B814 475 -> 231 instructions (50 -> 30 GPRs), 12399 409 -> 165, 146D 495 -> 251, 7F73 483 -> 241.
+uam flag 1024 now also makes a vec4 load of buffer 13 one 128-bit load and a vec4 store one 128-bit store.
+Pitfall (found by decompiling the write path before any run): `mkStore(op, TYPE_B128, sym, ptr, x)` followed by
+`setSrc(2..4)` for y, z, w overwrote the indirect address (setIndirect puts it in the first free source), so the
+store went to RZ + 0. Set the data sources first and the indirect last (MemoryOpt::combineSt keeps it after them
+too). Checked with tools/difftest/difftest_vs_skin.py: before / write / read outputs bit-equal, 150 trials each.
 
 ### Verification of the round
 `uamx/difftest_ps.py <flags A> <flags B>`: 10 pixel shaders (branches, deep nesting, re-reads, discard, a repeated

@@ -15,6 +15,7 @@
  */
 #include <rex/frame_latency.h>  // banjo-nx (2026-10-19)
 #include "renut_engine/display_sync.h"
+#include "renut_engine/gpu/render/pipeline.h"  // banjo-nx (2026-10-20): SyncPipelineListLocked
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -53,6 +54,22 @@
 #include "renut_engine/gpu/render/surfaces.h"
 #include "renut_engine/gpu/render/textures.h"
 #include "renut_engine/gpu/backend/video.h"
+
+#include <rex/cvar.h>
+
+// banjo-nx (2026-10-20, from sa2-nx): the SDK's Switch core layout (sdk/src/system/xthread.cpp).
+extern "C" uint32_t RexSetGuestThreadCoreLayout(int main_core, uint32_t others_mask, int others_preferred);
+
+// banjo-nx (2026-10-20, from sa2-nx's sa2_renut_core_layout): see D3DDevice_Swap_hook.
+REXCVAR_DEFINE_BOOL(banjo_renut_core_layout, false, "Banjo/Enhancements",
+                    "Renut's renderer on the Switch: at the first Swap the guest main thread (N&B's drawing thread, the "
+                    "one that calls Direct3D) is pinned to core 0 and every other guest thread gets cores 1-2 "
+                    "preferring 2 (the render thread is on core 1 at a higher priority), so no game thread time-slices "
+                    "with it (Horizon slices a core's threads of one priority in 10 ms). sa2-nx: render thread 12.5 -> "
+                    "11.5 ms and game thread 17.6 -> 17.3 ms with its other items. OFF by default since package 36q: in "
+                    "Ryujinx it hung the first Swap in 4 of 12 runs (RexSetGuestThreadCoreLayout re-masking running threads "
+                    "under the object table's lock); configs/banjo_renut_core_layout_on.toml to try it on the console")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 using namespace renut::gpu;
 
@@ -849,10 +866,25 @@ void D3DDevice_RunCommandBuffer_hook(u32 device_va, u32 command_buffer,
 // goes on with the next one, waiting only when it is more than
 // render_thread::kMaxFramesAhead ahead.
 void D3DDevice_Swap_hook(u32 device_va, u32 front_buffer, u32 /*parameters*/) {
+  // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_core_layout, the Switch): once, the guest main thread alone on core 0,
+  // the other guest threads on cores 1-2 (preferring 2: the render thread is pinned to core 1 at a higher priority).
+  // Before, every guest thread could run on any core, time-sliced at their priority (0x3B).
+  static bool core_layout_done = false;
+  if (!core_layout_done) {
+    core_layout_done = true;
+#if REX_PLATFORM_SWITCH
+    if (REXCVAR_GET(banjo_renut_core_layout)) {
+      const uint32_t moved = RexSetGuestThreadCoreLayout(0, 0x6, 2);
+      RGPU_INFO("[renut] banjo_renut_core_layout: the guest main thread on core 0, the other guest threads on cores "
+                "1-2 ({} threads set)", moved);
+    }
+#endif
+  }
   renut::frame_stats::OnGameFrame();
   rex::latency::NoteGuestSwap();  // banjo-nx (2026-10-19, input latency): the probe
   const uint64_t swap_ordinal = rex::latency::SwapCount();
   FlushDeferredVertices(device_va);
+  SnapshotDeltasNewFrame();  // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_snapshot_deltas)
 
   // What the original does after handing the frame to the video hardware:
   // count the swap, record the frame's fence tag, and end the frame with a
@@ -872,6 +904,8 @@ void D3DDevice_Swap_hook(u32 device_va, u32 front_buffer, u32 /*parameters*/) {
     // buffer for the next frame first, and the frame's last draws (the composite, the HUD) took the new bytes.
     banjo::renut_gpu::checks::QueueKickFlush();
     KickFence(device);
+    // banjo-nx (2026-10-20, banjo_renut_game_gamma): the device's gamma ramp (StoreGamma's +0x3A9C) for the present.
+    Video::NoteGameGamma(device + 0x3A9C);
   }
 
   render_thread::QueueFrame([front_buffer, swap_ordinal] {
@@ -887,7 +921,12 @@ void D3DDevice_Swap_hook(u32 device_va, u32 front_buffer, u32 /*parameters*/) {
     }
     MaybeReportMemory();
     // The front buffer is the texture the game resolved the frame into.
+    Video::NotePresentingSwap(swap_ordinal);  // banjo-nx (2026-10-20): the probe's "input -> GPU done"
     Video::Present(image.texture ? &image : nullptr);
+    {
+      std::lock_guard lock(State().mutex);
+      ::renut::gpu::SyncPipelineListLocked();  // banjo-nx (2026-10-20): the list's new records to the card
+    }
     rex::latency::NotePresented(swap_ordinal);  // banjo-nx (2026-10-19, input latency)
     banjo::display_sync::NotePresented(swap_ordinal);  // banjo-nx (2026-10-19, latency batch 3)
   });

@@ -83,6 +83,36 @@ struct ReplayConstants {
 bool DrawStateLocked(const u8 *device_state, const DrawCall &call,
                      const ReplayConstants *replay = nullptr);
 
+// banjo-nx (2026-10-20, from sa2-nx, banjo_renut_chain_reuse): set by backend/queued.cpp around a draw of its delta chain
+// (banjo_renut_snapshot_deltas): the device chunks that changed since the chain's previous draw. The chain's chunks: the
+// 30 of 64 bytes before the float constants (device bytes 0-1919), then the bool constants on: banjo-nx (N&B's
+// 12,712-byte snapshot) 41 (10112-12711, the last one 40 bytes); SA2 47 (10112-13087). 'seq' numbers the chain's draws (consecutive, from 2; a whole copy marks every chunk); 0 for
+// any other draw. A memo of a draw's derived state is valid for the next draw when its seq is the memo's + 1 and none
+// of the chunks it reads changed.
+struct ChainHint {
+  uint64_t seq = 0;
+  uint64_t changed[2] = {};
+};
+extern ChainHint g_chain_hint;
+// banjo-nx (2026-10-20): the next ChainHint::seq, shared by every producer of hints (backend/queued.cpp's delta chain,
+// guest/command_buffers.cpp's replays): a producer whose number is not its previous one + 1 had another draw in between
+// and marks every chunk changed.
+uint64_t NextChainSeq();
+constexpr u32 kChainHeadChunks = 30;
+constexpr u32 kChainTailBegin = 10112;
+// The chain chunk of a device byte outside the float constants.
+constexpr u32 ChainChunkOf(u32 device_offset) {
+  return device_offset < kChainTailBegin ? device_offset / 64 : kChainHeadChunks + (device_offset - kChainTailBegin) / 64;
+}
+// Whether any chunk of device bytes [first, last] changed (both outside the float constants, on the same side).
+inline bool ChainChanged(const ChainHint &h, u32 first, u32 last) {
+  for (u32 c = ChainChunkOf(first); c <= ChainChunkOf(last); ++c) {
+    if ((h.changed[c / 64] >> (c % 64)) & 1)
+      return true;
+  }
+  return false;
+}
+
 struct ClearRect {
   i32 x1, y1, x2, y2;
 };
@@ -128,6 +158,8 @@ bool ReadRenderTargetLocked(const u8 *device_state, u32 source, u32 &width, u32 
 
 // What Swap scans out for the guest front buffer texture, or an empty image.
 PresentImage FrontBufferImageLocked(u32 texture_va);
+// banjo-nx (2026-10-19): the texture at that address holds what a resolve wrote (not a new, uninitialised image).
+bool FrontBufferWrittenLocked(u32 texture_va);
 
 // A vertex declaration record at 'declaration_va' is being destroyed.
 void ForgetVertexDeclarationLocked(u32 declaration_va);

@@ -14,6 +14,7 @@
 
 #include <deko3d.h>
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -147,6 +148,10 @@ namespace plume {
         uint32_t outputMask = 0;
         // A vertex shader's outputs it writes as zero (its "// banjo-vszero=0x..." line): constant 906 of the pixel shader.
         uint32_t zeroOutputMask = 0;
+        // banjo-nx (2026-10-19, GPU): the texture bindings whose level-0 size the shader reads from the texture size
+        // buffer (UBO binding 3, entry k of the pixel stage, 32 + k of the vertex stage) instead of a texture query
+        // (the banjo-dk line's txq=; tools/deko3d_glsl_opt.py, pass txq).
+        uint32_t txqMask = 0;
     };
 
     struct Deko3DShader : RenderShader {
@@ -200,6 +205,9 @@ namespace plume {
         uint32_t imageFirst = 0, samplerFirst = 0; // descriptor index of the first image / sampler descriptor
         // Buffers (constant and storage): address and size per descriptor index.
         std::vector<DkBufExtents> buffers;
+        // banjo-nx (2026-10-19, GPU): per image id, the level-0 size of the view written there as a texture query
+        // reads it (width, height, depth or layers), for the texture size buffer (txq).
+        std::vector<std::array<uint32_t, 3>> imageSizes;
 
         Deko3DDescriptorSet(Deko3DDevice *device, const RenderDescriptorSetDesc &desc);
         ~Deko3DDescriptorSet() override;
@@ -247,6 +255,7 @@ namespace plume {
         // UBO / SSBO slots each stage reads (vertex, geometry, fragment).
         uint32_t uboMask[3] = {}, ssboMask[3] = {};
         std::vector<Deko3DShaderUsage::TexBinding> texBindings[3];
+        uint32_t txqMask[3] = {};  // banjo-nx (2026-10-19): Deko3DShaderUsage::txqMask of each stage
         bool boundTextures = false;
         bool textures = false;
         uint64_t stateHash = 0; // equal hashes: the same fixed-function state (binds skipped)
@@ -323,6 +332,11 @@ namespace plume {
         const Deko3DPipelineLayout *graphicsLayout = nullptr, *computeLayout = nullptr;
         DkGpuAddr boundImageSet = 0, boundSamplerSet = 0;
         uint32_t boundImageCount = 0, boundSamplerCount = 0;
+        // banjo-nx (2026-10-19, GPU): the descriptor set whose image table is bound (its sizes, Deko3DDescriptorSet::
+        // imageSizes), and what the texture size buffer holds after this list's updates so far (valid bit per entry).
+        const struct Deko3DDescriptorSet *boundImageSetObj = nullptr;
+        uint32_t texSizeShadow[64][4] = {};
+        uint64_t texSizeValid = 0;
         DkBufExtents graphicsUbo[16]{}, graphicsSsbo[16]{};
         uint32_t graphicsUboValid = 0, graphicsSsboValid = 0;
         uint32_t uboBoundStages[16] = {}, ssboBoundStages[16] = {}; // DkStage bits a slot was bound for
@@ -526,6 +540,11 @@ namespace plume {
         DkMemBlock pushBlock = nullptr;
         DkGpuAddr pushAddr = 0;
         static constexpr uint32_t PushSize = 256;
+        // banjo-nx (2026-10-19, GPU): the texture size buffer (UBO binding 3: 64 uvec4, pixel bindings then vertex),
+        // updated in command order like the push constants.
+        DkMemBlock texSizeBlock = nullptr;
+        DkGpuAddr texSizeAddr = 0;
+        static constexpr uint32_t TexSizeSize = 64 * 16;
         // Zeros for missing vertex buffers (Vulkan's null buffer).
         DkMemBlock zeroBlock = nullptr;
         DkGpuAddr zeroAddr = 0;
@@ -610,6 +629,9 @@ namespace plume {
     // banjo-nx: the vertex fetch data of the next draws (storage binding 15 of the graphics stages): size bytes from
     // address, which the shaders index from 0 (shader_common.h, g_DkAddressWindow).
     bool Deko3DBindFetchData(RenderCommandList *commandList, uint64_t address, uint32_t size);
+    // banjo-nx (2026-10-20, banjo_deko3d_skin_once): a storage buffer of the next draws at 'slot' (0-13) of the
+    // graphics stages that read it (the fur's skin cache: slot 13).
+    bool Deko3DBindStorage(RenderCommandList *commandList, uint32_t slot, uint64_t address, uint32_t size);
     // banjo-nx (2026-10-19, render-thread proposals 2 and 5): a uniform buffer the renderer keeps up to date with
     // pipelined updates (Deko3DPushUniform: dkCmdBufPushConstants; the draws before an update keep the old values), bound
     // at 'slot' for the graphics stages that read it; the update of 'size' bytes at 'offset' of the 'uboSize'-byte
@@ -631,6 +653,8 @@ namespace plume {
     };
     Deko3DFenceCopy Deko3DCopyFence(const RenderCommandFence *fence);
     bool Deko3DFenceCopyDone(Deko3DFenceCopy &copy);
+    // banjo-nx (2026-10-20, input latency): waits until the copy's signal arrives (or the queue fails); true when it did.
+    bool Deko3DFenceCopyWait(Deko3DFenceCopy &copy, RenderDevice *device);
 
     // banjo-nx (2026-10-18, GPU bandwidth): options read when the device and its textures are made; set them before
     // CreateDeko3DInterface. depthCompression: depth/stencil targets get hardware compression (as colour targets do).

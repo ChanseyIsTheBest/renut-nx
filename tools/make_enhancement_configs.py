@@ -144,8 +144,61 @@ Each variant is the base config with a few keys changed, so two logs compare dir
                                    banjo_late_input off: the input latency A/B of the late input
   banjo_deko3d_ring_cleaner_off.toml  package 35: the upload ring cleaned by the render thread at the submit (as
                                    before), banjo_deko3d_ring_cleaner off
+  banjo_deko3d_txq_off.toml        package 36: texture size queries in the shaders again (banjo_deko3d_txq_constants
+                                   off): the GPU A/B of the texture size buffer (A5E2, the fur shells)
+  banjo_deko3d_txq_verify.toml     package 36, a test: queries and sizes both, magenta pixels where they differ
+                                   (the variants compile at run time; not for timing)
+  banjo_deko3d_early_z_off.toml    package 36: discarding pixel shaders of draws without depth or stencil writes
+                                   tested after the shader again (banjo_deko3d_early_z off): the GPU A/B
+  banjo_deko3d_gpr32_on.toml       package 36: the fur family compiled with 32 GPRs at most (banjo_deko3d_gpr32 on):
+                                   the GPU A/B of occupancy against spills
+  banjo_renut_stall_present_on.toml  package 36: the last frame re-presented while the game stalls, as before
+                                   (banjo_renut_stall_present on): the A/B of the colour flash fix
+  banjo_renut_diag_fur_vertex_only.toml  package 36b, a measurement: the fur family's pixel shaders discard at
+                                   once (banjo_renut_diag_null_ps); the GPU profile then shows the fur draws'
+                                   vertex cost (the fur vanishes; its shaders compile on the console)
+  banjo_renut_game_gamma_on.toml   package 36b: the game's gamma ramp applied to the output, as a 360 shows it
+                                   (banjo_renut_game_gamma on; darker midtones): to look at, the user's call
+  banjo_deko3d_light_branch_on.toml  package 36c: the heaviest lit shaders' point lights in branches on their reach
+                                   (banjo_deko3d_light_branch on): the GPU A/B
+  banjo_renut_device_swizzle_off.toml  package 36c: textures sampled through their header's swizzle, as before
+                                   (banjo_renut_device_swizzle off): the A/B of the second colour flash fix
+  banjo_deko3d_light_branch_ab.toml  package 36c: banjo_deko3d_light_branch switched off and on every 4 s in one
+                                   run (in-run A/B target 15): the "[renut A/B]" line's GPU times
+  banjo_deko3d_gpr32_ab.toml       package 36c: the same for banjo_deko3d_gpr32 (target 16)
+  banjo_renut_fur_shells_2.toml    package 36c, NOT exact: every 2nd fur shell drawn (banjo_renut_fur_shells 2): the
+                                   look and the GPU time of thinner fur, the user's call
+  banjo_deko3d_uam_wide_rows_off.toml  package 36d: the bone rows as four 32-bit loads, as before (the A/B of the
+                                   128-bit rows; its cache deko3d_shaders_f447.bin is in the package)
+  banjo_deko3d_latency_trim_on.toml  package 36e: input latency, the next frame recorded just in time where the GPU
+                                   is the limit (banjo_deko3d_latency_trim): its [latency] lines against run (a)'s
+  banjo_gpu_ab_pack.toml           package 36q: banjo_deko3d_light_branch and banjo_deko3d_gpr32 both on, each switched
+                                   off in turn (banjo_renut_ab_targets "15,16"): one "[renut A/B]" line each, GPU ms
+                                   on and off (cache 56 has both together)
+  banjo_renut_sa2_cpu_off.toml     package 36o: every item of sa2-nx's Renut CPU work off (the whole A/B: render and game
+                                   thread ms a frame against renut_auto.toml's)
+  banjo_renut_chain_reuse_replays_off.toml  package 36o: the replayed draws make their key, targets, viewport, textures
+                                   again (banjo-nx's extension of sa2-nx's chain reuse)
+  banjo_renut_core_layout_on.toml  package 36q: sa2-nx's core layout on (off by default: it hung the first Swap in
+                                   Ryujinx 4 times in 12 runs)
+  banjo_renut_cpu_verify.toml      package 36o: the deltas and the reuse checked draw by draw ("verify: ... differ")
+  banjo_renut_portrait_fur_shells_3.toml  package 36e, NOT exact: the dialogue portrait's fur with 7 of 21 shells
+  banjo_deko3d_skin_once_on.toml   package 36g: the fur's meshes skinned once a frame, the other shells reading the
+                                   rows (banjo_deko3d_skin_once on): the same pixels, the GPU A/B
+  banjo_deko3d_skin_once_ab.toml   package 36g: the same switched off and on every 4 s in one run (in-run A/B
+                                   target 17): the "[renut A/B]" line's GPU times
+  banjo_deko3d_skin_once_off.toml  package 36g: the fur skinned for every shell, as before (banjo_deko3d_skin_once
+                                   off; on by default since 36g)
+  banjo_deko3d_eager_kicks_on.toml  package 36i: input latency at the frame cap: the frame goes to the GPU in more,
+                                   earlier parts (banjo_deko3d_eager_kicks): its [latency] "input -> GPU done"
+  banjo_deko3d_eager_kicks_ab.toml  package 36i: the same switched off and on every 4 s (in-run A/B target 18): the
+                                   "[renut A/B]" line's fps and render thread time with and without it
+  banjo_deko3d_eager_kicks_off.toml  package 36i: the frame to the GPU as before (200-draw lists at the next kick;
+                                   banjo_deko3d_eager_kicks off, on by default since 36i at the user's request)
   banjo_display_sync_on.toml       package 35b: the frame limiter on the display's refresh (banjo_display_sync on;
                                    off by default: the emulator stalled with it), for a console try
+  banjo_display_sync_off.toml      package 36i: the frame limiter on its own 33.3 ms timer again (banjo_display_sync
+                                   off; on by default since 36i for the user's console try, the emulator hangs with it)
   banjo_renut_store_cards_off.toml  package 34: cached vertex and index copies hashed whole after every kick again (as
                                    before; the generated code still marks the cards), banjo_renut_store_cards off: the
                                    render thread's A/B of the store cards
@@ -475,6 +528,58 @@ VARIANTS = {
     "banjo_deko3d_ring_cleaner_off.toml": dict(PROFILING, **RENUT, banjo_deko3d_ring_cleaner="false"),
     # Package 35b (latency batch 3).
     "banjo_display_sync_on.toml": dict(PROFILING, **RENUT, banjo_display_sync="true"),
+    # 2026-10-20: on by default since 36i (the user's console try); this is the frame limiter's own timer again.
+    "banjo_display_sync_off.toml": dict(PROFILING, **RENUT, banjo_display_sync="false"),
+    # Package 36 (2026-10-19 night, GPU and the colour flash).
+    "banjo_deko3d_txq_off.toml": dict(PROFILING, **RENUT, banjo_deko3d_txq_constants="false"),
+    "banjo_deko3d_txq_verify.toml": dict(PROFILING, **RENUT, banjo_deko3d_txq_verify="true"),
+    "banjo_deko3d_early_z_off.toml": dict(PROFILING, **RENUT, banjo_deko3d_early_z="false"),
+    "banjo_deko3d_gpr32_on.toml": dict(PROFILING, **RENUT, banjo_deko3d_gpr32="true"),
+    "banjo_renut_stall_present_on.toml": dict(PROFILING, **RENUT, banjo_renut_stall_present="true"),
+    "banjo_deko3d_light_branch_on.toml": dict(PROFILING, **RENUT, banjo_deko3d_light_branch="true"),
+    "banjo_renut_game_gamma_on.toml": dict(PROFILING, **RENUT, banjo_renut_game_gamma="true"),
+    "banjo_renut_device_swizzle_off.toml": dict(PROFILING, **RENUT, banjo_renut_device_swizzle="false"),
+    # 2026-10-20: the two GPU A/Bs in one run each (in-run targets 15 / 16): the "[renut A/B]" line's GPU times of the
+    # same scenes with and without the constant.
+    "banjo_deko3d_light_branch_ab.toml": dict(PROFILING, **RENUT, banjo_deko3d_light_branch="true",
+                                              banjo_renut_ab_target="15", banjo_renut_ab_s="4"),
+    "banjo_deko3d_gpr32_ab.toml": dict(PROFILING, **RENUT, banjo_deko3d_gpr32="true", banjo_renut_ab_target="16",
+                                       banjo_renut_ab_s="4"),
+    # 2026-10-20, NOT exact (the user's call): every 2nd fur shell drawn (11 of Banjo's 21).
+    "banjo_renut_fur_shells_2.toml": dict(PROFILING, **RENUT, banjo_renut_fur_shells="2"),
+    # 2026-10-20 (package 36d): the bone rows as four 32-bit loads again (its own cache, deko3d_shaders_f447.bin).
+    "banjo_deko3d_uam_wide_rows_off.toml": dict(PROFILING, **RENUT, banjo_deko3d_uam_wide_rows="false"),
+    # 2026-10-20 (package 36e): input latency without vsync; the portrait's fur (NOT exact).
+    "banjo_deko3d_latency_trim_on.toml": dict(PROFILING, **RENUT, banjo_deko3d_latency_trim="true"),
+    # (banjo_late_input_gpu's configs, 36l-36r, went with the key in package 36s.)
+    # 2026-10-20 (package 36o): sa2-nx's Renut CPU work, ported (docs/renut-cpu-work-from-sa2.md). Every item off (the
+    # whole A/B), the replayed draws' chain reuse off (banjo-nx's extension), the core layout off, both verify keys on.
+    "banjo_renut_sa2_cpu_off.toml": dict(PROFILING, **RENUT, banjo_renut_snapshot_deltas="false", banjo_renut_capture_batches="false", banjo_renut_neon_compare="false", banjo_renut_callbacks_fast="false", banjo_renut_wake_batch="1", banjo_renut_prefetch_next="false", banjo_renut_done_notify_waiters="false", banjo_renut_batch_clock="false", banjo_renut_chain_reuse="false", banjo_renut_inline_line_compare="false", banjo_renut_stream_mask="false", banjo_renut_texture_defaults_copy="false", banjo_renut_fetch_slots_skip="false", banjo_renut_fetch_data_unread="false", banjo_renut_shared_partial_clear="false", banjo_renut_lean_diagnostics="false", banjo_renut_deferred_chain="false"),
+    # 36r: off by default (the console's 36q profile: the reuse checks cost the render thread more than they saved).
+    "banjo_renut_chain_reuse_on.toml": dict(PROFILING, **RENUT, banjo_renut_chain_reuse="true",
+                                            banjo_renut_chain_reuse_replays="true"),
+    "banjo_renut_inline_compare_on.toml": dict(PROFILING, **RENUT, banjo_renut_inline_line_compare="true"),
+    # 2026-10-20 evening (package 36q): the GPU A/B pack, light branch (target 15) and gpr32 (target 16) in one run:
+    # both keys on, the in-run A/B rotating over the two (banjo_renut_ab_targets), 4 s halves.
+    "banjo_gpu_ab_pack.toml": dict(PROFILING, **RENUT, banjo_deko3d_light_branch="true", banjo_deko3d_gpr32="true",
+                                   banjo_renut_ab_targets='"15,16"', banjo_renut_ab_s="4"),
+    # 36q: off by default (a hang at the first Swap in Ryujinx, 4 of 12 runs); the on config to try it.
+    "banjo_renut_core_layout_on.toml": dict(PROFILING, **RENUT, banjo_renut_core_layout="true"),
+    "banjo_renut_cpu_verify.toml": dict(PROFILING, **RENUT, banjo_renut_snapshot_deltas_verify="true",
+                                         banjo_renut_chain_reuse_verify="true"),
+    "banjo_renut_portrait_fur_shells_3.toml": dict(PROFILING, **RENUT, banjo_renut_portrait_fur_shells="3"),
+    # 2026-10-20 (package 36g): the fur skinned once a frame (exact), on and as an in-run A/B (target 17).
+    "banjo_deko3d_skin_once_on.toml": dict(PROFILING, **RENUT, banjo_deko3d_skin_once="true"),
+    "banjo_deko3d_skin_once_off.toml": dict(PROFILING, **RENUT, banjo_deko3d_skin_once="false"),
+    # 2026-10-20 (input latency at the frame cap): the frame to the GPU in more, earlier parts; on, and in-run A/B 18.
+    "banjo_deko3d_eager_kicks_on.toml": dict(PROFILING, **RENUT, banjo_deko3d_eager_kicks="true"),
+    "banjo_deko3d_eager_kicks_off.toml": dict(PROFILING, **RENUT, banjo_deko3d_eager_kicks="false"),
+    "banjo_deko3d_eager_kicks_ab.toml": dict(PROFILING, **RENUT, banjo_deko3d_eager_kicks="true",
+                                             banjo_renut_ab_target="18", banjo_renut_ab_s="4"),
+    "banjo_deko3d_skin_once_ab.toml": dict(PROFILING, **RENUT, banjo_deko3d_skin_once="true",
+                                           banjo_renut_ab_target="17", banjo_renut_ab_s="4"),
+    "banjo_renut_diag_fur_vertex_only.toml": dict(PROFILING, **RENUT, banjo_renut_diag_gpu_shaders="true",
+                                                  banjo_renut_diag_null_ps="true"),
     # Package 34 (CPU): the render thread's new work off, one at a time.
     "banjo_renut_store_cards_off.toml": dict(PROFILING, **RENUT, banjo_renut_store_cards="false"),
     "banjo_renut_cpu_memos_off.toml": dict(PROFILING, **RENUT, banjo_renut_cpu_memos="false"),

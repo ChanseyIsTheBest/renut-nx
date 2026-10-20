@@ -45,6 +45,56 @@ REXCVAR_DEFINE_INT32(banjo_display_phase_us, 0, "Banjo/Enhancements",
                      "(microseconds)")
     .range(0, 16000);
 
+#if REX_PLATFORM_SWITCH
+// banjo-nx (2026-10-20): libnx's default window (default_window.o: __nx_win_init, __nx_win_exit, nwindowGetDefault)
+// done here, the same calls in the same order (from its disassembly), so its display gives the refresh thread below
+// its vsync event. A second viOpenDefaultDisplay in the process failed on the console (package 36i's logs: "cannot
+// open the display"), the display being libnx's already. Defining all three keeps default_window.o out of the link;
+// libnx's init.o calls the two through its weak references as before.
+namespace {
+ViDisplay g_win_display;
+ViLayer g_win_layer;
+NWindow g_win;
+std::atomic<bool> g_win_ready{false};
+}  // namespace
+
+extern "C" {
+NWindow *nwindowGetDefault(void) { return &g_win; }
+
+void __nx_win_init(void) {
+  Result rc = viInitialize(ViServiceType_Default);
+  if (R_SUCCEEDED(rc)) {
+    rc = viOpenDisplay("Default", &g_win_display);
+    if (R_SUCCEEDED(rc)) {
+      rc = viCreateLayer(&g_win_display, &g_win_layer);
+      if (R_SUCCEEDED(rc)) {
+        rc = viSetLayerScalingMode(&g_win_layer, ViScalingMode_FitToLayer);
+        if (R_SUCCEEDED(rc))
+          rc = nwindowCreateFromLayer(&g_win, &g_win_layer);
+        if (R_SUCCEEDED(rc)) {
+          nwindowSetDimensions(&g_win, 1280, 720);
+          g_win_ready.store(true, std::memory_order_release);
+          return;
+        }
+        viCloseLayer(&g_win_layer);
+      }
+      viCloseDisplay(&g_win_display);
+    }
+    viExit();
+  }
+  diagAbortWithResult(0x2559);  // MAKERESULT(Module_Libnx, LibnxError_BadGfxInit), as libnx
+}
+
+void __nx_win_exit(void) {
+  g_win_ready.store(false, std::memory_order_release);
+  nwindowClose(&g_win);
+  viCloseLayer(&g_win_layer);
+  viCloseDisplay(&g_win_display);
+  viExit();
+}
+}  // extern "C"
+#endif
+
 namespace banjo::display_sync {
 namespace {
 
@@ -212,15 +262,24 @@ void Run() {
 #if REX_PLATFORM_SWITCH
   const bool priority_ok = RexSwitchSetCurrentThreadPriorityOk(kVsyncThreadPriority);
   const bool core_ok = RexSwitchPinCurrentThreadToCore(kVsyncThreadCore);
-  ViDisplay display{};
+  // 2026-10-20: the default window's display (opened by __nx_win_init above); a display of its own only without it.
+  ViDisplay own{};
+  ViDisplay *display = g_win_ready.load(std::memory_order_acquire) ? &g_win_display : nullptr;
   Event vsync{};
-  if (R_FAILED(viOpenDefaultDisplay(&display))) {
-    REXLOG_WARN("[display] cannot open the display: the frame limiter keeps its own timer (banjo_display_sync)");
-    return;
+  if (!display) {
+    const Result rc = viOpenDefaultDisplay(&own);
+    if (R_FAILED(rc)) {
+      REXLOG_WARN("[display] cannot open the display (0x{:X}): the frame limiter keeps its own timer "
+                  "(banjo_display_sync)", rc);
+      return;
+    }
+    display = &own;
   }
-  if (R_FAILED(viGetDisplayVsyncEvent(&display, &vsync))) {
-    REXLOG_WARN("[display] no vsync event from the display: the frame limiter keeps its own timer (banjo_display_sync)");
-    viCloseDisplay(&display);
+  if (const Result rc = viGetDisplayVsyncEvent(display, &vsync); R_FAILED(rc)) {
+    REXLOG_WARN("[display] no vsync event from the display (0x{:X}): the frame limiter keeps its own timer "
+                "(banjo_display_sync)", rc);
+    if (display == &own)
+      viCloseDisplay(&own);
     return;
   }
   g_phase.store(REXCVAR_GET(banjo_display_phase_auto) ? 0 : uint64_t(REXCVAR_GET(banjo_display_phase_us)) * 1000,

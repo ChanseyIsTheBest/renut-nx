@@ -14,6 +14,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 
 #include <rex/types.h>
@@ -29,5 +30,15 @@ uint64_t LastCallback();
 
 // Runs the callbacks the render thread has reached, in order, on this thread.
 void RunReadyCallbacks();
+
+// banjo-nx (2026-10-20, from sa2-nx, banjo_renut_callbacks_fast): the hooks' first calls (RunReadyCallbacks, FlushDeferredVertices,
+// FlushRecordedVertices) return without their locks when nothing waits. A plain flag, set at the first call (1 on, -1
+// off; the same value whichever thread sets it): an inline read instead of a call with a static's guard.
+extern std::atomic<int> g_hook_fast_paths;
+bool HookFastPathsInit();
+inline bool HookFastPathsOn() {
+  const int v = g_hook_fast_paths.load(std::memory_order_relaxed);
+  return v ? v > 0 : HookFastPathsInit();
+}
 
 } // namespace renut::gpu

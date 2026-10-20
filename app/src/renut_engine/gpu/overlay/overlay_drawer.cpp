@@ -311,6 +311,11 @@ uint64_t OverlayDrawer::FramesRecorded() {
   return g_frames_recorded;
 }
 
+bool OverlayDrawer::HasLatest() {
+  std::lock_guard lock(g_frame_mutex);
+  return g_latest && !g_latest->draws.empty();
+}
+
 void OverlayDrawer::ClearLatest() {
   std::shared_ptr<const Frame> frame;
   {

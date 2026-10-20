@@ -36,3 +36,7 @@ vfs_index*.bin
 # Other ports' SDK and shader-tool copies this project started from (not built by it)
 sdk_nfsmw/
 shaders_nfsmw/
+# 2026-10-20: tools/difftest's working files (a translated game shader: dp.frag/dp.dksh/dp.bin) and shtool's build output
+tools/difftest/dp.*
+tools/difftest/shtool/obj/
+tools/difftest/shtool/bin/

@@ -45,6 +45,7 @@ struct Sum {
 // Once per frame at the present: a mutex is cheap enough there.
 std::mutex g_mutex;
 Sum g_input_swap, g_swap_present, g_input_present;
+Sum g_input_gpu;  // banjo-nx (2026-10-20): input -> the GPU finished the frame (NoteGpuDone)
 
 double Ms(uint64_t from, uint64_t to) { return to > from ? double(to - from) / 1e6 : 0.0; }
 
@@ -91,6 +92,16 @@ void NotePresented(uint64_t swap) {
   g_input_present.Add(Ms(input, now));
 }
 
+void NoteGpuDone(uint64_t swap) {
+  const uint64_t now = Now();
+  const Frame& f = g_frames[swap % kFrames];
+  if (!swap || f.ordinal.load(std::memory_order_acquire) != swap) return;
+  const uint64_t input = f.input.load(std::memory_order_relaxed);
+  if (!input) return;
+  std::lock_guard lock(g_mutex);
+  g_input_gpu.Add(Ms(input, now));
+}
+
 std::string Report() {
   std::lock_guard lock(g_mutex);
   if (!g_input_present.n) return {};
@@ -99,7 +110,11 @@ std::string Report() {
       "{:.1f}); {} frames",
       g_input_swap.Mean(), g_input_swap.max, g_swap_present.Mean(), g_swap_present.max, g_input_present.Mean(),
       g_input_present.max, g_input_present.n);
-  g_input_swap = g_swap_present = g_input_present = Sum{};
+  // banjo-nx (2026-10-20): what the display can show first: the frame's GPU work done (seen within a few ms).
+  if (g_input_gpu.n)
+    line += fmt::format("; input -> GPU done {:.1f} ms (max {:.1f}, {} frames)", g_input_gpu.Mean(), g_input_gpu.max,
+                        g_input_gpu.n);
+  g_input_swap = g_swap_present = g_input_present = g_input_gpu = Sum{};
   return line;
 }
 

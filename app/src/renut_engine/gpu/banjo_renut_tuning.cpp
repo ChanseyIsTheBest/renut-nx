@@ -1,8 +1,11 @@
 // banjo-nx (2026-10-17): see banjo_renut_tuning.h.
 #include "renut_engine/gpu/backend/render_thread.h"
+#include "renut_engine/gpu/backend/video.h"
 #include <rex/frame_latency.h>
 #include "renut_engine/display_sync.h"
 #include "renut_engine/gpu/banjo_renut_tuning.h"
+#include "renut_engine/gpu/d3d/d3d.h"
+#include "renut_engine/gpu/backend/queued.h"
 #include "renut_engine/gpu/banjo_renut_record.h"
 #if defined(PLUME_DEKO3D)
 #include "renut_engine/gpu/banjo_renut_deko3d.h"
@@ -142,6 +145,63 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_uam_uniform_branches, true, "Banjo/Enhancements
                     "whose condition comes from constant buffers only (the same for every thread: it cannot diverge). "
                     "Off: a DKSH cache of its own (deko3d_shaders_f<flags>.bin, compiled by the console as it goes). "
                     "Same pixels");
+REXCVAR_DEFINE_BOOL(banjo_renut_stall_present, false, "Banjo/Enhancements",
+                    "The colour flash (2026-10-19): while the game stalls (loading) the overlay pump re-presents the "
+                    "last front buffer every 16 ms (true, as before). Off: nothing is presented then unless a menu or "
+                    "notification is up (the display keeps the last frame, as the console does), and a front buffer "
+                    "no resolve wrote is never shown");
+REXCVAR_DEFINE_BOOL(banjo_renut_device_swizzle, true, "Banjo/Enhancements",
+                    "The colour flash (2026-10-20): a texture whose header in guest memory describes the same data as "
+                    "the device's fetch constant but differs in the fields SetTexture copies unchanged (signs, pitch, "
+                    "tiling, swizzle, number format, exponent adjust, mip address) is sampled through the device's "
+                    "fetch constant (what the GPU reads): the header is a temporary the game has rewritten (RenderDoc "
+                    "capture of Ryujinx: a bloom level read through the swizzle 1,1,0,0 turned the whole frame "
+                    "yellow). The same pixels whenever the header is current. Off: the header's, as before");
+REXCVAR_DEFINE_INT32(banjo_renut_portrait_fur_shells, 1, "Banjo/Enhancements",
+                     "NOT exact, the user's call (2026-10-20): banjo_renut_fur_shells for the fur drawn into targets of "
+                     "128 x 128 or less (the dialogue portrait, 96 x 96, where 21 shells cost ~2.5 ms of the heaviest "
+                     "frames for a few thousand pixels). 1 every shell; 3 draws 7 of 21")
+    .range(1, 7);
+REXCVAR_DEFINE_INT32(banjo_renut_fur_shells, 1, "Banjo/Enhancements",
+                     "NOT exact, the user's call (2026-10-20): 1 draws every fur shell (as the game). N > 1: of each fur "
+                     "part's draws in a frame (the game draws every part of the body once a shell; a part = the same "
+                     "shaders and index range; the fur family of tools/nullps_shaders.txt), every Nth is drawn, the "
+                     "first always: 2 draws 11 of Banjo's 21 shells (thinner fur, the same length). The fur is about "
+                     "18 ms of the heaviest frame's GPU at the stock clock")
+    .range(1, 4);
+REXCVAR_DEFINE_BOOL(banjo_deko3d_uam_wide_rows, true, "Banjo/Enhancements",
+                    "deko3d renderer (2026-10-20, GPU): uam reads each bone row of tools/deko3d_glsl_opt.py's aw4 view "
+                    "(a uvec4 of storage buffer 15) with one 128-bit load instead of four 32-bit ones (banjo flag 1024): "
+                    "the fur vertex shader 48 -> 12 loads, 596 -> 560 instructions; the console's profile shows those "
+                    "vertex shaders memory-bound. Same words, same pixels. Aligned by construction: the fetch data's "
+                    "storage binding starts on 256 bytes (render/draw.cpp) and a row is element n of 16 bytes. Off: the "
+                    "32-bit loads, with a DKSH cache of its own (deko3d_shaders_f447.bin)");
+REXCVAR_DEFINE_BOOL(banjo_renut_diag_null_ps, false, "Banjo/Diagnostics",
+                    "Diagnostic (2026-10-20): the fur family's pixel shaders (tools/nullps_shaders.txt) discard at once, so the GPU profile shows their draws' vertex and rasterisation cost alone. The fur vanishes: a measurement, not a picture (configs/banjo_renut_diag_fur_vertex_only.toml)");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_eager_kicks, false, "Banjo/Enhancements",
+                    "Input latency A/B (2026-10-20): the frame goes to the GPU in more, earlier parts: a command list ends at a game kick once it holds 100 draws (not 200, at most 6 a frame, not 3) and goes to the GPU at that kick (its upload memory cleaned first), not at the next one. At the frame cap the GPU then works while the render thread is still replaying the frame instead of mostly after the present: the frame is done sooner after its controller read (the [latency] line's \"input -> GPU done\"). The same commands in the same order (configs/banjo_deko3d_eager_kicks_ab.toml; in-run A/B target 18)");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_skin_once, false, "Banjo/Enhancements",
+                    "GPU A/B (2026-10-20): the fur's skinned meshes (tools/skinonce_shaders.txt) skinned once a frame: a part's first draw of the frame writes each vertex's three skinned matrix rows to a buffer (constant 913, shared word v[84].z = 1), its other shells read them there (= 2) instead of loading 12 bone rows and blending them (the vertex shader about half as long). Only where every input of the skinning is the same draw for draw (shaders, index and vertex buffers, bone data and its constants); the same rows, bit for bit, so the same pixels (configs/banjo_deko3d_skin_once_on.toml; in-run A/B target 17)");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_light_branch, false, "Banjo/Enhancements",
+                    "GPU A/B (2026-10-20): in the heaviest lit pixel shaders (tools/lightbranch_shaders.txt) each point light's work runs in a branch on its attenuation test, so warps whose pixels the light does not reach skip it (a light is about 35 instructions); where every light reaches, the branches cost a few instructions. The same pixels; whether it is faster is the console's to say (configs/banjo_deko3d_light_branch_on.toml)");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_gpr32, false, "Banjo/Enhancements",
+                    "GPU A/B (2026-10-19): the pixel shaders of 33-40 GPRs (the fur family, the top of the GPU profile) "
+                    "compiled with 32 at most, so the GPU keeps every warp slot (64 instead of about 48) to hide texture "
+                    "latency, at the price of a few spills (the fur shader: 15 loads, 5 stores). The same pixels; "
+                    "whether it is faster is the console's to say (configs/banjo_deko3d_gpr32_on.toml)");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_early_z, true, "Banjo/Enhancements",
+                    "GPU (2026-10-19): a pixel shader that discards (alpha test) in a draw that writes neither depth "
+                    "nor stencil (the blended fur shells, particles) gets its depth test before it "
+                    "(layout(early_fragment_tests), constant 909): the pixels the depth test rejects no longer run it. "
+                    "The same pixels: with no depth or stencil write the discard has nothing to undo");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_txq_constants, true, "Banjo/Enhancements",
+                    "GPU (2026-10-19): a pixel shader's texture size queries of level 0 read the size from a buffer "
+                    "plume deko3d fills from the views it binds, instead of a texture instruction per pixel (A5E2, the "
+                    "full-screen pass second in the GPU profile, ran 4 fetches and 4 queries a pixel; the fur shells' "
+                    "stacked textures 1). Specialization constant 908 (tools/deko3d_glsl_opt.py, pass txq)");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_txq_verify, false, "Banjo/Enhancements",
+                    "Test of banjo_deko3d_txq_constants: the shaders run the query as before and paint the pixel "
+                    "magenta where the buffer's size differs (constant 908 = 2; the variants compile at run time)");
 REXCVAR_DEFINE_BOOL(banjo_deko3d_early_hoist, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-18): in a pixel shader with Renut's early alpha test, the main body's first "
                     "texture region (the fur's texture-array or 2D fetch) goes ahead of the test, so uam drops the "
@@ -181,6 +241,14 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_kick_submit, true, "Banjo/Enhancements",
                     "at the present: the GPU starts a frame's work while the render thread still records the rest, so "
                     "the frame (and the controller input in it) reaches the screen sooner. At most 3 more lists a "
                     "frame, each of at least 200 draws. Same commands in the same order");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_latency_trim, false, "Banjo/Enhancements",
+                    "Input latency (2026-10-20, deko3d, no vsync): where the GPU is the limit a recorded frame waited in "
+                    "the GPU's queue behind the one running (the GPU's frame time less the recording time: 30 ms and "
+                    "more in the heaviest scenes) and the game had read its controller that much earlier than needed. "
+                    "On: after each present the render thread waits until the GPU has finished all but the frame's last "
+                    "part (a fence at each kick submission), so the next frame is recorded, and the game thread "
+                    "released, just in time; if the GPU then runs dry it stops for 60 frames. The [latency] line's "
+                    "\"input -> GPU done\" and the \"latency trim\" line say what it does. Same pixels");
 REXCVAR_DEFINE_BOOL(banjo_late_input, true, "Banjo/Enhancements",
                     "Input latency (2026-10-19): when the render thread is the slower one, the game's frame waits at "
                     "its Swap for the frame before; its controller read is delayed by the least such wait of the last "
@@ -309,12 +377,20 @@ REXCVAR_DEFINE_INT32(banjo_renut_ab_target, 0, "Banjo",
                      "5 banjo_renut_capture_pool; 6 banjo_renut_exact_streams (what the exact rule costs); 7 "
                      "banjo_gpu_bool_spec (the generic pipelines in the off half); 8 banjo_gpu_blend_skip; 9 "
                      "banjo_gpu_tess_grid; 10 none (was banjo_renut_check_worker, removed in package 28b); 11 banjo_gpu_depth_only; 12 banjo_gpu_output_trim; 13 "
-                     "banjo_gpu_depth_words_view; 14 banjo_renut_record_worker. The part is "
+                     "banjo_gpu_depth_words_view; 14 banjo_renut_record_worker; 15 banjo_deko3d_light_branch, 16 "
+                     "banjo_deko3d_gpr32 and 17 banjo_deko3d_skin_once (2026-10-20: the key on; the off half's "
+                     "pipelines are built without its constant); 18 banjo_deko3d_eager_kicks; 19 "
+                     "none (was banjo_late_input_gpu, removed in package 36s). The part is "
                      "switched off and on every banjo_renut_ab_s seconds; the \"[renut A/B]\" line every 10 s gives "
                      "both halves' frame rate, render thread and GPU time")
-    .range(0, 14);
+    .range(0, 19);
 REXCVAR_DEFINE_INT32(banjo_renut_ab_s, 4, "Banjo", "Renut's renderer: the half-period of banjo_renut_ab_target, in seconds")
     .range(1, 60);
+REXCVAR_DEFINE_STRING(banjo_renut_ab_targets, "", "Banjo",
+                      "Renut's renderer, in-run A/B over several targets (2026-10-20): a list of banjo_renut_ab_target "
+                      "numbers (\"15,16\"); each in turn is switched off and on for one banjo_renut_ab_s period each, "
+                      "the next one after, and the 10 s report has a \"[renut A/B]\" line for each with its halves "
+                      "so far. One console run measures them all. Empty: banjo_renut_ab_target alone");
 REXCVAR_DEFINE_BOOL(banjo_renut_push_point_only, true, "Banjo/Enhancements",
                     "Renut's renderer (Vulkan): with the constants in uniform buffers, the push constant (the three "
                     "constant addresses) is read only by the point sprites' geometry shader, so only point-list draws "
@@ -429,6 +505,14 @@ std::atomic<uint64_t> g_resolves_drawn{0};  // banjo_deko3d_draw_resolves (2026-
 std::atomic<uint64_t> g_resolves_skipped[2];  // banjo_renut_resolve_skip (2026-10-19): colour, depth
 std::atomic<uint64_t> g_words_lazy[3];  // banjo_renut_depth_words_lazy: not written, written late, read stale
 std::atomic<uint64_t> g_handover[6];    // banjo_deko3d_depth_handover (CountHandOver)
+std::atomic<uint64_t> g_fetch_misaligned[2];  // 2026-10-20: draws checked, draws off 16 bytes (CountFetchAlignment)
+std::atomic<uint64_t> g_device_swizzle[2];  // 2026-10-20: binds through the device's swizzle, frames with one
+std::atomic<uint32_t> g_device_swizzle_frame{0};
+std::atomic<uint64_t> g_fur_shells[2];  // 2026-10-20 banjo_renut_fur_shells: drawn, skipped
+std::atomic<uint64_t> g_skin_once[8];  // 2026-10-20 banjo_deko3d_skin_once: written, read, plain, no room; + 4 not fur
+std::atomic<uint64_t> g_exp_adjust[3];  // 2026-10-20: binds with an exponent adjust: all, negative, positive
+std::atomic<uint64_t> g_skin_miss[6];  // near misses by field: streams, fetch window, index, first vertex, shared, any
+std::atomic<uint64_t> g_header_differ[7];  // 2026-10-20: binds whose header (same data) differs from the device, per dword
 std::atomic<uint64_t> g_ring_published{0};  // render-thread proposal 23
 std::atomic<uint64_t> g_kick_submit[4];      // lists submitted at a kick, ranges cleaned by the thread / by the render thread
 std::atomic<uint64_t> g_pushed[4];      // banjo_deko3d_push_constants: float bytes, shared bytes, draws, verify misses
@@ -516,7 +600,10 @@ struct Stats {
   };
   Half total, halves[2];   // halves[1]: the part on, [0]: off
   int half = 1;            // the half now running (the render thread applies it)
-  int applied = -1;        // the half the render thread applied last
+  int applied = -1;        // the half the render thread applied last (2026-10-20: target * 2 + half)
+  // banjo-nx (2026-10-20, banjo_renut_ab_targets): the list's halves by target, and the place in it.
+  Half by_target[32][2];
+  uint32_t cycle = 0;
   std::chrono::steady_clock::time_point half_start{};
 };
 Stats g_stats;
@@ -536,6 +623,10 @@ const char *AbName(int target) {
   case 12: return "banjo_gpu_output_trim";
   case 13: return "banjo_gpu_depth_words_view";
   case 14: return "banjo_renut_record_worker";
+  case 15: return "banjo_deko3d_light_branch";
+  case 16: return "banjo_deko3d_gpr32";
+  case 17: return "banjo_deko3d_skin_once";
+  case 18: return "banjo_deko3d_eager_kicks";
   default: return "none";
   }
 }
@@ -547,6 +638,36 @@ bool g_precise_barriers_on = false;  // banjo_renut_precise_barriers as configur
 }  // namespace
 
 namespace {
+
+// banjo-nx (2026-10-20, banjo_renut_ab_targets): the list, read once (numbers 1-31).
+const std::vector<int> &AbTargets() {
+  static const std::vector<int> list = [] {
+    std::vector<int> v;
+    const std::string s = REXCVAR_GET(banjo_renut_ab_targets);
+    int n = 0;
+    bool digit = false;
+    for (const char c : s + ",") {
+      if (c >= '0' && c <= '9') {
+        n = n * 10 + (c - '0');
+        digit = true;
+      } else {
+        if (digit && n > 0 && n < 32)
+          v.push_back(n);
+        n = 0;
+        digit = false;
+      }
+    }
+    return v;
+  }();
+  return list;
+}
+// The target the A/B switches now (requires g_stats.mutex).
+int AbTargetLocked() {
+  const std::vector<int> &list = AbTargets();
+  if (list.empty())
+    return REXCVAR_GET(banjo_renut_ab_target);
+  return list[g_stats.cycle % list.size()];
+}
 
 // Render thread: the part as the half says.
 void AbApply(int target, bool on) {
@@ -561,6 +682,9 @@ void AbApply(int target, bool on) {
 #endif
   }
 }
+// 2026-10-20: CountDrawSource's counts (the render thread's).
+std::atomic<uint64_t> g_draw_source[2];
+
 
 }  // namespace
 
@@ -576,10 +700,26 @@ void StatsGameFrame() {
   // Each frame's time goes to the half it ran in, so a half still running at a report counts what it has so far.
   g_stats.halves[g_stats.half].seconds += std::chrono::duration<double>(now - g_stats.last_frame).count();
   g_stats.last_frame = now;
-  const int target = REXCVAR_GET(banjo_renut_ab_target);
+  int target = AbTargetLocked();
   if (target && std::chrono::duration<double>(now - g_stats.half_start).count() >= double(REXCVAR_GET(banjo_renut_ab_s))) {
     g_stats.half ^= 1;
     g_stats.half_start = now;
+    // banjo-nx (2026-10-20, banjo_renut_ab_targets): after a target's off half (on, then off), the next target, on.
+    if (!AbTargets().empty() && g_stats.half == 1) {
+      for (int h = 0; h < 2; ++h) {
+        Stats::Half &to = g_stats.by_target[target][h];
+        const Stats::Half &from = g_stats.halves[h];
+        to.game_frames += from.game_frames;
+        to.render_frames += from.render_frames;
+        to.gpu_frames += from.gpu_frames;
+        to.render_ms += from.render_ms;
+        to.gpu_ms += from.gpu_ms;
+        to.seconds += from.seconds;
+        g_stats.halves[h] = {};
+      }
+      ++g_stats.cycle;
+      target = AbTargetLocked();
+    }
   }
   const double since = std::chrono::duration<double>(now - g_stats.last_report).count();
   if (since < 10.0)
@@ -617,6 +757,16 @@ void StatsGameFrame() {
               kicks, fence_queries, exact_stale, late_stale, evicted,
               bool_draws,
               bool_generic, bool_built, tess_vertices, tess_corners);
+  {
+    const uint64_t immediate = g_draw_source[0].exchange(0, std::memory_order_relaxed);
+    const uint64_t replayed = g_draw_source[1].exchange(0, std::memory_order_relaxed);
+    REXLOG_INFO("[renut] draw sources: {} immediate (a whole device copy each, {:.1f} MB), {} replayed from recorded "
+                "command buffers (device deltas)", immediate,
+                double(immediate) * double(renut::gpu::d3d::kDeviceSnapshotSize) / double(1u << 20), replayed);
+  }
+  // 2026-10-20 (from sa2-nx): what the immediate draws keep of the device (backend/queued.cpp, banjo_renut_snapshot_deltas).
+  if (const std::string deltas = ::renut::gpu::SnapshotDeltaReport(); !deltas.empty())
+    REXLOG_INFO("[renut] {}", deltas);
   if (g_latched_ready.load(std::memory_order_acquire) && g_latched.store_cards) {
     const uint64_t clean = g_cards_clean.exchange(0, std::memory_order_relaxed);
     const uint64_t clean_bytes = g_cards_clean_bytes.exchange(0, std::memory_order_relaxed);
@@ -637,7 +787,22 @@ void StatsGameFrame() {
                                   g_tex_cards[3].exchange(0, std::memory_order_relaxed))
                     : std::string());
   }
-  if (target) {
+  if (target && !AbTargets().empty()) {
+    // banjo-nx (2026-10-20, banjo_renut_ab_targets): each listed target's whole periods so far.
+    auto line = [](const Stats::Half &h) {
+      return fmt::format("{:.2f} fps, render thread {:.2f} ms a frame, GPU {:.2f} ms a frame ({:.0f} s)",
+                         h.seconds > 0.0 ? double(h.game_frames) / h.seconds : 0.0,
+                         h.render_frames ? h.render_ms / double(h.render_frames) : 0.0,
+                         h.gpu_frames ? h.gpu_ms / double(h.gpu_frames) : 0.0, h.seconds);
+    };
+    for (const int listed : AbTargets()) {
+      const Stats::Half &on = g_stats.by_target[listed][1], &off = g_stats.by_target[listed][0];
+      if (on.seconds > 0.0 || off.seconds > 0.0)
+        REXLOG_INFO("[renut A/B] {} (target {}, banjo_renut_ab_targets): on {}; off {}", AbName(listed), listed,
+                    line(on), line(off));
+      g_stats.by_target[listed][0] = g_stats.by_target[listed][1] = {};
+    }
+  } else if (target) {
     const Stats::Half &on = g_stats.halves[1], &off = g_stats.halves[0];
     auto line = [](const Stats::Half &h) {
       return fmt::format("{:.2f} fps, render thread {:.2f} ms a frame, GPU {:.2f} ms a frame ({:.0f} s)",
@@ -689,6 +854,8 @@ void StatsGameFrame() {
     const std::string probe = rex::latency::Report();
     REXLOG_INFO("[latency] {}; {}", probe.empty() ? std::string("no frame presented") : probe,
                 ::renut::gpu::render_thread::LateInputReport());
+    if (const std::string trim = ::renut::gpu::Video::LatencyTrimReport(); !trim.empty())
+      REXLOG_INFO("[latency] {}", trim);  // banjo-nx (2026-10-20, banjo_deko3d_latency_trim)
     // banjo-nx (2026-10-19, latency batch 3): the display's refresh, the phase and input -> display.
     if (const std::string display = banjo::display_sync::Report(); !display.empty())
       REXLOG_INFO("[display] {}", display);
@@ -699,6 +866,54 @@ void StatsGameFrame() {
               g_kick_submit[1].exchange(0, std::memory_order_relaxed),
               g_kick_submit[2].exchange(0, std::memory_order_relaxed),
               g_kick_submit[0].exchange(0, std::memory_order_relaxed));
+  // banjo-nx (2026-10-20): tools/deko3d_glsl_opt.py's aw4 pass reads bone rows as 16-byte loads; the fetch data's
+  // offset, slots and size must stay multiples of 16 (render/draw.cpp UploadVertexFetchData). Expected: 0 off.
+  if (const uint64_t checked = g_fetch_misaligned[0].exchange(0, std::memory_order_relaxed)) {
+    const uint64_t off = g_fetch_misaligned[1].exchange(0, std::memory_order_relaxed);
+    if (off)
+      REXLOG_WARN("[renut] fetch data: {} of {} draws with an offset, slot or size off 16 bytes (the aw4 loads read "
+                  "the wrong words there)", off, checked);
+  }
+  if (const uint64_t n = g_exp_adjust[0].exchange(0, std::memory_order_relaxed)) {
+    const uint64_t neg = g_exp_adjust[1].exchange(0, std::memory_order_relaxed);
+    const uint64_t pos = g_exp_adjust[2].exchange(0, std::memory_order_relaxed);
+    REXLOG_WARN("[renut] exponent adjust: {} texture binds with a fetch exponent adjust ({} negative, {} positive), "
+                "which Renut does not apply (the sampled values are 2^adjust too large or small)", n, neg, pos);
+  }
+  if (REXCVAR_GET(banjo_deko3d_skin_once)) {
+    uint64_t k[8];
+    for (int i = 0; i < 8; ++i)
+      k[i] = g_skin_once[i].exchange(0, std::memory_order_relaxed);
+    uint64_t m[6];
+    for (int i = 0; i < 6; ++i)
+      m[i] = g_skin_miss[i].exchange(0, std::memory_order_relaxed);
+    REXLOG_INFO("[renut] skin once (banjo_deko3d_skin_once): {} fur draws skinned and wrote their rows, {} read them, "
+                "{} skinned as before (not the part's first draw with the same inputs: none to read), {} without room; "
+                "writes that missed a same-size entry {}: vertex data {}, bone data {}, indices {}, first vertex {}, "
+                "shared constants {}; other skinned draws (shadow maps, depth only): {} wrote, {} read, {} as before, {} "
+                "without room",
+                k[0], k[1], k[2], k[3], m[5], m[0], m[1], m[2], m[3], m[4], k[4], k[5], k[6], k[7]);
+  }
+  if (REXCVAR_GET(banjo_renut_fur_shells) > 1 || REXCVAR_GET(banjo_renut_portrait_fur_shells) > 1) {
+    const uint64_t drawn = g_fur_shells[0].exchange(0, std::memory_order_relaxed);
+    const uint64_t skipped = g_fur_shells[1].exchange(0, std::memory_order_relaxed);
+    REXLOG_INFO("[renut] fur shells (banjo_renut_fur_shells {}, portrait {}, not exact): {} drawn, {} not drawn",
+                REXCVAR_GET(banjo_renut_fur_shells), REXCVAR_GET(banjo_renut_portrait_fur_shells), drawn, skipped);
+  }
+  if (const uint64_t binds = g_header_differ[6].exchange(0, std::memory_order_relaxed)) {
+    uint64_t d[6];
+    for (int i = 0; i < 6; ++i)
+      d[i] = g_header_differ[i].exchange(0, std::memory_order_relaxed);
+    REXLOG_INFO("[flash] header vs device (same data): {} binds with other fields; by dword: 0 (signs, pitch, tiling) "
+                "{}, 3 (swizzle, number format, exponent) {}, 4 (mip levels) {}, 5 (mips) {}, 1/2 {}", binds, d[0], d[3],
+                d[4], d[5], d[1] + d[2]);
+  }
+  if (const uint64_t binds = g_device_swizzle[0].exchange(0, std::memory_order_relaxed)) {
+    const uint64_t frames = g_device_swizzle[1].exchange(0, std::memory_order_relaxed);
+    REXLOG_INFO("[flash] device swizzle: {} binds in {} frames whose texture header's swizzle differed from the "
+                "device's; sampled through the {}'s (banjo_renut_device_swizzle)", binds, frames,
+                DeviceSwizzleOn() ? "device" : "header");
+  }
   if (DepthHandOverOn()) {
     REXLOG_INFO("[renut] depth hand-over (banjo_deko3d_depth_handover): {} resolves not drawn, {} binds of a target's "
                 "image, {} images taken at a whole clear; {} drawn after all ({} from a taken image); {} lost",
@@ -723,10 +938,11 @@ void StatsRenderThreadFrame(double busy_ms) {
     g_stats.total.render_ms += busy_ms;
     ++g_stats.halves[g_stats.half].render_frames;
     g_stats.halves[g_stats.half].render_ms += busy_ms;
-    target = REXCVAR_GET(banjo_renut_ab_target);
+    target = AbTargetLocked();
     half = g_stats.half;
-    apply = target && g_stats.applied != half;
-    g_stats.applied = half;
+    // banjo-nx (2026-10-20, banjo_renut_ab_targets): a new target applies too (its half may be the last one's).
+    apply = target && g_stats.applied != target * 2 + half;
+    g_stats.applied = target * 2 + half;
   }
   if (apply)
     AbApply(target, half == 1);
@@ -769,11 +985,41 @@ bool Deko3DBarrierLeanOn() { return REXCVAR_GET(banjo_deko3d_barrier_lean); }
 bool Deko3DVsOutputsOn() { return REXCVAR_GET(banjo_deko3d_vs_outputs); }
 bool Deko3DUamPrmtOn() { return REXCVAR_GET(banjo_deko3d_uam_prmt); }
 bool EarlyHoistOn() { return REXCVAR_GET(banjo_deko3d_early_hoist); }
+bool StallPresentOn() { return REXCVAR_GET(banjo_renut_stall_present); }
+bool EarlyZOn() { return REXCVAR_GET(banjo_deko3d_early_z); }
+bool Gpr32On() { return REXCVAR_GET(banjo_deko3d_gpr32); }
+bool LightBranchOn() { return REXCVAR_GET(banjo_deko3d_light_branch); }
+bool SkinOnceOn() { return REXCVAR_GET(banjo_deko3d_skin_once); }
+bool EagerKicksOn() {
+  return REXCVAR_GET(banjo_deko3d_eager_kicks) && g_ab_off.load(std::memory_order_relaxed) != 18;
+}
+void CountExpAdjust(int adjust) {
+  g_exp_adjust[0].fetch_add(1, std::memory_order_relaxed);
+  g_exp_adjust[adjust < 0 ? 1 : 2].fetch_add(1, std::memory_order_relaxed);
+}
+void CountSkinOnce(uint32_t kind) { g_skin_once[kind & 7].fetch_add(1, std::memory_order_relaxed); }
+void CountSkinMiss(uint32_t fields) {
+  for (int i = 0; i < 5; ++i)
+    if (fields & (1u << i))
+      g_skin_miss[i].fetch_add(1, std::memory_order_relaxed);
+  g_skin_miss[5].fetch_add(1, std::memory_order_relaxed);
+}
+bool NullPsOn() { return REXCVAR_GET(banjo_renut_diag_null_ps); }
+bool DeviceSwizzleOn() { return REXCVAR_GET(banjo_renut_device_swizzle); }
+bool LatencyTrimOn() { return REXCVAR_GET(banjo_deko3d_latency_trim); }
+uint32_t FurShellEvery() { return uint32_t(REXCVAR_GET(banjo_renut_fur_shells)); }
+uint32_t PortraitFurShellEvery() { return uint32_t(REXCVAR_GET(banjo_renut_portrait_fur_shells)); }
+void CountFurShell(bool drawn) { g_fur_shells[drawn ? 0 : 1].fetch_add(1, std::memory_order_relaxed); }
+uint32_t TxqMode() {
+  return REXCVAR_GET(banjo_deko3d_txq_verify) ? 2u : REXCVAR_GET(banjo_deko3d_txq_constants) ? 1u : 0u;
+}
 unsigned Deko3DUamFlags() {
   // PRMT (1), offsets in the load (2), the shift distribution (4), the input interpolation cache (8), the choice
   // per pixel shader (16), value numbering (32) keeping the interpolations (128), no reconvergence around uniform
-  // branches (256): docs/deko3d-shader-optimisations.md
-  unsigned flags = 447u;
+  // branches (256), bone rows as 128-bit loads (1024, 2026-10-20): docs/deko3d-shader-optimisations.md
+  unsigned flags = 1471u;
+  if (!REXCVAR_GET(banjo_deko3d_uam_wide_rows))
+    flags &= ~1024u;
   if (!REXCVAR_GET(banjo_deko3d_uam_prmt))
     flags &= ~1u;
   if (!REXCVAR_GET(banjo_deko3d_uam_gvn))
@@ -788,6 +1034,10 @@ int Deko3DCompilePriority() { return REXCVAR_GET(banjo_deko3d_compile_priority);
 
 void CountDepthFloatSampled() {
   Bump(g_depth_float_sampled, 1);
+}
+
+void CountDrawSource(int source) {
+  g_draw_source[source].store(g_draw_source[source].load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
 }
 
 void CountDrawnResolve() {
@@ -806,6 +1056,25 @@ void CountRingPublished(uint64_t bytes) {
 
 void CountPushedConstants(uint64_t bytes, int what) {
   g_pushed[what].store(g_pushed[what].load(std::memory_order_relaxed) + bytes, std::memory_order_relaxed);
+}
+
+void CountFetchAlignment(bool aligned) {
+  g_fetch_misaligned[0].fetch_add(1, std::memory_order_relaxed);
+  if (!aligned)
+    g_fetch_misaligned[1].fetch_add(1, std::memory_order_relaxed);
+}
+
+void CountHeaderDescDiffer(uint32_t dwords) {
+  g_header_differ[6].fetch_add(1, std::memory_order_relaxed);
+  for (int i = 0; i < 6; ++i)
+    if (dwords & (1u << i))
+      g_header_differ[i].fetch_add(1, std::memory_order_relaxed);
+}
+
+void CountDeviceSwizzle(uint32_t frame) {
+  g_device_swizzle[0].fetch_add(1, std::memory_order_relaxed);
+  if (g_device_swizzle_frame.exchange(frame, std::memory_order_relaxed) != frame)
+    g_device_swizzle[1].fetch_add(1, std::memory_order_relaxed);
 }
 
 void CountHandOver(int what) {

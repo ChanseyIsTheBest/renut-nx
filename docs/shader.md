@@ -405,3 +405,10 @@ From package 33 the console renderer is Renut's on deko3d, whose shaders uam com
 (GLSL passes in tools/deko3d_glsl_opt.py, the alpha / tessellation / vertex-output constants 903-905, and uam's own PRMT
 and shift passes) and its measurements are in docs/deko3d-shader-optimisations.md. The NAK items above apply to the
 NVK back end only.
+
+2026-10-19/20 night (packages 36 and 36b): texture sizes from a buffer (txq), early depth tests (earlyz), the 32-GPR
+A/B (gpr32), and three exact select / skinning passes (bonesel, aw4, guardsel): deko3d-shader-optimisations.md 2.32-2.37.
+
+2026-10-20 (packages 36c-36g): the light-branch A/B (lightbranch, 911), the fur-only diagnostic (nullps, 912), 128-bit
+bone rows (uam flag 1024, 36d) and the fur skinned once a frame (skinonce, 913, an A/B: the shells' vertex shader about
+half as long, checked bit for bit by tools/difftest/difftest_vs_skin.py): deko3d-shader-optimisations.md 2.38-2.42.

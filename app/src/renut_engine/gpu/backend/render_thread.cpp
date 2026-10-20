@@ -20,6 +20,29 @@
 #include "renut_engine/gpu/backend/video.h"
 #include "renut_engine/gpu/banjo_renut_tuning.h"
 
+#include <rex/cvar.h>
+
+// banjo-nx (2026-10-20, from sa2-nx): see g_done_waiters and Run.
+REXCVAR_DEFINE_BOOL(banjo_renut_done_notify_waiters, true, "Banjo/Enhancements",
+                    "Renut's render thread signals its work done (frames, fences, drains) only when a thread waits for "
+                    "it: a signal is a kernel call on the Switch even with nobody waiting, and it made one after every "
+                    "batch of work. Off: after every batch, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_prefetch_next, true, "Banjo/Enhancements",
+                    "Renut's render thread asks for the next draw's capture (written on the game thread's core) to be "
+                    "brought into its cache while it does the draw before it")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(banjo_renut_wake_batch, 16, "Banjo/Enhancements",
+                     "Renut's render thread, when it has caught up and sleeps, is woken by the game's draws only once "
+                     "this many are queued (each wake is a kernel call on both threads; the fourth console run woke it "
+                     "for almost every draw). Every other item (frames, fences, resources), every wait for it and a "
+                     "2 ms timer still wake it at once. 1 or less: every draw wakes it, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_batch_clock, true, "Banjo/Enhancements",
+                    "Renut's render thread reads the clock once per batch of work instead of once per item (about "
+                    "1,800 items a frame in City Escape); its busy time per frame is the same sum")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -39,7 +62,22 @@ using Clock = std::chrono::steady_clock;
 struct Item {
   std::function<void()> work;
   bool locked = true;  // run with State().mutex held
+  const void *prefetch[2] = {};  // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_prefetch_next): fetched while the item before runs
 };
+
+// banjo-nx (2026-10-20, from sa2-nx, banjo_renut_prefetch_next): the next item's data into the cache (its first lines).
+inline void PrefetchItem(const Item &item) {
+  if (const auto *a = static_cast<const char *>(item.prefetch[0])) {
+    __builtin_prefetch(a);
+    __builtin_prefetch(a + 64);
+  }
+  if (const auto *b = static_cast<const char *>(item.prefetch[1])) {
+    __builtin_prefetch(b);
+    __builtin_prefetch(b + 64);
+    __builtin_prefetch(b + 128);
+    __builtin_prefetch(b + 192);
+  }
+}
 
 std::mutex g_mutex;
 std::condition_variable g_work_cv;  // work queued, or stopping
@@ -49,6 +87,19 @@ std::condition_variable g_work_cv;  // work queued, or stopping
 // it has not seen is never missed.
 bool g_render_waiting = false;
 std::condition_variable g_done_cv;  // work done: frames, fences, drains; or stopped
+// banjo-nx (2026-10-20, from sa2-nx, banjo_renut_done_notify_waiters): threads in g_done_cv's waits (under g_mutex). A done signal goes
+// only when there is one: a waiter checks its condition under g_mutex before it counts itself and sleeps, and the
+// state it waits for changes under g_mutex too, so no signal it needs is skipped.
+int g_done_waiters = 0;
+bool DoneNotifyAll() {
+  static const bool on = REXCVAR_GET(banjo_renut_done_notify_waiters);
+  return !on;
+}
+// banjo-nx (2026-10-20, from sa2-nx, banjo_renut_wake_batch): the draws queued before a sleeping render thread is woken (1: each).
+size_t WakeBatch() {
+  static const size_t n = size_t(std::max(1, int(REXCVAR_GET(banjo_renut_wake_batch))));
+  return n;
+}
 std::vector<Item> g_queue;
 std::once_flag g_start_once;
 std::thread::id g_thread_id;
@@ -108,7 +159,13 @@ void Run() {
     {
       std::unique_lock lock(g_mutex);
       g_render_waiting = true;
-      g_work_cv.wait(lock, [] { return !g_queue.empty() || g_stopping; });
+      if (WakeBatch() > 1) {
+        // banjo-nx (from sa2-nx) (banjo_renut_wake_batch): draws queued without a wake are taken within 2 ms at the latest.
+        while (g_queue.empty() && !g_stopping)
+          g_work_cv.wait_for(lock, std::chrono::milliseconds(2));
+      } else {
+        g_work_cv.wait(lock, [] { return !g_queue.empty() || g_stopping; });
+      }
       g_render_waiting = false;
       if (g_queue.empty())
         break;
@@ -119,18 +176,36 @@ void Run() {
     // first loading screen (a game thread's hook waits on the lock while the render thread's next item waits on it):
     // each item takes the lock on its own, as before.
     Clock::time_point start = Clock::now();
-    for (Item &item : batch) {
+    static const bool batch_clock = REXCVAR_GET(banjo_renut_batch_clock);
+    if (batch_clock) {
+      // banjo-nx (2026-10-20, from sa2-nx): the batch's start for every item (QueueFrame's item counts its frame up to itself from
+      // there and leaves the rest of the batch to the next frame), one clock read at the end.
       g_item_start = start;
-      Execute(item);
-      const Clock::time_point end = Clock::now();
-      g_busy += end - start;
-      start = end;
+      static const bool prefetch = REXCVAR_GET(banjo_renut_prefetch_next);
+      const size_t n = batch.size();
+      for (size_t i = 0; i < n; ++i) {
+        if (prefetch && i + 1 < n)
+          PrefetchItem(batch[i + 1]);
+        Execute(batch[i]);
+      }
+      g_busy += Clock::now() - start;
+    } else {
+      for (Item &item : batch) {
+        g_item_start = start;
+        Execute(item);
+        const Clock::time_point end = Clock::now();
+        g_busy += end - start;
+        start = end;
+      }
     }
+    bool wake;
     {
       std::lock_guard lock(g_mutex);
       g_items_done += batch.size();
+      wake = g_done_waiters > 0 || DoneNotifyAll();
     }
-    g_done_cv.notify_all();
+    if (wake)
+      g_done_cv.notify_all();
     batch.clear();
   }
   {
@@ -155,15 +230,25 @@ void Start() {
   });
 }
 
-void Push(std::function<void()> work, bool locked) {
+// banjo-nx (2026-10-20, from sa2-nx, banjo_renut_wake_batch): before a thread waits for the render thread, the draws queued without a
+// wake are handed over. Requires g_mutex.
+void WakeForWaitLocked() {
+  if (g_render_waiting && !g_queue.empty())
+    g_work_cv.notify_one();
+}
+
+void Push(std::function<void()> work, bool locked, const void *prefetch0 = nullptr,
+          const void *prefetch1 = nullptr, bool draw = false) {
   Start();
   {
     std::unique_lock lock(g_mutex);
     // (Work queued by the render thread's own work runs after it.)
     if (g_running && !g_stopping) {
-      g_queue.push_back({std::move(work), locked});
+      g_queue.push_back({std::move(work), locked, {prefetch0, prefetch1}});
       ++g_items_queued;
-      const bool wake = g_render_waiting || !banjo::renut_gpu::QueueNotifyIdleOn();
+      // banjo-nx (from sa2-nx) (banjo_renut_wake_batch): a draw wakes a sleeping render thread once enough are queued.
+      const bool wake = (g_render_waiting && (!draw || g_queue.size() >= WakeBatch())) ||
+                        !banjo::renut_gpu::QueueNotifyIdleOn();
       lock.unlock();
       if (wake)
         g_work_cv.notify_one();
@@ -171,7 +256,7 @@ void Push(std::function<void()> work, bool locked) {
     }
   }
   // Shutting down: nothing takes work any more, so run it here.
-  Item item{std::move(work), locked};
+  Item item{std::move(work), locked, {}};
   Execute(item);
 }
 
@@ -185,8 +270,13 @@ void QueueUnlocked(std::function<void()> work) {
   Push(std::move(work), false);
 }
 
+void QueuePrefetched(const void *prefetch0, const void *prefetch1, std::function<void()> work) {
+  Push(std::move(work), true, prefetch0, prefetch1, true);  // banjo-nx (from sa2-nx): the game's draws (banjo_renut_wake_batch)
+}
+
 void QueueFenceCompletion(u32 completion_va, u32 fence, uint64_t after_callback) {
   QueueUnlocked([completion_va, fence, after_callback] {
+    bool wake;
     {
       std::lock_guard lock(g_mutex);
       // Fences complete in order: behind one still waiting, this one waits too.
@@ -194,19 +284,24 @@ void QueueFenceCompletion(u32 completion_va, u32 fence, uint64_t after_callback)
         WriteFence(completion_va, fence);
       else
         g_pending_fences.push_back({completion_va, fence, after_callback});
+      wake = g_done_waiters > 0 || DoneNotifyAll();  // banjo-nx (from sa2-nx)
     }
-    g_done_cv.notify_all();
+    if (wake)
+      g_done_cv.notify_all();
   });
 }
 
 void QueueCallbackMarker(uint64_t seq) {
   QueueUnlocked([seq] {
+    bool wake;
     {
       std::lock_guard lock(g_mutex);
       g_callbacks_reached = std::max(g_callbacks_reached, seq);
       ++g_fences_done;  // wakes WaitForFenceProgress: there is a callback to run
+      wake = g_done_waiters > 0 || DoneNotifyAll();  // banjo-nx (from sa2-nx)
     }
-    g_done_cv.notify_all();
+    if (wake)
+      g_done_cv.notify_all();
   });
 }
 
@@ -216,6 +311,7 @@ uint64_t CallbacksReached() {
 }
 
 void CallbacksRun(uint64_t seq) {
+  bool wake;
   {
     std::lock_guard lock(g_mutex);
     g_callbacks_run = std::max(g_callbacks_run, seq);
@@ -227,8 +323,10 @@ void CallbacksRun(uint64_t seq) {
       WriteFence(p.completion_va, p.fence);
     }
     g_pending_fences.erase(g_pending_fences.begin(), g_pending_fences.begin() + written);
+    wake = g_done_waiters > 0 || DoneNotifyAll();  // banjo-nx (from sa2-nx)
   }
-  g_done_cv.notify_all();
+  if (wake)
+    g_done_cv.notify_all();
 }
 
 bool WaitForFenceProgress(std::chrono::milliseconds timeout) {
@@ -236,8 +334,11 @@ bool WaitForFenceProgress(std::chrono::milliseconds timeout) {
   if (!g_running || g_stopping)
     return false;
   const uint64_t seen = g_fences_done;
+  WakeForWaitLocked();  // banjo-nx (from sa2-nx) (banjo_renut_wake_batch)
+  ++g_done_waiters;  // banjo-nx (from sa2-nx) (banjo_renut_done_notify_waiters)
   g_done_cv.wait_for(lock, timeout,
                      [seen] { return g_fences_done != seen || !g_running || g_stopping; });
+  --g_done_waiters;
   return g_running && !g_stopping;
 }
 
@@ -262,6 +363,10 @@ uint32_t g_slack_next = 0;
 uint32_t g_slack_count = 0;
 std::atomic<uint32_t> g_applied_delay_us{0};
 std::atomic<uint64_t> g_delay_total_us{0}, g_delay_frames{0};
+
+// banjo-nx (2026-10-20, package 36s): banjo_late_input_gpu (36l-36r), a second slack from the GPU queue's wait, is gone:
+// on the console it gained nothing at the 30 fps cap and, in scenes just able to hold 30, its delay ratcheted up to
+// 29 ms and cost about 6 fps (36q). docs/deko3d-renderer.md section 25.
 
 uint32_t LateInputDelay() {
   if (!banjo::renut_gpu::LateInputOn() || g_slack_count < kSlackFrames) {
@@ -309,17 +414,23 @@ uint64_t QueueFrame(std::function<void()> work) {
     g_busy = -so_far;
     g_waited = {};
     frame_stats::OnRenderThreadFrame(busy_ms);
+    bool wake;
     {
       std::lock_guard lock(g_mutex);
       ++g_frames_done;
+      wake = g_done_waiters > 0 || DoneNotifyAll();  // banjo-nx (from sa2-nx)
     }
-    g_done_cv.notify_all();
+    if (wake)
+      g_done_cv.notify_all();
   });
   const auto waiting = std::chrono::steady_clock::now();
   std::unique_lock lock(g_mutex);
+  WakeForWaitLocked();  // banjo-nx (from sa2-nx) (banjo_renut_wake_batch)
+  ++g_done_waiters;  // banjo-nx (from sa2-nx) (banjo_renut_done_notify_waiters)
   g_done_cv.wait(lock, [] {
     return !g_running || g_stopping || g_frames_queued - g_frames_done <= kMaxFramesAhead;
   });
+  --g_done_waiters;
   const uint64_t done = g_frames_done;
   lock.unlock();
   const auto waited = std::chrono::steady_clock::now() - waiting;
@@ -355,7 +466,10 @@ void Drain() {
   if (!g_running || std::this_thread::get_id() == g_thread_id)
     return;
   const uint64_t target = g_items_queued;
+  WakeForWaitLocked();  // banjo-nx (from sa2-nx) (banjo_renut_wake_batch)
+  ++g_done_waiters;  // banjo-nx (from sa2-nx) (banjo_renut_done_notify_waiters)
   g_done_cv.wait(lock, [target] { return !g_running || g_items_done >= target; });
+  --g_done_waiters;
 }
 
 WaitScope::WaitScope() : start_(Clock::now()), counted_(t_render_thread) {}

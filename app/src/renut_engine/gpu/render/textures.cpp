@@ -20,6 +20,8 @@
 #include "renut_engine/gpu/d3d/d3d.h"
 #include "renut_engine/gpu/guest/guest_memory.h"
 #include "renut_engine/gpu/log.h"
+
+#include <atomic>
 #include "renut_engine/gpu/render/draw.h"
 #include "renut_engine/gpu/render/graphics_options.h"
 #include "renut_engine/gpu/backend/video.h"
@@ -576,6 +578,15 @@ bool Create(HostTexture &t, const TextureFetch &fetch, bool render_target,
   }
   if (render_target)
     desc.flags |= plume::RenderTextureFlag::RENDER_TARGET;
+  // banjo-nx (2026-10-20): whether the game uses stacked (2D array) or volume textures at all, once each (SASRT's
+  // deko3d findings: plume's 2D view of a 2D array, and 3D images; docs/deko3d-port-faq.md).
+  if (t.dimension == TextureDimension::Tex3D) {
+    static std::atomic<bool> logged_stacked{false}, logged_volume{false};
+    std::atomic<bool> &logged = t.stacked ? logged_stacked : logged_volume;
+    if (!logged.exchange(true, std::memory_order_relaxed))
+      RGPU_INFO("[textures] first {} texture: {}x{}x{}, {} levels, host format {}",
+                t.stacked ? "stacked (2D array)" : "volume (3D)", w, h, t.depth, t.mip_levels, int(format));
+  }
   t.host_format = format;
   t.alloc_width = w;
   t.alloc_height = h;
@@ -1103,8 +1114,41 @@ TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetc
                   g_frame, texture_va, desc[1], desc[2], desc[5], device_desc[1], device_desc[2], device_desc[5]);
       fetch = device_fetch;
       std::memcpy(desc, device_desc, sizeof(desc));
+    } else {
+      // banjo-nx (2026-10-20, the colour flash, banjo_renut_device_swizzle): the same data, other described fields.
+      // SetTexture copies dwords 0, 3 and 5 of the header into the device's fetch constant as they are (signs, pitch,
+      // tiling; swizzle, number format, exponent adjust; dimension, packed mips, mip address) and changes only dword
+      // 4's mip levels (the sampler's MinMipLevel / MaxMipLevel; d3d_native_state.cpp SetTexture): a header that
+      // differs in 0, 3 or 5 is stale. Games build headers as stack temporaries (RenderDoc capture of Ryujinx, frame
+      // 5437: a bloom level's header rewritten with the swizzle 1,1,0,0 turned the whole frame yellow); the device's
+      // copy is what the GPU reads. The periodic report counts them ("[flash] header vs device", by dword).
+      u32 differ = 0;
+      for (int i = 0; i < 6; ++i)
+        differ |= desc[i] != device_desc[i] ? 1u << i : 0u;
+      if (differ) {
+        banjo::renut_gpu::CountHeaderDescDiffer(differ);
+        if (fetch.Swizzle() != device_fetch.Swizzle())
+          banjo::renut_gpu::CountDeviceSwizzle(uint32_t(g_frame));
+        if (differ & 0x29u) {
+          static uint32_t logged = 0;
+          if (logged++ < 16)
+            RGPU_INFO("[flash] frame {}: texture {:08X} sampled through the device's fetch constant{}: its header (same "
+                      "data) is stale: dword0 {:08X}/{:08X} dword3 {:08X}/{:08X} dword5 {:08X}/{:08X} (header/device)",
+                      g_frame, texture_va, banjo::renut_gpu::DeviceSwizzleOn() ? "" : " NOT (key off)", desc[0],
+                      device_desc[0], desc[3], device_desc[3], desc[5], device_desc[5]);
+          if (banjo::renut_gpu::DeviceSwizzleOn()) {
+            fetch = device_fetch;
+            std::memcpy(desc, device_desc, sizeof(desc));
+          }
+        }
+      }
     }
   }
+  const u32 swizzle = fetch.Swizzle();
+  // banjo-nx (2026-10-20, SASRT's finding): Renut does not apply the fetch constant's exponent adjust (the result times
+  // 2^adjust). Counted, so a log shows whether the game uses it (the "[renut] exponent adjust" line).
+  if (const int adjust = fetch.ExpAdjust())
+    banjo::renut_gpu::CountExpAdjust(adjust);
   if (HostTexture *resolved = ResolvedAlias(texture_va, fetch, desc)) {
     resolved->used_frame = g_frame;
     if (resolved->words)
@@ -1115,11 +1159,11 @@ TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetc
       fx->float_sampled = resolved->words != nullptr;
     }
     binding.dimension = resolved->dimension;
-    binding.slot = SlotForSwizzle(*resolved, fetch.Swizzle());
+    binding.slot = SlotForSwizzle(*resolved, swizzle);
     // banjo-nx (2026-10-19, banjo_deko3d_depth_handover): its content where it is.
     if (resolved->handed_from || resolved->held_current) {
       const uint32_t handed = DepthHandOverSlotLocked(
-          *resolved, SwizzleMapping(fetch.Swizzle(), resolved->view_swap_red_blue, resolved->host_format), fx);
+          *resolved, SwizzleMapping(swizzle, resolved->view_swap_red_blue, resolved->host_format), fx);
       if (handed != UINT32_MAX)
         binding.slot = handed;
     }
@@ -1205,7 +1249,7 @@ TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetc
 
   if (depth_source && !t.gpu_written) {
     // banjo-nx (banjo_gpu_depth_words_view, package 28): the resolve's words themselves, not a copy.
-    if (const uint32_t words_slot = WordsViewSlot(t, *depth_source, fetch.Swizzle()); words_slot != UINT32_MAX) {
+    if (const uint32_t words_slot = WordsViewSlot(t, *depth_source, swizzle); words_slot != UINT32_MAX) {
       t.copied_resolve = 0;  // its own texture has not got them: copied in full if the view is not used later
       TransitionTextureLocked(depth_source->words.get(), plume::RenderTextureLayout::SHADER_READ);
       banjo::renut_gpu::CountDepthWords(true);
@@ -1243,6 +1287,15 @@ TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetc
         t.uploaded = Upload(t, fetch, false);
       }
     }
+    // banjo-nx (2026-10-19, the colour flash): a texture neither a resolve nor an upload filled is sampled with what
+    // its new image's memory held (deko3d does not clear it).
+    if (!t.gpu_written && !t.uploaded) {
+      static uint32_t logged = 0;
+      if (logged++ < 32)
+        RGPU_WARN("[flash] frame {}: texture {:08X} ({}x{} format {}{}) sampled with nothing written to it (the "
+                  "upload from guest memory failed)",
+                  g_frame, texture_va, t.width, t.height, u32(fetch.Format()), fetch.Tiled() ? ", tiled" : "");
+    }
   }
   TransitionTextureLocked(&t, plume::RenderTextureLayout::SHADER_READ);
   if (t.words)
@@ -1252,11 +1305,11 @@ TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetc
     fx->float_sampled = t.words != nullptr;
   }
   binding.dimension = t.dimension;
-  binding.slot = SlotForSwizzle(t, fetch.Swizzle());
+  binding.slot = SlotForSwizzle(t, swizzle);
   // banjo-nx (2026-10-19, banjo_deko3d_depth_handover): its content where it is.
   if (t.handed_from || t.held_current) {
     const uint32_t handed = DepthHandOverSlotLocked(
-        t, SwizzleMapping(fetch.Swizzle(), t.view_swap_red_blue, t.host_format), fx);
+        t, SwizzleMapping(swizzle, t.view_swap_red_blue, t.host_format), fx);
     if (handed != UINT32_MAX)
       binding.slot = handed;
   }

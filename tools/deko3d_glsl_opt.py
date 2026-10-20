@@ -16,6 +16,7 @@ take the output directory. Game data: the build tree only.
 import argparse
 import os
 import re
+import types
 import sys
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -1085,6 +1086,1066 @@ def pass_selsame(text):
     return map_main(text, body)
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: txq — a texture's level-0 size from the texture size buffer instead of a texture query
+
+TXQ_RE = re.compile(r'textureSize\((dk_tex_b(\d+)), 0\)')
+TXQ_TYPES = {'sampler2D': ('ivec2', 'xy'), 'samplerCube': ('ivec2', 'xy'), 'sampler2DArray': ('ivec3', 'xyz'),
+             'sampler3D': ('ivec3', 'xyz')}
+TXQ_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_908\n#define SPIRV_CROSS_CONSTANT_ID_908 1u\n#endif\n'
+            'const uint g_banjoTxq = SPIRV_CROSS_CONSTANT_ID_908;\n'
+            'layout(binding = 3, std140) uniform type_DkTexSize\n{\n    uvec4 v[64];\n} g_UboTexSize;\n'
+            'bool g_dkTxqBad = false;\n'
+            'ivec2 dk_txq_check(ivec2 c, ivec2 q) { g_dkTxqBad = g_dkTxqBad || any(notEqual(c, q)); return q; }\n'
+            'ivec3 dk_txq_check(ivec3 c, ivec3 q) { g_dkTxqBad = g_dkTxqBad || any(notEqual(c, q)); return q; }\n')
+
+
+def pass_txq(text):
+    """A texture query of level 0 (`textureSize(t, 0)`: Renut's half-texel offsets, the stacked textures' layer count)
+    is a texture instruction per pixel, as costly as a fetch in the texture unit: A5E2 (the second heaviest pixel shader
+    of the console's profile) runs 4 fetches and 4 queries a pixel over the whole screen. The size of each queried
+    binding comes from the texture size buffer instead (UBO binding 3, entry k for binding k), which plume deko3d fills
+    from the view it wrote into the descriptor (Deko3DDescriptorSet::imageSizes) and updates when it changes; the
+    banjo-dk line gets txq=<binding mask> and UBO bit 3. Specialization constant 908: 1 (default) the buffer, 0 the
+    query as before (banjo_deko3d_txq_constants off), 2 both, the query's value used and the pixel magenta where the two
+    differ (banjo_deko3d_txq_verify: the GPU checks plume's sizes). Pixel shaders only."""
+    if 'textureSize(' not in text or 'g_banjoTxq' in text:
+        return text
+    types = {m.group(2): m.group(1) for m in re.finditer(r'uniform (\w+) dk_tex_b(\d+);', text)}
+    mask = 0
+
+    def repl(m):
+        nonlocal mask
+        b = m.group(2)
+        t = TXQ_TYPES.get(types.get(b, ''))
+        if not t or int(b) >= 32:
+            return m.group(0)
+        mask |= 1 << int(b)
+        vec, comps = t
+        c = f'{vec}(g_UboTexSize.v[{b}u].{comps})'
+        q = m.group(0)
+        return f'((g_banjoTxq == 1u) ? {c} : ((g_banjoTxq == 2u) ? dk_txq_check({c}, {q}) : {q}))'
+
+    span = main_span(text)
+    if not span:
+        return text
+    a, b = span
+    body = TXQ_RE.sub(repl, text[a:b])
+    if not mask:
+        return text
+    # The verify variant: magenta where a size differed (before main's closing brace).
+    if 'out_var_SV_Target0' in text:
+        body = body.rstrip() + '\n    if (g_banjoTxq == 2u && g_dkTxqBad)\n    {\n' \
+               '        out_var_SV_Target0 = vec4(1.0, 0.0, 1.0, 1.0);\n    }\n'
+    text = text[:a] + body + text[b:]
+    text = insert_before_main(text, TXQ_DECL)
+
+    def header(m):
+        line = m.group(0)
+        ubo = re.search(r'ubo=0x([0-9a-fA-F]+)', line)
+        if ubo:
+            line = line.replace(ubo.group(0), 'ubo=0x%x' % (int(ubo.group(1), 16) | 8))
+        return line + ' txq=0x%x' % mask
+    return re.sub(r'^// banjo-dk [^\n]*', header, text, count=1, flags=re.M)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: earlyz — depth and stencil tested before the shader where the draw writes neither
+
+EARLYZ_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_909\n#define SPIRV_CROSS_CONSTANT_ID_909 0u\n#define DK_EARLY_Z 0\n'
+               '#else\n#define DK_EARLY_Z 1\n#endif\n#if DK_EARLY_Z\nlayout(early_fragment_tests) in;\n#endif\n')
+
+
+def pass_earlyz(text):
+    """A pixel shader that discards (the alpha test, Renut's early alpha test of a quad) has its SPH's kills_pixels
+    bit, and the GPU may then test depth after it: every covered pixel runs the shader, also those the depth test
+    rejects. Where the draw writes neither depth nor stencil (blended draws: the fur shells, particles), testing first
+    gives the same pixels: the discard has nothing to undo, and nothing counts samples (the renderer has no occlusion
+    queries). Specialization constant 909 = 1 (render/pipeline.cpp, banjo_deko3d_early_z: depth writes and stencil off
+    in the key) declares `layout(early_fragment_tests)`; its default 0 leaves the shader as it was. The constant is
+    tested by the preprocessor: plume writes `#define SPIRV_CROSS_CONSTANT_ID_909 1u` ahead of the text."""
+    if 'discard' not in text or 'gl_FragDepth' in text or 'SPIRV_CROSS_CONSTANT_ID_909' in text:
+        return text
+    return insert_globals(text, EARLYZ_DECL)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: gpr32 — the listed shaders get constant 910: compiled with 32 GPRs at most when it is 1
+
+GPR32_LIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gpr32_shaders.txt')
+GPR32_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_910\n#define SPIRV_CROSS_CONSTANT_ID_910 0u\n#endif\n'
+              'const uint g_banjoGpr32 = SPIRV_CROSS_CONSTANT_ID_910;\n')
+_GPR32 = None
+
+
+def pass_gpr32(text, name=None):
+    """On Maxwell a warp's registers come in blocks of 8 per thread: 33-40 GPRs leave about 48 of the SM's 64 warp
+    slots, 32 all of them, to hide texture latency with. The pixel shaders tools/gpr32_shaders.txt lists (33-40 GPRs:
+    the fur family, the top of the console's GPU profile) declare constant 910; with 910 = 1 (banjo_deko3d_gpr32,
+    off by default: whether the spills cost less than the occupancy gives is for the console to measure) uam
+    compiles them with a 32-GPR register file (compiler_iface.cpp CompileBest: the define's text), spilling the rest
+    (the fur shader: 15 loads, 5 stores). The constant changes no code by itself."""
+    global _GPR32
+    if _GPR32 is None:
+        _GPR32 = set()
+        if os.path.isfile(GPR32_LIST):
+            for line in open(GPR32_LIST, encoding='utf-8'):
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    _GPR32.add(line.upper())
+    if name is None or name.upper() not in _GPR32 or 'SPIRV_CROSS_CONSTANT_ID_910' in text:
+        return text
+    return insert_before_main(text, GPR32_DECL)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: bonesel — a predicated bone's data select under its own accumulate select (2026-10-20)
+
+BONESEL_NAMED_RE = re.compile(r'mix\((_\d+), \((_\d+) \* ([\w.]+)\) \+ \1, (_\d+)\)')
+
+
+def pass_bonesel(text):
+    """Skinning with predicated bones (pred-select): bone k's rows are `D = mix(P, L, c)` (the fetch L when the bone's
+    weight is not zero, else the register's old value P) and its sum `mix(A, (D * w) + A, c)`. Under the same c the
+    sum keeps A whenever D would be P, so the sum reads L itself: `mix(A, (L * w) + A, c)` (the same multiply-add of
+    the same values when c holds). D stays defined for any other reader; with none left (the next bone's data select
+    goes the same way) the compiler drops it: a select per component less (36 a vertex for 3 predicated bones). Both
+    forms: D a variable (`vec4 D = mix(P, L, c);`, then `vec4 D_bl = L;` ahead of it) and the data select written
+    inside the sum."""
+    span = main_span(text)
+    if not span:
+        return text
+    a, b = span
+    body = text[a:b]
+    count = 0
+    # Named: D defined by a select on the sum's own condition.
+    defs = {}
+    for m in re.finditer(r'^([ \t]*)vec4 (_\d+) = mix\((.*)\);$', body, re.M):
+        args = _split_args(m.group(3))
+        if len(args) == 3 and re.fullmatch(r'_\d+', args[2].strip()) and re.fullmatch(r'_\d+', args[0].strip()):
+            defs[m.group(2)] = (m, args[1].strip(), args[2].strip())
+    renamed = {}
+
+    def named(mm):
+        nonlocal count
+        acc, d, w, c = mm.groups()
+        info = defs.get(d)
+        if not info or info[2] != c:
+            return mm.group(0)
+        renamed[d] = info
+        count += 1
+        return f'mix({acc}, ({d}_bl * {w}) + {acc}, {c})'
+    body = BONESEL_NAMED_RE.sub(named, body)
+    for d, (m, load, c) in renamed.items():
+        line = re.compile(r'^([ \t]*)vec4 ' + d + r' = mix\(', re.M).search(body)
+        if not line:
+            return text
+        body = body[:line.start()] + f'{line.group(1)}vec4 {d}_bl = {load};\n' + body[line.start():]
+        # the data select itself reads D_bl (one load, as before)
+        body = body.replace(f'vec4 {d} = mix({m.group(3)});', f'vec4 {d} = mix({_split_args(m.group(3))[0].strip()}, '
+                            f'{d}_bl, {c});', 1)
+    # Inline: mix(A, (mix(P, L, c) * w) + A, c).
+    out, pos = [], 0
+    for mm in re.finditer(r'mix\((_\d+), \(mix\(', body):
+        if mm.start() < pos:
+            continue
+        acc = mm.group(1)
+        inner_open = mm.end() - 1
+        inner_close = matching(body, inner_open, '(', ')')
+        if inner_close < 0:
+            continue
+        iargs = _split_args(body[inner_open + 1:inner_close])
+        if len(iargs) != 3:
+            continue
+        c = iargs[2].strip()
+        tail = re.match(r' \* ([\w.]+)\) \+ ' + re.escape(acc) + r', ' + re.escape(c) + r'\)', body[inner_close + 1:])
+        if not re.fullmatch(r'_\d+', c) or not tail:
+            continue
+        out.append(body[pos:mm.start()])
+        out.append(f'mix({acc}, ({iargs[1].strip()} * {tail.group(1)}) + {acc}, {c})')
+        pos = inner_close + 1 + tail.end()
+        count += 1
+    if pos:
+        out.append(body[pos:])
+        body = ''.join(out)
+    if not count:
+        return text
+    return text[:a] + body + text[b:]
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: deadcomp — a constructor's component overwritten before anything reads it (2026-10-20)
+
+_DC_CTOR = re.compile(r'^([ \t]*)vec([234]) (_\d+) = vec\2\((.*)\);$')
+
+
+def pass_deadcomp(text):
+    """`vec4 x = vec4(a, b, c, d);` then, in the same block before any read of x, `x.w = e;`: the constructor's d is
+    never read, so it is 0.0 (a value the next light's vector carries from the light before goes, which guardsel then
+    sees). Only plain single-component writes at the same level whose right side does not mention x count; any other
+    occurrence of x, a deeper or shallower line, ends the search."""
+    span = main_span(text)
+    if not span:
+        return text
+    a, b = span
+    lines = text[a:b].split('\n')
+    count = 0
+    for i, ln in enumerate(lines):
+        m = _DC_CTOR.match(ln)
+        if not m:
+            continue
+        ind, n, x = m.group(1), int(m.group(2)), m.group(3)
+        args = _split_args(m.group(4))
+        if len(args) != n:
+            continue
+        name_re = re.compile(r'(?<![\w.])' + re.escape(x) + r'\b')
+        dead = set()
+        for j in range(i + 1, len(lines)):
+            lj = lines[j]
+            if not lj.strip():
+                continue
+            if not lj.startswith(ind) or lj[len(ind):len(ind) + 1] in (' ', '\t') or lj.strip() in ('{', '}'):
+                break
+            w = re.match(r'^[ \t]*' + re.escape(x) + r'\.([xyzw]) = (.*);$', lj)
+            if w and not name_re.search(w.group(2)):
+                c = 'xyzw'.index(w.group(1))
+                if c < n:
+                    dead.add(c)
+                continue
+            if name_re.search(lj):
+                break
+        dead = {c for c in dead if args[c].strip() != '0.0'}
+        if not dead:
+            continue
+        for c in dead:
+            args[c] = ' 0.0' if c else '0.0'
+        lines[i] = f'{ind}vec{n} {x} = vec{n}({",".join(args)});'
+        count += len(dead)
+    if not count:
+        return text
+    return text[:a] + '\n'.join(lines) + text[b:]
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: guardsel — a select whose other arm nobody reads (2026-10-20)
+
+_GS_VAR = re.compile(r'(?<![\w.])(_\d+)\b')
+_GS_TYPES = r'(?:[biu]?vec[234]|float|int|uint|bool)'
+_GS_ASSIGN = re.compile(r'^([ \t]*)(?:' + _GS_TYPES + r' )?(_\d+)((?:\.[xyzw]+)?) = (.*);$')
+_GS_DECL = re.compile(r'^\s*' + _GS_TYPES + r' _\d+;$')
+
+
+def _gs_selects(expr, booleans):
+    """(condition, true arm span, false arm span, call span) of each select in expr: dk_sel(c, a, b), and mix(b, a, s)
+    where s is bvecN(x) or a bool / bvec variable (a mix by a float is a blend, never taken)."""
+    out = []
+    for m in re.finditer(r'(?<![\w.])(dk_sel|mix)\(', expr):
+        op = m.end() - 1
+        cl = matching(expr, op, '(', ')')
+        if cl < 0:
+            continue
+        args = _split_args(expr[op + 1:cl])
+        if len(args) != 3:
+            continue
+        spans, pos = [], op + 1
+        for x in args:
+            spans.append((pos, pos + len(x)))
+            pos += len(x) + 1
+        if m.group(1) == 'dk_sel':
+            out.append((args[0], spans[1], spans[2], (m.start(), cl + 1)))
+            continue
+        sel = args[2].strip()
+        mm = re.fullmatch(r'bvec[234]\((_\d+|true|false)\)', sel)
+        if mm and (mm.group(1) in booleans or mm.group(1) in ('true', 'false')):
+            out.append((mm.group(1), spans[1], spans[0], (m.start(), cl + 1)))
+        elif sel in booleans:
+            out.append((sel, spans[1], spans[0], (m.start(), cl + 1)))
+    return out
+
+
+def _gs_analyse(text):
+    """pass_guardsel's analysis (also pass_lightbranch's): None, or the main body's lines and what is known
+    about them (see pass_guardsel)."""
+    span = main_span(text)
+    if not span:
+        return None
+    a, b = span
+    body = text[a:b]
+    if re.search(r'\b(for|while|do)\b', body):
+        return None
+    lines = body.split('\n')
+    booleans = set(re.findall(r'\b(?:bool|bvec[234]) (_\d+)\b', text))
+    assigns = {}
+    for i, ln in enumerate(lines):
+        m = _GS_ASSIGN.match(ln)
+        if m:
+            assigns.setdefault(m.group(2), []).append(i)
+    alias = {}
+    for v, idx in assigns.items():
+        if len(idx) == 1:
+            m = (re.match(r'^\s*bvec[234] ' + v + r' = bvec[234]\((_\d+|true|false)\);$', lines[idx[0]]) or
+                 re.match(r'^\s*bool ' + v + r' = (_\d+)(?: && \1)?;$', lines[idx[0]]))
+            if m:
+                alias[v] = m.group(1)
+
+    def norm(c):
+        c = _unparen(c)
+        while c in alias:
+            c = alias[c]
+        return c
+
+    def block_close(k):  # the line of the } closing the { at line k
+        d = 0
+        for e in range(k, len(lines)):
+            s2 = lines[e].strip()
+            if s2 == '{':
+                d += 1
+            elif s2 == '}':
+                d -= 1
+                if d == 0:
+                    return e
+        return -1
+
+    def block_of(i):  # (open, close) of the innermost block holding line i
+        depth = 0
+        for k in range(i - 1, -1, -1):
+            s2 = lines[k].strip()
+            if s2 == '}':
+                depth += 1
+            elif s2 == '{':
+                if depth == 0:
+                    return k, block_close(k)
+                depth -= 1
+        return None
+
+    def exclusive(i, j):  # line i in an if's then-block, line j in its else-block
+        blk = block_of(i)
+        if not blk or blk[0] < 1 or not lines[blk[0] - 1].strip().startswith('if ('):
+            return False
+        k = blk[1] + 1
+        if k + 1 >= len(lines) or lines[k].strip() != 'else' or lines[k + 1].strip() != '{':
+            return False
+        return k + 1 < j < block_close(k + 1)
+
+    single_cache = {}
+
+    def single(c):
+        if re.fullmatch(r'_\d+', c) is None:
+            return False
+        if c not in single_cache:
+            idx = assigns.get(c, [])
+            single_cache[c] = len(idx) == 1 or (len(idx) == 2 and exclusive(idx[0], idx[1]))
+        return single_cache[c]
+
+    # a float that is a condition's 0 / 1 (the bool01 pass's float(c) and float(!c))
+    as_float = {}
+    for v, idx in assigns.items():
+        if len(idx) == 1:
+            m = re.match(r'^\s*float ' + v + r' = float\((!?)\(?(_\d+)\)?\);$', lines[idx[0]])
+            if m:
+                as_float[v] = (m.group(2), not m.group(1))
+
+    def if_guard(cond_line):  # the guard of an `if (c)` / `if (!c)` / `if (!(c))` / `if (f == 0.0)` line's block
+        m = re.fullmatch(r'\s*if \((!?)\(?(_\d+)\)?\)', cond_line)
+        if m:
+            c = norm(m.group(2))
+            return (c, not m.group(1)) if single(c) else None
+        m = re.fullmatch(r'\s*if \((_\d+) == ([01])\.0\)', cond_line)
+        if m and m.group(1) in as_float:
+            c, pol = as_float[m.group(1)]
+            c = norm(c)
+            return (c, pol == (m.group(2) == '1')) if single(c) else None
+        return None
+
+    # the if / else blocks around each line (guards of the block conditions)
+    block_guards = []
+    stack, last_closed = [], None
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if s == '{':
+            prev = lines[i - 1].strip() if i else ''
+            if prev.startswith('if ('):
+                stack.append(if_guard(lines[i - 1]))
+            elif prev == 'else' and last_closed is not None:
+                stack.append((last_closed[0], not last_closed[1]))
+            else:
+                stack.append(None)
+            last_closed = None
+        elif s == '}':
+            last_closed = stack.pop() if stack else None
+        elif s != 'else':
+            last_closed = None
+        block_guards.append(frozenset(g for g in stack if g is not None))
+
+    # implications between conditions: (x, true) => (a, true) for x = a && b; (x, p) => (a, !p) for x = !a; a
+    # condition assigned once in each arm of an if / else implies what both arms imply (an arm assigning false, or
+    # true for the false side, implies everything: it never gives that value)
+    imp = {}
+
+    def add_imp(k, g):
+        imp.setdefault(k, set()).add(g)
+    every = object()
+    two_arm = {}
+    for v, idx in assigns.items():
+        if not single(v):
+            continue
+        if len(idx) == 1:
+            m = re.match(r'^\s*bool ' + v + r' = (.+);$', lines[idx[0]])
+            if not m:
+                continue
+            e = _unparen(m.group(1))
+            parts = [_unparen(x) for x in e.split(' && ')] if ' && ' in e and ' || ' not in e else None
+            if parts and all(re.fullmatch(r'_\d+', x) for x in parts):
+                for x in parts:
+                    x = norm(x)
+                    if single(x):
+                        add_imp((v, True), (x, True))
+                continue
+            parts = [_unparen(x) for x in e.split(' || ')] if ' || ' in e and ' && ' not in e else None
+            if parts and all(re.fullmatch(r'_\d+', x) for x in parts):
+                for x in parts:
+                    x = norm(x)
+                    if single(x):
+                        add_imp((v, False), (x, False))
+                continue
+            m2 = re.fullmatch(r'!\(?(_\d+)\)?', e)
+            if m2 and single(norm(m2.group(1))):
+                x = norm(m2.group(1))
+                add_imp((v, True), (x, False))
+                add_imp((v, False), (x, True))
+        else:
+            arms = []
+            for i in idx:
+                m = re.match(r'^\s*' + v + r' = (.+);$', lines[i])
+                arms.append((_unparen(m.group(1)) if m else None, i))
+            if all(e is not None for e, _ in arms):
+                two_arm[v] = arms
+
+    def closure_now(gs):
+        out, todo = set(gs), list(gs)
+        while todo:
+            g = todo.pop()
+            for h in imp.get(g, ()):
+                if h not in out:
+                    out.add(h)
+                    todo.append(h)
+        return out
+
+    # the two-arm rule needs what the arms imply: to a fixpoint
+    grown = True
+    while grown:
+        grown = False
+        for v, arms in two_arm.items():
+            for pol in (True, False):
+                sets = []
+                for e, i in arms:
+                    if e == ('false' if pol else 'true'):
+                        sets.append(every)
+                        continue
+                    s = set()
+                    if re.fullmatch(r'_\d+', e) and single(norm(e)):
+                        s |= closure_now({(norm(e), pol)})
+                    blk = block_of(i)
+                    if blk and blk[0] >= 1:
+                        s |= closure_now(block_guards[blk[0]] - block_guards[blk[0] - 1])
+                    sets.append(s)
+                real = [s for s in sets if s is not every]
+                common = set.intersection(*real) if real else set()
+                for g in common:
+                    if g not in imp.get((v, pol), ()):
+                        add_imp((v, pol), g)
+                        grown = True
+
+    closure_cache = {}
+
+    def closure(gs):
+        if gs in closure_cache:
+            return closure_cache[gs]
+        out, todo = set(gs), list(gs)
+        while todo:
+            g = todo.pop()
+            for h in imp.get(g, ()):
+                if h not in out:
+                    out.add(h)
+                    todo.append(h)
+        out = frozenset(out)
+        closure_cache[gs] = out
+        return out
+
+    uses = {}  # variable -> [(guards at the read, the variable the read's statement assigns or None)]
+    parsed = []
+    for i, ln in enumerate(lines):
+        if _GS_DECL.match(ln):
+            parsed.append(None)
+            continue
+        m = _GS_ASSIGN.match(ln)
+        if m:
+            target, start = m.group(2), len(ln) - len(m.group(4)) - 1
+        else:
+            target, start = None, 0
+        expr = ln[start:-1] if m else ln
+        sels = _gs_selects(expr, booleans)
+        parsed.append((target, start) if m else None)
+        for vm in _GS_VAR.finditer(expr):
+            p = vm.start()
+            g = set(block_guards[i])
+            dead = False
+            for cond, ts, fs, _ in sels:
+                c = norm(cond)
+                if c in ('true', 'false'):  # the arm a literal never takes reads nothing
+                    dead = dead or (fs if c == 'true' else ts)[0] <= p < (fs if c == 'true' else ts)[1]
+                    continue
+                if not single(c):
+                    continue
+                if ts[0] <= p < ts[1]:
+                    g.add((c, True))
+                elif fs[0] <= p < fs[1]:
+                    g.add((c, False))
+            if not dead:
+                uses.setdefault(vm.group(1), []).append((frozenset(g), target))
+    top = None
+    guard = {v: top for v in assigns}
+    changed = True
+    while changed:
+        changed = False
+        for v in assigns:
+            acc = top
+            for g, target in uses.get(v, []):
+                if target is not None and target in assigns:
+                    tg = guard[target]
+                    s = top if tg is top else closure(g | tg)
+                else:
+                    s = closure(g)
+                if s is top or any((c, not p) in s for c, p in s):  # never read, or read under a contradiction
+                    continue
+                acc = s if acc is top else (acc & s)
+            if acc != guard[v]:
+                guard[v] = acc
+                changed = True
+    return types.SimpleNamespace(a=a, b=b, lines=lines, parsed=parsed, guard=guard, uses=uses, imp=imp,
+                                 closure=closure, norm=norm, single=single, booleans=booleans,
+                                 assigns=assigns, block_guards=block_guards)
+
+
+def pass_guardsel(text):
+    """A value read only where a condition c holds (inside the chosen arm of selects on c, directly or through the
+    values it feeds) never shows what a select on c inside its own definition gives when c does not hold: that select
+    is its chosen arm. Renut's lights select every term on the light's flag (`dk_sel(f, clamp(...), old)`) and then
+    add it only under the same flag (`mix(acc, (t * k) + acc, bvec3(f))`): the selects go (20 in the fur shader).
+    A greatest fixpoint over every variable's readers; the conditions are variables with one value a run: assigned
+    once, or once in each arm of one if / else. Not in a body with loops (a condition could change between the reads).
+    Exact: a value changes only in runs where nothing reads it."""
+    an = _gs_analyse(text)
+    if an is None:
+        return text
+    a, b, lines, parsed, guard, norm, booleans = an.a, an.b, an.lines, an.parsed, an.guard, an.norm, an.booleans
+    count = 0
+    for i, info in enumerate(parsed):
+        if not info:
+            continue
+        target, start = info
+        g = guard.get(target)
+        if not g:
+            continue
+        expr = lines[i][start:-1]
+        while True:
+            for cond, ts, fs, (cs, ce) in _gs_selects(expr, booleans):
+                c = norm(cond)
+                if (c, True) in g:
+                    keep = expr[ts[0]:ts[1]]
+                elif (c, False) in g:
+                    keep = expr[fs[0]:fs[1]]
+                else:
+                    continue
+                expr = expr[:cs] + '(' + keep.strip() + ')' + expr[ce:]
+                count += 1
+                break
+            else:
+                break
+        lines[i] = lines[i][:start] + expr + ';'
+    if not count:
+        return text
+    return text[:a] + '\n'.join(lines) + text[b:]
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: lightbranch — a light's work skipped where the light does not reach (2026-10-20, constant 911, A/B)
+
+LIGHTBRANCH_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_911\n#define SPIRV_CROSS_CONSTANT_ID_911 0u\n#endif\n'
+                    'const uint g_banjoLightBranch = SPIRV_CROSS_CONSTANT_ID_911;\n')
+_LB_LIST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lightbranch_shaders.txt')
+_LB_FORBIDDEN = re.compile(r'\b(texture\w*|texelFetch\w*|dFd\w+|fwidth\w*|discard|out_var_\w+|gl_FragDepth|return|'
+                           r'imageStore|atomic\w*)\b')
+
+
+def _lb_list():
+    try:
+        return {ln.split('#')[0].strip().upper() for ln in open(_LB_LIST_PATH, encoding='utf-8')
+                if ln.split('#')[0].strip()}
+    except OSError:
+        return set()
+
+
+_LIGHTBRANCH = _lb_list()
+
+
+def pass_lightbranch(text, name=None):
+    """After guardsel and deadcomp a light's work is read only where its attenuation test c holds, except the sums it
+    adds to (`acc2 = mix(acc, x + acc, bvecN(f))` with f => c, which keep acc where c does not hold). The statements
+    after `bool c = ...;` up to the last one whose results are read later go into `if (g_banjoLightBranch == 0u || c)`
+    with an else that gives each sum its previous value (the declarations of what is read later move ahead of it).
+    Specialization constant 911 (0 by default: the if folds away, the code as before; banjo_deko3d_light_branch gives
+    1): warps whose pixels are all out of a light's reach skip it. Exact: with c true the same statements run; with c
+    false nothing reads their results but the sums, which get the value their select gives. Not over texture fetches,
+    derivatives, discards or outputs. Only the shaders of tools/lightbranch_shaders.txt (an A/B for the console)."""
+    if name is None or name.upper() not in _LIGHTBRANCH or 'SPIRV_CROSS_CONSTANT_ID_911' in text:
+        return text
+    an = _gs_analyse(text)
+    if an is None:
+        return text
+    lines, guard, closure, norm, single = an.lines, an.guard, an.closure, an.norm, an.single
+    ind_of = [len(ln) - len(ln.lstrip(' \t')) for ln in lines]
+    # every read of each variable: (line, assigning target or None)
+    reads = {}
+    for i, ln in enumerate(lines):
+        m = _GS_ASSIGN.match(ln)
+        expr = ln[len(ln) - len(m.group(4)) - 1:-1] if m else ln
+        if _GS_DECL.match(ln):
+            continue
+        for vm in _GS_VAR.finditer(expr):
+            reads.setdefault(vm.group(1), []).append(i)
+    edits = []  # (start, end, cond, hoisted [(type, var)], else [(var, value)])
+    taken_until = -1
+    for i, ln in enumerate(lines):
+        m = re.match(r'^([ \t]*)bool (_\d+) = (.+);$', ln)
+        if not m or i <= taken_until or not single(m.group(2)):
+            continue
+        ind, c = m.group(1), m.group(2)
+        # the block's statements after the condition: whole lines at this level (nested blocks taken whole)
+        ends = []
+        j = i + 1
+        while j < len(lines):
+            s = lines[j].strip()
+            if not s:
+                j += 1
+                continue
+            if ind_of[j] < len(ind) or s == '}' and ind_of[j] == len(ind):
+                break
+            if ind_of[j] > len(ind):
+                break  # not expected right after a statement at this level
+            k = j
+            if s.startswith('if (') or s == 'else':
+                # take the if / else blocks whole
+                k = j + 1
+                while k < len(lines):
+                    if lines[k].strip() == '{' and ind_of[k] == len(ind):
+                        d = 0
+                        for e in range(k, len(lines)):
+                            if lines[e].strip() == '{':
+                                d += 1
+                            elif lines[e].strip() == '}':
+                                d -= 1
+                                if d == 0:
+                                    k = e
+                                    break
+                        if k + 1 < len(lines) and lines[k + 1].strip() == 'else':
+                            k += 2
+                            continue
+                        break
+                    k += 1
+            ends.append(k)
+            j = k + 1
+        best = None
+        for e in ends:
+            region = range(i + 1, e + 1)
+            if any(_LB_FORBIDDEN.search(lines[r]) for r in region):
+                break
+            ok, hoist, elses = True, [], []
+            assigned = {}
+            for r in region:
+                mm = _GS_ASSIGN.match(lines[r])
+                dm = re.match(r'^\s*(' + _GS_TYPES + r') (_\d+);$', lines[r])
+                if mm:
+                    assigned.setdefault(mm.group(2), r)
+                elif dm:
+                    assigned.setdefault(dm.group(2), r)
+            for v, first in assigned.items():
+                later = [r for r in reads.get(v, []) if r > e]
+                if not later:
+                    continue
+                g = guard.get(v)
+                if g is not None and (c, True) in closure(g):
+                    tm = re.match(r'^\s*(' + _GS_TYPES + r') ' + v + r'\b', lines[first])
+                    hoist.append((tm.group(1) if tm else None, v))
+                    continue
+                # a sum: `T v = mix(P, X, bvecN(f));` assigned once in the region, at its level, with f => c
+                defs = [r for r in region if (_GS_ASSIGN.match(lines[r]) or [None, None, None])[2] == v]
+                sm = re.match(r'^[ \t]*(vec[234]|float) ' + v + r' = mix\((.*)\);$', lines[defs[0]]) if len(
+                    defs) == 1 and ind_of[defs[0]] == len(ind) else None
+                if sm:
+                    args = _split_args(sm.group(2))
+                    sel = args[2].strip() if len(args) == 3 else ''
+                    fm = re.fullmatch(r'bvec[234]\((_\d+)\)', sel)
+                    f = norm(fm.group(1) if fm else sel)
+                    prev = args[0].strip()
+                    # a region-local copy of an outside value (`vec3 p = acc.xyz;`, assigned once): its expression
+                    pm = re.fullmatch(r'(_\d+)', prev)
+                    if pm and pm.group(1) in assigned:
+                        pdefs = [r for r in region if (_GS_ASSIGN.match(lines[r]) or [None, None, None])[2] ==
+                                 pm.group(1)]
+                        pd = _GS_ASSIGN.match(lines[pdefs[0]]) if len(pdefs) == 1 else None
+                        if pd and not pd.group(3):
+                            prev = '(' + pd.group(4).strip() + ')'
+                    prev_vars = _GS_VAR.findall(prev)
+                    if (re.fullmatch(r'_\d+', f) and single(f) and (c, True) in closure(frozenset([(f, True)])) and
+                            all(pv not in assigned for pv in prev_vars)):
+                        hoist.append((sm.group(1), v))
+                        elses.append((v, prev))
+                        continue
+                ok = False
+                break
+            if not ok:
+                continue
+            if any(t is None for t, _ in hoist):
+                continue
+            n_stmt = sum(1 for r in region if _GS_ASSIGN.match(lines[r]))
+            if n_stmt >= 8:
+                best = (i + 1, e, c, hoist, elses)
+        if best:
+            edits.append((best[0], best[1], best[2], best[3], best[4], ind))
+            taken_until = best[1]
+    if not edits:
+        return text
+    out = list(lines)
+    for start, end, c, hoist, elses, ind in reversed(edits):
+        names = {v for _, v in hoist}
+        body = []
+        for r in range(start, end + 1):
+            ln = out[r]
+            mm = re.match(r'^([ \t]*)(' + _GS_TYPES + r') (_\d+)( = .*;|;)$', ln)
+            if mm and mm.group(3) in names:
+                if mm.group(4) == ';':
+                    continue  # declared ahead
+                ln = f'{mm.group(1)}{mm.group(3)}{mm.group(4)}'
+            body.append('    ' + ln if ln.strip() else ln)
+        block = [f'{ind}{t} {v};' for t, v in hoist]
+        block.append(f'{ind}if (g_banjoLightBranch == 0u || {c})')
+        block.append(f'{ind}{{')
+        block.extend(body)
+        block.append(f'{ind}}}')
+        if elses:
+            block.append(f'{ind}else')
+            block.append(f'{ind}{{')
+            block.extend(f'{ind}    {v} = {p};' for v, p in elses)
+            block.append(f'{ind}}}')
+        out[start:end + 1] = block
+    text = text[:an.a] + '\n'.join(out) + text[an.b:]
+    return insert_before_main(text, LIGHTBRANCH_DECL)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: nullps — a diagnostic: the listed pixel shaders discard at once (2026-10-20, constant 912)
+
+NULLPS_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_912\n#define SPIRV_CROSS_CONSTANT_ID_912 0u\n#endif\n'
+               'const uint g_banjoNullPs = SPIRV_CROSS_CONSTANT_ID_912;\n')
+_NULLPS_LIST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nullps_shaders.txt')
+
+
+def _nullps_list():
+    try:
+        return {ln.split('#')[0].strip().upper() for ln in open(_NULLPS_LIST_PATH, encoding='utf-8')
+                if ln.split('#')[0].strip()}
+    except OSError:
+        return set()
+
+
+_NULLPS = _nullps_list()
+
+
+def pass_nullps(text, name=None):
+    """Diagnostic (banjo_renut_diag_null_ps, constant 912 = 1): the listed pixel shaders (tools/nullps_shaders.txt, the
+    fur family, which discard already) discard as their first statement, so the console's per-shader GPU profile shows
+    what their draws cost without the pixel work (vertex shading, rasterisation, the pixel launches): the fur's vertex
+    share. 0 (default): the branch folds away, the shader as before. Not a picture to keep (the fur vanishes)."""
+    if name is None or name.upper() not in _NULLPS or 'SPIRV_CROSS_CONSTANT_ID_912' in text or 'discard' not in text:
+        return text
+    m = re.search(r'\nvoid main\(\)\n\{\n', text)
+    if not m:
+        return text
+    text = text[:m.end()] + '    if (g_banjoNullPs != 0u)\n    {\n        discard;\n    }\n' + text[m.end():]
+    return insert_before_main(text, NULLPS_DECL)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: aw4 — a bone row's four address-window words as one 16-byte load (2026-10-20)
+
+AW4_DECL = ('layout(binding = 15, std430) readonly buffer type_ByteAddressBuffer4\n{\n    uvec4 _m0[];\n} '
+            'g_DkAddressWindow4;\n')
+AW4_INDEX_RE = re.compile(r'\(g_UboShared\.v\[35u\]\.x \+ (?:min\(\((_\d+) \+ \(uint\((_\d+)(?: \+ (\d+))?\) \* 4u\)\), '
+                          r'(_\d+)\)|\((_\d+) \+ \(uint\((_\d+)(?: \+ (\d+))?\) \* 4u\)\))\) >> 2u')
+
+
+def pass_aw4(text):
+    """The vertex fetch from memory (g_DkAddressWindow, shader_common.h vfetchMemory) reads a bone row as four words
+    W, W + 1, W + 2, W + 3 (four 32-bit loads and the index adds). Where W is provably a multiple of 4 the row is one
+    uvec4 load of the same binding (a second view, g_DkAddressWindow4) at W >> 2. W = (window offset + slot base +
+    4 * (I + k)) >> 2, and each part is a multiple of 16 bytes: the window offset (SharedConstants.vertex_fetch_data's
+    low byte) and the slot base (vertex_fetch_slots, minus the endian bits) because render/draw.cpp's fetch copies
+    start at 16-byte multiples of 256-byte aligned allocations; 4 * (I + k) because I is `int(floor(x)) * K` with K a
+    multiple of 4 and k one too; the clamp min(..., C) because C is vertex_fetch_bytes - 16 (a multiple of 16). Only
+    rows whose four loads and index definitions are all in one block at the same level (the loads run there anyway)."""
+    span = main_span(text)
+    if not span or 'g_DkAddressWindow._m0[' not in text or 'g_DkAddressWindow4' in text:
+        return text
+    a, b = span
+    body = text[a:b]
+    lines = body.split('\n')
+    defs = {}  # name -> (line index, indentation, expression)
+    for i, ln in enumerate(lines):
+        m = re.match(r'^([ \t]*)(?:uint|int) (_\d+) = (.+);$', ln)
+        if m:
+            defs[m.group(2)] = (i, m.group(1), m.group(3))
+
+    def mult16_int(name):  # I with 4 * I a multiple of 16
+        d = defs.get(name)
+        if not d:
+            return False
+        m = re.fullmatch(r'int\(floor\([^;]*\)\) \* (\d+)', d[2])
+        return bool(m) and int(m.group(1)) % 4 == 0
+
+    def slot_base(name):
+        d = defs.get(name)
+        return bool(d) and re.fullmatch(r'g_UboShared\.v\[\d+u\]\.[xyzw] & 4294967292u', d[2]) is not None
+
+    def clamp_bound(name):
+        d = defs.get(name)
+        return bool(d) and d[2] == 'max(g_UboShared.v[60u].w, 16u) - 16u'
+
+    load_lines = {}
+    for i, ln in enumerate(lines):
+        for v in re.findall(r'g_DkAddressWindow\._m0\[(_\d+)\]', ln):
+            load_lines.setdefault(v, []).append(i)
+    inserts = {}  # line index -> lines to insert after it
+    replace = {}  # word index variable -> 'Q.x'
+    rows = 0
+    for w, (wi, ind, expr) in defs.items():
+        m = AW4_INDEX_RE.fullmatch(expr)
+        if not m or w not in load_lines:
+            continue
+        if m.group(1):
+            base, i_var, k, bound = m.group(1), m.group(2), m.group(3), m.group(4)
+            if not clamp_bound(bound):
+                continue
+        else:
+            base, i_var, k = m.group(5), m.group(6), m.group(7)
+        if not slot_base(base) or not mult16_int(i_var) or (k is not None and int(k) % 4):
+            continue
+        sibs = {}
+        for s, (si, sind, sexpr) in defs.items():
+            mm = re.fullmatch(re.escape(w) + r' \+ ([123])u', sexpr)
+            if mm and sind == ind and s in load_lines:
+                sibs[int(mm.group(1))] = (s, si)
+        if len(sibs) != 3:
+            continue
+        group = [(w, wi)] + [sibs[n] for n in (1, 2, 3)]
+        last = max(i for _, i in group)
+        first_load = min(min(load_lines[v]) for v, _ in group)
+        if first_load <= last:
+            continue
+        # every load at the definitions' level of the same block: no line between leaves the block or nests deeper
+        ok = True
+        end = max(max(load_lines[v]) for v, _ in group)
+        for j in range(wi, end + 1):
+            lj = lines[j]
+            if not lj.strip():
+                continue
+            lind = len(lj) - len(lj.lstrip(' \t'))
+            if lind < len(ind) or (lind > len(ind) and any(j in load_lines[v] for v, _ in group)):
+                ok = False
+                break
+        if not ok:
+            continue
+        q = f'{w}_q'
+        # the row index straight from the byte offset (uam keeps `(x >> 2u) >> 2u` as two shifts)
+        inserts.setdefault(last, []).append(f'{ind}uvec4 {q} = g_DkAddressWindow4._m0[{expr[:-len(" >> 2u")]} >> 4u];')
+        for n, (v, _) in enumerate(group):
+            replace[v] = f'{q}.{"xyzw"[n]}'
+        rows += 1
+    if not rows:
+        return text
+    out = []
+    for i, ln in enumerate(lines):
+        if any(v in replace for v in re.findall(r'g_DkAddressWindow\._m0\[(_\d+)\]', ln)):
+            ln = re.sub(r'g_DkAddressWindow\._m0\[(_\d+)\]',
+                        lambda mm: replace.get(mm.group(1), mm.group(0)), ln)
+        out.append(ln)
+        out.extend(inserts.get(i, []))
+    text = text[:a] + '\n'.join(out) + text[b:]
+    decl = re.search(r'\} g_DkAddressWindow;\n', text)
+    if not decl:
+        return text
+    return text[:decl.end()] + '\n' + AW4_DECL + text[decl.end():]
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: skinonce — a fur mesh skinned once a frame, its shells read the skinned rows (2026-10-20, constant 913, A/B)
+
+# Without the constant (the key off) the shader is its old text, main and all (the same DKSH bytes): DK_SKIN_ONCE 0.
+SKIN_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_913\n#define SPIRV_CROSS_CONSTANT_ID_913 0u\n#define DK_SKIN_ONCE 0\n'
+             '#else\n#define DK_SKIN_ONCE 1\n#endif\n'
+             '#if DK_SKIN_ONCE\nconst uint g_banjoSkinOnce = SPIRV_CROSS_CONSTANT_ID_913;\n'
+             'layout(binding = 13, std430) buffer type_DkSkinCache\n{\n    vec4 _m0[];\n} g_DkSkinCache;\n#endif\n')
+_SKIN_LIST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'skinonce_shaders.txt')
+# The last bone's accumulation of one skinned matrix row: vec4 _R = mix(_P, (<row> * <weights>.wwww) + _P, _C);
+SKIN_ROW_RE = re.compile(r'^    vec4 (_\d+) = mix\((_\d+), \((uintBitsToFloat\(.*\)) \* (in_var_\w+)\.wwww\) \+ \2, (_\d+)\);$',
+                         re.M)
+_IDENT_RE = re.compile(r'\b(_\d+\w*)\b')  # _152, and the aw4 pass's _152_q
+
+
+def _skin_list():
+    try:
+        return {ln.split('#')[0].strip().upper() for ln in open(_SKIN_LIST_PATH, encoding='utf-8')
+                if ln.split('#')[0].strip()}
+    except OSError:
+        return set()
+
+
+_SKIN = _skin_list()
+
+
+def pass_skinonce(text, name=None):
+    """The fur's vertex shaders (tools/skinonce_shaders.txt) skin the same mesh once a shell: 12 or more draws of each
+    part a frame, each loading 12 bone rows and blending them (about 300 of the ~470 instructions). With constant 913
+    = 1 (banjo_deko3d_skin_once; 0, the default, folds the new code away) the three skinned matrix rows come from a
+    storage buffer (binding 13, three vec4 a vertex at gl_VertexID * 3) where the draw's SharedConstants word v[84].z
+    (pad_1352[0]) is 2, and are computed and also written there where it is 1 (the part's first draw of the frame,
+    render/draw.cpp). Everything the rows need and nothing else needs (their backward slice in main) moves into the
+    branch that computes them; the code after them is the same text either way, reading the same values: the rows are
+    the select results the original computes, stored and loaded as they are (bit for bit)."""
+    if name is None or name.upper() not in _SKIN or 'SPIRV_CROSS_CONSTANT_ID_913' in text:
+        return text
+    span = main_span(text)
+    if not span:
+        return text
+    a, b = span
+    body = text[a:b]
+    rows = list(SKIN_ROW_RE.finditer(body))
+    if len(rows) < 3:
+        return text
+    rows = rows[-3:]
+    # three consecutive lines with one condition
+    if rows[0].group(5) != rows[1].group(5) or rows[1].group(5) != rows[2].group(5):
+        return text
+    if body[rows[0].end():rows[1].start()].strip() or body[rows[1].end():rows[2].start()].strip():
+        return text
+    row_vars = [m.group(1) for m in rows]
+    stmts = _statements(body)
+    if stmts is None:
+        return text
+    first_row = next((k for k, (s, e) in enumerate(stmts) if s == rows[0].start() + 4), None)
+    if first_row is None:
+        return text
+    before = stmts[:first_row]
+    after = stmts[first_row + 3:]
+
+    def defs_uses(s):
+        t = body[s[0]:s[1]]
+        m = re.match(r'(?:\w+ )?(_\d+\w*)(?:\.[xyzw]+)?\s*=[^=]', t)
+        uses = set(_IDENT_RE.findall(t))
+        if m and not t.startswith(('if', 'for', 'while', 'do', '{')):
+            d = {m.group(1)}
+            # a whole-variable definition does not read its old value
+            if re.match(r'\w+ _\d+\w*\s*=', t) or re.match(r'_\d+\w*\s*=', t):
+                uses_rhs = set(_IDENT_RE.findall(t[t.index('=') + 1:]))
+                return d, uses_rhs
+            return d, uses
+        m2 = re.match(r'\w+ (_\d+\w*);$', t)
+        if m2:
+            return {m2.group(1)}, set()
+        # a compound statement: every variable it names, both ways
+        return uses, uses
+
+    info = [defs_uses(s) for s in before]
+    row_text = [body[s[0]:s[1]] for s in stmts[first_row:first_row + 3]]
+    need = set()
+    for t in row_text:
+        need |= set(_IDENT_RE.findall(t[t.index('=') + 1:]))
+    in_slice = [False] * len(before)
+    for k in range(len(before) - 1, -1, -1):
+        d, u = info[k]
+        if d & need:
+            in_slice[k] = True
+            need |= u
+    # used outside the slice (by the statements after the rows, or the rest before them): stays where it is
+    outside = set()
+    for s in after:
+        outside |= set(_IDENT_RE.findall(body[s[0]:s[1]]))
+    for k in range(len(before)):
+        if not in_slice[k]:
+            outside |= info[k][1]
+    movable = list(in_slice)
+    changed = True
+    while changed:
+        changed = False
+        for k in range(len(before)):
+            if movable[k] and (info[k][0] & outside):
+                movable[k] = False
+                outside |= info[k][1]
+                changed = True
+    # the rows are read after (that is the point), never written again
+    if not any(movable) or any(re.match(rf'{v}(?:\.[xyzw]+)?\s*=[^=]', body[s[0]:s[1]]) for v in row_vars
+                               for s in after):
+        return text
+    kept = [body[s[0]:s[1]] for k, s in enumerate(before) if not movable[k]]
+    moved = [body[s[0]:s[1]] for k, s in enumerate(before) if movable[k]]
+    # The renderer reuses rows between draws with the same shared constants, vertex data and fetch data
+    # (render/draw.cpp FurSkinLocked): the skinning may read nothing else (not the float constants, where the shell
+    # offset is, nor textures or the instance; gl_VertexID is the same vertex for vertex in the draws that share rows).
+    slice_text = '\n'.join(body[s[0]:s[1]] for k, s in enumerate(before) if in_slice[k]) + '\n'.join(row_text)
+    if re.search(r'g_UboVertex|texture|texelFetch|gl_InstanceID', slice_text):
+        return text
+    # Of the shared constants only the vertex-fetch part, which the renderer's key compares (FurSkinLocked:
+    # booleans v[32-33], fetch data and slots v[35-60], tessellation and bound fetches v[65-81], flt_max v[83].w).
+    for v, c in re.findall(r'g_UboShared\.v\[(\d+)u?\]\.([xyzw])', slice_text):
+        v = int(v)
+        if not (32 <= v <= 33 or 35 <= v <= 60 or 65 <= v <= 81 or (v == 83 and c == 'w')):
+            return text
+    if re.search(r'g_UboShared\.v\[[^\]]*[^\du\]][^\]]*\]', slice_text):  # an indexed read: unknown words
+        return text
+    ind = '        '
+    out = []
+    out += ['    ' + t for t in kept]
+    out.append(f'    vec4 {row_vars[0]};')
+    out.append(f'    vec4 {row_vars[1]};')
+    out.append(f'    vec4 {row_vars[2]};')
+    out.append('    if (g_banjoSkinOnce != 0u && g_UboShared.v[84u].z == 2u)')
+    out.append('    {')
+    out.append(f'{ind}uint dk_skin = uint(gl_VertexID) * 3u;')
+    for i, v in enumerate(row_vars):
+        out.append(f'{ind}{v} = g_DkSkinCache._m0[dk_skin + {i}u];')
+    out.append('    }')
+    out.append('    else')
+    out.append('    {')
+    for t in moved:
+        out += [ind + ln.lstrip(' ') if j == 0 else '    ' + ln for j, ln in enumerate(t.split('\n'))]
+    for t in row_text:
+        out.append(ind + t[len('vec4 '):])
+    out.append(f'{ind}if (g_banjoSkinOnce != 0u && g_UboShared.v[84u].z == 1u)')
+    out.append(f'{ind}{{')
+    out.append(f'{ind}    uint dk_skin = uint(gl_VertexID) * 3u;')
+    for i, v in enumerate(row_vars):
+        out.append(f'{ind}    g_DkSkinCache._m0[dk_skin + {i}u] = {v};')
+    out.append(f'{ind}}}')
+    out.append('    }')
+    out += ['    ' + body[s[0]:s[1]] for s in after]
+    new_body = '\n#if DK_SKIN_ONCE\n' + '\n'.join(out) + '\n#else' + body.rstrip(' ') + '#endif\n'
+    text = text[:a] + new_body + text[b:]
+    # the storage binding: the stages' usage mask (plume binds the slots it names)
+    text = re.sub(r'(// banjo-dk ubo=0x[0-9a-f]+ ssbo=0x)([0-9a-f]+)',
+                  lambda m: m.group(1) + format(int(m.group(2), 16) | (1 << 13), 'x'), text, count=1)
+    return insert_before_main(text, SKIN_DECL)
+
+
 PASSES = [
     ('scale1', pass_scale1),
     ('fragscale', pass_fragscale),
@@ -1104,22 +2165,33 @@ PASSES = [
     ('ifmerge', pass_ifmerge),
     ('dowhile', pass_dowhile),
     ('selsame', pass_selsame),
+    ('deadcomp', pass_deadcomp),
+    ('guardsel', pass_guardsel),
+    ('lightbranch', pass_lightbranch),
+    ('nullps', pass_nullps),
+    ('txq', pass_txq),
+    ('earlyz', pass_earlyz),
+    ('gpr32', pass_gpr32),
+    ('bonesel', pass_bonesel),
+    ('aw4', pass_aw4),
+    ('skinonce', pass_skinonce),
 ]
 DEFAULT = ','.join(name for name, _ in PASSES)
 
 
 # The passes for one stage only.
-STAGE_OF = {'alpha': 'frag', 'alphamask': 'frag', 'earlyhoist': 'frag', 'tess': 'vert', 'vsout': 'vert', 'vszero': 'vert', 'pszero': 'frag'}
+STAGE_OF = {'skinonce': 'vert', 'bonesel': 'vert', 'aw4': 'vert', 'lightbranch': 'frag', 'nullps': 'frag', 'gpr32': 'frag', 'earlyz': 'frag', 'txq': 'frag', 'alpha': 'frag', 'alphamask': 'frag', 'earlyhoist': 'frag', 'tess': 'vert', 'vsout': 'vert', 'vszero': 'vert', 'pszero': 'frag'}
 
 
-def optimise(text, passes=DEFAULT, stage=None):
-    """stage: 'vert' or 'frag' (from the text when not given: a vertex shader writes gl_Position)."""
+def optimise(text, passes=DEFAULT, stage=None, name=None):
+    """stage: 'vert' or 'frag' (from the text when not given: a vertex shader writes gl_Position). name: the shader's
+    hash (the gpr32 pass's list)."""
     names = [p for p in passes.split(',') if p] if isinstance(passes, str) else list(passes)
     if stage is None:
         stage = 'vert' if re.search(r'\bgl_Position\b', text) else 'frag'
-    for name, fn in PASSES:
-        if name in names and STAGE_OF.get(name, stage) == stage:
-            text = fn(text)
+    for pname, fn in PASSES:
+        if pname in names and STAGE_OF.get(pname, stage) == stage:
+            text = fn(text, name) if fn in (pass_gpr32, pass_lightbranch, pass_nullps, pass_skinonce) else fn(text)
     return text
 
 
@@ -1170,7 +2242,7 @@ def main():
         if not re.fullmatch(r'(vs|ps)_[0-9A-F]{16}\.glsl', name):
             continue
         sources[name] = open(os.path.join(a.src, name), encoding='utf-8').read()
-        texts[name] = optimise(sources[name], a.passes, 'frag' if name.startswith('ps_') else 'vert')
+        texts[name] = optimise(sources[name], a.passes, 'frag' if name.startswith('ps_') else 'vert', name[3:19])
     failed = []
     if a.check:
         import concurrent.futures

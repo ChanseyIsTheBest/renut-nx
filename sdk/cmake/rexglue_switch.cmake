@@ -13,7 +13,12 @@ include_guard(GLOBAL)
 
 set(REXGLUE_SWITCH_NVK_SDK "" CACHE PATH
     "portlibs/switch directory of the Mesa Horizon SDK (static NVK driver)")
-if(NOT EXISTS "${REXGLUE_SWITCH_NVK_SDK}/lib/libvulkan.a")
+# banjo-nx (2026-10-20): the Switch build without the Vulkan driver (the user's request: deko3d only). OFF links
+# switch_vulkan_stubs.c instead of NVK: every Vulkan entry point the code references returns "not available"
+# (VK_ERROR_INITIALIZATION_FAILED, NULL), so the Vulkan renderers (banjo-nx's native one, Renut on Vulkan, the
+# emulated Xenos GPU) cannot start and the deko3d path is the only one. ON links NVK as before.
+option(REXGLUE_SWITCH_NVK "Link the static NVK Vulkan driver into Switch builds" OFF)
+if(REXGLUE_SWITCH_NVK AND NOT EXISTS "${REXGLUE_SWITCH_NVK_SDK}/lib/libvulkan.a")
     message(FATAL_ERROR
         "REXGLUE_SWITCH_NVK_SDK must point at <mesa-...-horizon-sdk>/opt/devkitpro/portlibs/switch "
         "(no lib/libvulkan.a under '${REXGLUE_SWITCH_NVK_SDK}')")
@@ -24,6 +29,17 @@ endif()
 # instead; the NVIDIA CUBIN parser that uses libelf never runs on Switch.
 # Listed twice for archive rescanning, as the Mesa config does without
 # LINK_GROUP support.
+if(NOT REXGLUE_SWITCH_NVK AND NOT TARGET rex::nvk)
+    # The stubs go into rexglue_switch_startup below (an OBJECT library linked directly: its objects reach the
+    # executable); here the other libraries NVK's line had.
+    add_library(rexglue_switch_nvk INTERFACE)
+    add_library(rex::nvk ALIAS rexglue_switch_nvk)
+    target_link_directories(rexglue_switch_nvk INTERFACE
+        "${DEVKITPRO}/portlibs/switch/lib"
+        "${DEVKITPRO}/libnx/lib")
+    target_link_libraries(rexglue_switch_nvk INTERFACE zstd z nx stdc++ m)
+    target_link_options(rexglue_switch_nvk INTERFACE -pthread)
+endif()
 if(NOT TARGET rex::nvk)
     add_library(rexglue_switch_nvk INTERFACE)
     add_library(rex::nvk ALIAS rexglue_switch_nvk)
@@ -60,6 +76,9 @@ if(NOT TARGET rexglue_switch_startup)
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_saltynx.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_sysclk.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_apm.cpp")
+    if(NOT REXGLUE_SWITCH_NVK)
+        target_sources(rexglue_switch_startup PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_vulkan_stubs.c")
+    endif()
     # switch_perf.cpp registers every thread (the profiler needs their handles)
     # by wrapping libnx's threadCreate/threadClose, which pthread goes through.
     # It also counts the libnx calls that cost IPC or walk memory (fences,

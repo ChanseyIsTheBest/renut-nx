@@ -28,7 +28,7 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UAM = os.path.join(ROOT, 'out', 'deko3d_tools', 'uam-build', 'uam.exe')
-TAG = b'uam110-sw8-bnx3\0'  # banjo_renut_deko3d.cpp kCacheTag (16 bytes with its terminator)
+TAG = b'uam110-sw8-bnx4\0'  # banjo_renut_deko3d.cpp kCacheTag (16 bytes with its terminator)
 DEFINE_RE = re.compile(r'#define SPIRV_CROSS_CONSTANT_ID_(\d+) (\S+)')
 
 
@@ -114,8 +114,25 @@ LIST_KEY_SIZES = {3: 184, 4: 192}
 LIST_KEY_SIZE = 184
 OFF_BOOL_MASK, OFF_BOOL_VALUES, OFF_BLEND_SKIP, OFF_OUTPUT_TRIM, OFF_ALPHA_FUNC = 108, 140, 172, 176, 180
 OFF_PER_INSTANCE, OFF_RECT_LIST, OFF_POINT_SPRITE = 96, 100, 104
-# Pseudo constants in a pipeline's spec (never a shader's id): a tessellated draw's, one with a geometry shader.
-FLAG_TESS, FLAG_GS = -1, -2
+OFF_DEPTH_CONTROL = 76  # banjo-nx (2026-10-19): RB_DEPTHCONTROL (constant 909, banjo_deko3d_early_z)
+OFF_STENCIL_REF_MASK = 80  # 2026-10-20: ref, read mask, write mask (bits 16-23)
+# Pseudo constants in a pipeline's spec (never a shader's id): a tessellated draw's, one with a geometry shader, and
+# (2026-10-19) whether the draw writes depth or stencil (depth_writes below).
+FLAG_TESS, FLAG_GS, FLAG_DEPTH_WRITES = -1, -2, -3
+
+
+def depth_writes(dc, stencil_ref_mask=None):
+    """render/pipeline.cpp's rule for constant 909 (2026-10-20): the draw writes depth (bit 2), or its stencil test
+    can write (bit 0, a write mask, an op of either face not KEEP: bits 11-19, and 23-31 with bit 7). Without the
+    mask (a variants-log line) a test with any op not KEEP counts as writing."""
+    if dc & 4:
+        return 1
+    if not dc & 1:
+        return 0
+    ops = ((dc >> 11) & 0x1FF) != 0 or (dc & 0x80 and ((dc >> 23) & 0x1FF) != 0)
+    if stencil_ref_mask is not None and not (stencil_ref_mask >> 16) & 0xFF:
+        return 0
+    return 1 if ops else 0
 
 LOC_IN_RE = re.compile(r'^layout\(location = (\d+)\) in ', re.M)
 LOC_OUT_RE = re.compile(r'^layout\(location = (\d+)\) out ', re.M)
@@ -166,6 +183,11 @@ def stage_spec(prefix, spec, vs_text, ps_text, ps_present=True):
         mask = (location_mask(ps_text, LOC_IN_RE) if ps_text is not None else 0) & outs
         if mask != outs:
             out[905] = mask
+    # the pixel shader's 909 (2026-10-19, banjo_deko3d_early_z): depth tested first where the draw writes neither
+    # depth nor stencil (a variants-log line has no flag: the renderer logs 909 itself)
+    if (prefix == 'ps' and ps_text is not None and 'SPIRV_CROSS_CONSTANT_ID_909' in ps_text and
+            FLAG_DEPTH_WRITES in spec and not spec[FLAG_DEPTH_WRITES]):
+        out[909] = 1
     # the pixel shader's 906: its inputs the vertex shader writes as zero (deko3d_glsl_opt.py vszero / pszero)
     if (prefix == 'ps' and not spec.get(FLAG_GS, 0) and vs_text is not None and ps_text is not None and
             'SPIRV_CROSS_CONSTANT_ID_906' in ps_text):
@@ -203,8 +225,10 @@ def read_list(path, blend_skip_on, alpha_guess=ALPHA_GUESS):
         blend_skip, output_trim = struct.unpack_from('<II', data, at + OFF_BLEND_SKIP)
         alpha_func = struct.unpack_from('<I', data, at + OFF_ALPHA_FUNC)[0] if version >= 4 else 0
         per_instance, rect_list, point_sprite = struct.unpack_from('<III', data, at + OFF_PER_INSTANCE)
+        depth_control, stencil_ref_mask = struct.unpack_from('<II', data, at + OFF_DEPTH_CONTROL)
         at += size
-        tail = {FLAG_TESS: per_instance, FLAG_GS: rect_list | point_sprite}
+        tail = {FLAG_TESS: per_instance, FLAG_GS: rect_list | point_sprite,
+                FLAG_DEPTH_WRITES: depth_writes(depth_control, stencil_ref_mask)}
         if blend_skip and blend_skip_on:
             tail[900] = blend_skip
         if output_trim:
@@ -244,6 +268,8 @@ def main():
     ap.add_argument('--blend-skip', action='store_true',
                     help="keep the lists' blend skip (banjo_renut_blend_skip = true); by default it is left out")
     ap.add_argument('--jobs', type=int, default=max(1, (os.cpu_count() or 4) - 2))
+    ap.add_argument('--runtime-log', action='append', default=[],
+                    help="a console's renut log: the run-time variants it names (base size and hash) are added")
     a = ap.parse_args()
 
     glsl_cache = {}
@@ -284,11 +310,28 @@ def main():
                 if k.isdigit() and v.isdigit():
                     spec[int(k)] = int(v) & 0xFFFFFFFF
             spec[FLAG_TESS] = 1  # the log has render/pipeline.cpp's constants (904 among them) as they were
+            # 2026-10-19: the line's depth control (after '|': "depth XXXXXXXX") gives constant 909 for lines written
+            # before the renderer logged it (banjo_deko3d_early_z).
+            if 'depth' in parts:
+                at = parts.index('depth')
+                if at + 1 < len(parts):
+                    try:
+                        spec[FLAG_DEPTH_WRITES] = depth_writes(int(parts[at + 1], 16))
+                    except ValueError:
+                        pass
+            # 2026-10-20: "gs N" (a point sprite or rectangle list pipeline: the geometry shader reads every output,
+            # so no 905 / 906); lines without it are taken as having none.
+            if 'gs' in parts:
+                at = parts.index('gs')
+                if at + 1 < len(parts) and parts[at + 1].isdigit():
+                    spec[FLAG_GS] = int(parts[at + 1])
             pipelines.append(((parts[1], parts[3]), spec))
     if not pipelines:
         sys.exit('deko3d_variant_cache: no pipelines (--list or --variants)')
 
     todo = {}
+
+    names = {}  # 2026-10-20: what each variant is, for a short list of the ones compiled
     seen = set()  # (shader, defines) already hashed
     missing = 0
     lines = len(pipelines)
@@ -309,6 +352,20 @@ def main():
             sspecs = [sspec]
             if prefix == 'ps' and any(cid == 907 for cid, _ in shader[1]):
                 sspecs.append({**sspec, 907: 0})
+            # banjo_deko3d_txq_constants off (constant 908 = 0, 2026-10-19) too, for the pixel shaders that have it
+            if prefix == 'ps' and any(cid == 908 for cid, _ in shader[1]):
+                sspecs += [{**s, 908: 0} for s in list(sspecs)]
+            # banjo_deko3d_gpr32 on (constant 910 = 1, 2026-10-19, an A/B) too, for the pixel shaders that have it
+            if prefix == 'ps' and any(cid == 910 for cid, _ in shader[1]):
+                sspecs += [{**s, 910: 1} for s in list(sspecs) if 908 not in s]
+            # banjo_deko3d_light_branch on (constant 911 = 1, 2026-10-20, an A/B) too, for the pixel shaders that have it;
+            # 2026-10-20 evening: with gpr32 on as well (910 = 1 and 911 = 1: the fur family is on both lists), for the
+            # A/B pack that measures both in one run (banjo_renut_ab_targets "15,16").
+            if prefix == 'ps' and any(cid == 911 for cid, _ in shader[1]):
+                sspecs += [{**s, 911: 1} for s in list(sspecs) if 908 not in s]
+            # banjo_deko3d_skin_once on (constant 913 = 1, 2026-10-20, an A/B) too, for the vertex shaders that have it
+            if prefix == 'vs' and any(cid == 913 for cid, _ in shader[1]):
+                sspecs += [{**s, 913: 1} for s in list(sspecs)]
             for sspec in sspecs:
                 defines = variant_defines(shader[1], sspec)
                 if (prefix, h, defines) in seen:
@@ -321,6 +378,54 @@ def main():
                     key = fnv1a64(variant_text(shader[0], defines).encode('utf-8'))
                 memo_new[mk] = key
                 todo.setdefault(key, (key, stage, lambda g=shader[0], d=defines: variant_text(g, d).encode('utf-8')))
+                names.setdefault(key, f'{name} {defines}')
+    # 2026-10-20: the variants a console compiled in play, from its renut logs ("uam: run-time variant (stage S, N bytes,
+    # base M bytes HASH): defines"): the shader is the GLSL file of M bytes whose FNV-1a 64 is HASH, the variant's
+    # defines the first ascending run of the line's constants (as plume inserted them after the first line).
+    rt_added = rt_unmatched = rt_known = 0
+    if a.runtime_log:
+        by_size = {}
+        for name in os.listdir(a.glsl):
+            if re.fullmatch(r'(vs|ps)_[0-9A-F]{16}\.glsl', name):
+                by_size.setdefault(os.path.getsize(os.path.join(a.glsl, name)), []).append(name)
+        fnv_of = {}
+        rt_re = re.compile(r'run-time variant \(stage (\d+), \d+ bytes, base (\d+) bytes ([0-9a-f]{16})\): (.*)$')
+        for path in a.runtime_log:
+            for line in open(path, encoding='utf-8', errors='replace'):
+                m = rt_re.search(line)
+                if not m:
+                    continue
+                stage, size, want = int(m.group(1)), int(m.group(2)), int(m.group(3), 16)
+                match = None
+                for name in by_size.get(size, []):
+                    if name not in fnv_of:
+                        fnv_of[name] = fnv1a64(open(os.path.join(a.glsl, name), 'rb').read())
+                    if fnv_of[name] == want:
+                        match = name
+                        break
+                if match is None:
+                    rt_unmatched += 1
+                    continue
+                defines, last = '', -1
+                for item in [x.strip() for x in m.group(4).split(';') if x.strip()]:
+                    parts = item.split()
+                    if len(parts) != 2 or not parts[0].isdigit() or int(parts[0]) <= last:
+                        break
+                    last = int(parts[0])
+                    defines += f'#define SPIRV_CROSS_CONSTANT_ID_{parts[0]} {parts[1]}\n'
+                prefix = match[:2]
+                if (prefix, match[3:19], defines) in seen:
+                    rt_known += 1  # the lists made this variant already
+                    continue
+                seen.add((prefix, match[3:19], defines))
+                text = open(os.path.join(a.glsl, match), 'rb').read().decode('utf-8')
+                key = fnv1a64(variant_text(text, defines).encode('utf-8'))
+                todo.setdefault(key, (key, 'vert' if stage == 0 else 'frag',
+                                      lambda g=text, d=defines: variant_text(g, d).encode('utf-8')))
+                names.setdefault(key, f'{match} {defines}')
+                rt_added += 1
+        print(f'deko3d_variant_cache: run-time log variants: {rt_added} added, {rt_known} the lists had already, '
+              f'{rt_unmatched} without their GLSL (another shader package)')
     os.makedirs(os.path.dirname(memo_path), exist_ok=True)
     json.dump(dict(memo, **memo_new), open(memo_path + '.tmp', 'w', encoding='utf-8'))
     os.replace(memo_path + '.tmp', memo_path)
@@ -334,6 +439,9 @@ def main():
     work = [item for key, item in todo.items() if key not in entries]
     print(f'deko3d_variant_cache: {lines} pipelines, {len(todo)} stage variants ({len(work)} to compile, '
           f'{len(todo) - len(work)} in the merged cache), {missing} stages without GLSL')
+    if a.merge and len(work) <= 32:
+        for key, _, _ in work:  # 2026-10-20: the few a merge compiles, by name (what the lists alone did not give)
+            print(f'  to compile: {key:016X} {names.get(key, "?")}')
     failed = 0
     with concurrent.futures.ThreadPoolExecutor(a.jobs) as ex:
         for i, (key, dksh, err) in enumerate(ex.map(compile_one, work)):

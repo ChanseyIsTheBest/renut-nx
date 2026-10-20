@@ -227,6 +227,9 @@ bool BuildTarget(HostSurface &surface, const d3d::SurfaceDesc &desc, uint32_t mi
 
 } // namespace
 
+uint64_t SurfaceEpochLocked() { return g_surface_epoch; }  // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_chain_reuse)
+uint64_t FramebufferEpochLocked() { return g_framebuffer_epoch; }  // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_chain_reuse)
+
 RenderScale ResolutionScale() {
   return g_resolution_scale;
 }

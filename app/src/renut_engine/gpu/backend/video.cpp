@@ -13,6 +13,10 @@
 #include <filesystem>
 #include <system_error>
 #include <vector>
+#include <atomic>
+#include <chrono>  // banjo-nx (2026-10-20): banjo_deko3d_latency_trim
+#include <string>
+#include <fmt/format.h>
 
 #if defined(_WIN32)
 #include <io.h>
@@ -32,6 +36,10 @@
 #include "renut_engine/gpu/backend/video_internal.h"
 #include "renut_engine/gpu/banjo_renut_tuning.h"
 #include "renut_engine/gpu/banjo_renut_record.h"  // banjo-nx (package 28b): banjo_renut_record_worker
+#include <rex/frame_latency.h>  // banjo-nx (2026-10-20): the latency probe's "input -> GPU done"
+#if defined(PLUME_DEKO3D)
+#include <plume_deko3d.h>  // banjo-nx (2026-10-20, banjo_deko3d_latency_trim): fence copies
+#endif
 
 #include "host_shaders/depth_resolve_ms_ps.spirv.h"
 #include "host_shaders/depth_resolve_ps.spirv.h"
@@ -465,6 +473,10 @@ void DrainSlot(VideoState &s, uint32_t slot) {
 namespace {
 
 constexpr uint32_t kKickSubmitDraws = 200;
+constexpr uint32_t kKickListsAFrame = 3;
+// banjo-nx (2026-10-20, banjo_deko3d_eager_kicks): smaller lists, more of them, each submitted at its own kick.
+constexpr uint32_t kEagerKickDraws = 100;
+static_assert(kKickListsAFrame <= VideoState::kKickLists);
 
 class RingCleaner {
 public:
@@ -627,13 +639,125 @@ void EndListTiming(VideoState &s, bool last_in_frame) {
   }
 }
 
+// banjo-nx (2026-10-20, input latency, banjo_deko3d_latency_trim). Where the GPU is the limit, the render thread used to
+// finish recording a frame long before the GPU could start it (the frame waited in the queue behind the one the GPU
+// was running: about the GPU's frame time less the recording time, 30 ms and more in the heaviest scenes), and the game
+// thread, released by the render thread, read its controller that much earlier than it needed to. With the key on,
+// each kick submission signals a fence, and after a frame is submitted and presented the render thread waits until
+// the GPU has finished all but the frame's last part (its last kick list): the next frame is recorded, and the game
+// thread released, only then, while the GPU still has that last part to run. If the GPU then finishes the frame before
+// the next frame sends it any work (it would sit idle), holding back stops for kTrimBackoffFrames frames.
+namespace {
+#if defined(PLUME_DEKO3D)
+struct LatencyTrim {
+  std::unique_ptr<plume::RenderCommandFence> kick_fences[kFramesInFlight][VideoState::kKickLists];
+  uint32_t kick_submits[kFramesInFlight] = {};  // fenced kick submissions of the slot's frame
+  plume::Deko3DFenceCopy last_kick[kFramesInFlight];  // the last of them
+  plume::Deko3DFenceCopy frame_end[kFramesInFlight];  // the slot's frame's final submission
+  bool sent[kFramesInFlight] = {};  // the slot's frame has sent the GPU work
+  bool held_back = false;           // the frame before the open one was held back
+  uint32_t backoff = 0;
+  // The 10 s report's (read by the game thread without the lock).
+  std::atomic<uint64_t> frames{0}, held{0}, held_us{0}, starved{0};
+};
+LatencyTrim g_trim;
+constexpr uint32_t kTrimBackoffFrames = 60;
+#endif
+uint64_t g_presenting_swap = 0;                    // the guest Swap the frame being presented ends
+uint64_t g_slot_swap[kFramesInFlight] = {};        // the guest Swap each slot's frame ends (0: none)
+bool g_gpu_done_noted[kFramesInFlight] = {true, true};
+}  // namespace
+
+// The slot's frame's GPU work is done, the first time that is seen: the latency probe's "input -> GPU done". Seen at
+// the kicks and the presents (a few ms late at most) or at the wait for the slot (exact when the wait blocked).
+void NoteGpuDoneSeenLocked(uint32_t slot, bool waited) {
+  if (g_gpu_done_noted[slot])
+    return;
+#if defined(PLUME_DEKO3D)
+  if (!waited && !plume::Deko3DFenceCopyDone(g_trim.frame_end[slot]))
+    return;
+#else
+  if (!waited)
+    return;
+#endif
+  g_gpu_done_noted[slot] = true;
+  rex::latency::NoteGpuDone(g_slot_swap[slot]);
+}
+
+#if defined(PLUME_DEKO3D)
+// The slot's frame sends the GPU its first work. If the frame before was held back and the GPU has finished it, the GPU
+// sat idle: no holding back for a while.
+void FirstGpuWorkLocked(uint32_t slot) {
+  LatencyTrim &t = g_trim;
+  if (t.sent[slot])
+    return;
+  t.sent[slot] = true;
+  const uint32_t prev = (slot + kFramesInFlight - 1) % kFramesInFlight;
+  if (t.held_back && plume::Deko3DFenceCopyDone(t.frame_end[prev])) {
+    t.starved.fetch_add(1, std::memory_order_relaxed);
+    t.backoff = kTrimBackoffFrames;
+  }
+  t.held_back = false;
+}
+#endif
+
+void LatencyTrimLocked(VideoState &s) {
+#if defined(PLUME_DEKO3D)
+  LatencyTrim &t = g_trim;
+  t.frames.fetch_add(1, std::memory_order_relaxed);
+  const uint32_t prev = (s.frame + kFramesInFlight - 1) % kFramesInFlight;  // the frame just submitted
+  NoteGpuDoneSeenLocked((prev + kFramesInFlight - 1) % kFramesInFlight, false);
+  if (!banjo::renut_gpu::LatencyTrimOn())
+    return;
+  if (t.backoff) {
+    --t.backoff;
+    return;
+  }
+  if (!t.kick_submits[prev])
+    return;  // no kick list in the frame: nothing to wait for short of the whole frame
+  const auto start = std::chrono::steady_clock::now();
+  {
+    render_thread::WaitScope wait;
+    plume::Deko3DFenceCopyWait(t.last_kick[prev], s.device.get());
+  }
+  const uint64_t us = uint64_t(
+      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+  if (us >= 500) {
+    t.held_back = true;
+    t.held.fetch_add(1, std::memory_order_relaxed);
+    t.held_us.fetch_add(us, std::memory_order_relaxed);
+  }
+#else
+  (void)s;
+#endif
+}
+
+std::string LatencyTrimReport() {
+#if defined(PLUME_DEKO3D)
+  LatencyTrim &t = g_trim;
+  if (!banjo::renut_gpu::LatencyTrimOn())
+    return {};
+  const uint64_t frames = t.frames.exchange(0, std::memory_order_relaxed);
+  const uint64_t held = t.held.exchange(0, std::memory_order_relaxed);
+  const uint64_t held_us = t.held_us.exchange(0, std::memory_order_relaxed);
+  const uint64_t starved = t.starved.exchange(0, std::memory_order_relaxed);
+  return fmt::format("latency trim (banjo_deko3d_latency_trim): {} of {} frames held back {:.1f} ms on average; the "
+                     "GPU ran dry after one {} times (held back no more for {} frames each)",
+                     held, frames, held ? double(held_us) / 1000.0 / double(held) : 0.0, starved, kTrimBackoffFrames);
+#else
+  return {};
+#endif
+}
+
 void WaitSlotLocked(VideoState &s, uint32_t slot) {
   if (!s.submitted[slot])
     return;
+  NoteGpuDoneSeenLocked(slot, false);  // banjo-nx (2026-10-20): done already (seen now)
   {
     render_thread::WaitScope wait;
     s.queue->waitForCommandFence(s.fences[slot].get());
   }
+  NoteGpuDoneSeenLocked(slot, true);
   s.submitted[slot] = false;
   CollectGpuTime(s, slot);
   gpu_profile::Collect(s, slot);
@@ -708,11 +832,24 @@ void SubmitAndAdvance(VideoState &s, plume::RenderCommandSemaphore *wait,
                                  signal ? signals : nullptr, signal ? 1 : 0,
                                  s.fences[cur].get());
     s.submitted[cur] = true;
+    // banjo-nx (2026-10-20, input latency): the guest Swap this frame ends, for the probe's "input -> GPU done".
+    g_slot_swap[cur] = g_presenting_swap;
+    g_gpu_done_noted[cur] = g_presenting_swap == 0;
+#if defined(PLUME_DEKO3D)
+    g_trim.frame_end[cur] = plume::Deko3DCopyFence(s.fences[cur].get());
+    FirstGpuWorkLocked(cur);
+#endif
   }
+  g_presenting_swap = 0;
 
   // Record into the other slot next; the GPU keeps working on this one.
   s.frame = (cur + 1) % kFramesInFlight;
   WaitSlotLocked(s, s.frame);
+#if defined(PLUME_DEKO3D)
+  g_trim.kick_submits[s.frame] = 0;  // banjo-nx (2026-10-20, banjo_deko3d_latency_trim): the slot's new frame
+  g_trim.last_kick[s.frame] = {};
+  g_trim.sent[s.frame] = false;
+#endif
   CompleteMemExportsLocked(s.frame);
   s.timed_lists[s.frame] = 0;
   DrainSlot(s, s.frame);
@@ -890,11 +1027,24 @@ void Video::NoteDrawLocked() {
   ++State().list_draws;
 }
 
+void Video::NotePresentingSwap(uint64_t swap) {
+  detail::g_presenting_swap = swap;  // the render thread, right before the present that submits the frame
+}
+
+std::string Video::LatencyTrimReport() {
+  return detail::LatencyTrimReport();  // atomics: no lock (the game thread's report)
+}
+
 void Video::KickLocked() {
   auto &s = State();
   if (!s.list_open || !IsDeko3D())
     return;
   const uint32_t cur = s.frame;
+#if defined(PLUME_DEKO3D)
+  // banjo-nx (2026-10-20): the frame before done? Seen at every kick (package 36i noted it only where a list went out
+  // at the next kick, so with banjo_deko3d_eager_kicks "input -> GPU done" was seen later, not done later).
+  detail::NoteGpuDoneSeenLocked((cur + kFramesInFlight - 1) % kFramesInFlight, false);
+#endif
   // The ring written up to this kick (its fills included) to the cleaner.
   uint64_t ticket = 0;
   if (detail::UseRingCleaner()) {
@@ -909,13 +1059,34 @@ void Video::KickLocked() {
     else
       s.uploads[cur].Publish();
     const plume::RenderCommandList *lists[] = {s.pending_list};
-    s.queue->executeCommandLists(lists, 1, nullptr, 0, nullptr, 0, nullptr);
+    // banjo-nx (2026-10-20, banjo_deko3d_latency_trim): a fence for each kick submission, how far the GPU has got.
+    plume::RenderCommandFence *fence = nullptr;
+#if defined(PLUME_DEKO3D)
+    detail::LatencyTrim &t = detail::g_trim;
+    if (banjo::renut_gpu::LatencyTrimOn() && t.kick_submits[cur] < VideoState::kKickLists) {
+      std::unique_ptr<plume::RenderCommandFence> &f = t.kick_fences[cur][t.kick_submits[cur]];
+      if (!f)
+        f = s.device->createCommandFence();
+      fence = f.get();
+    }
+#endif
+    s.queue->executeCommandLists(lists, 1, nullptr, 0, nullptr, 0, fence);
+#if defined(PLUME_DEKO3D)
+    if (fence) {
+      t.last_kick[cur] = plume::Deko3DCopyFence(fence);
+      ++t.kick_submits[cur];
+    }
+    detail::FirstGpuWorkLocked(cur);
+    detail::NoteGpuDoneSeenLocked((cur + kFramesInFlight - 1) % kFramesInFlight, false);
+#endif
     s.pending_list = nullptr;
     banjo::renut_gpu::CountKickSubmit(0);
   }
   // The open list ends here when it holds enough draws; the frame goes on in a kick list of the slot.
-  if (!banjo::renut_gpu::KickSubmitOn() || s.list_draws < detail::kKickSubmitDraws ||
-      s.kick_lists_used[cur] >= VideoState::kKickLists)
+  const bool eager = banjo::renut_gpu::EagerKicksOn();
+  if (!banjo::renut_gpu::KickSubmitOn() ||
+      s.list_draws < (eager ? detail::kEagerKickDraws : detail::kKickSubmitDraws) ||
+      s.kick_lists_used[cur] >= (eager ? VideoState::kKickLists : detail::kKickListsAFrame))
     return;
   std::unique_ptr<plume::RenderCommandList> &next = s.kick_lists[cur][s.kick_lists_used[cur]];
   if (!next) {
@@ -936,6 +1107,36 @@ void Video::KickLocked() {
   s.list_draws = 0;
   ++s.list_generation;
   detail::BeginListTiming(s);
+#if defined(PLUME_DEKO3D)
+  // banjo-nx (2026-10-20, banjo_deko3d_latency_trim): the frame's first list goes to the GPU at its own kick, not at
+  // the next one (its memory cleaned first: the cleaner is waited for): after a frame held back, the GPU then has the
+  // next frame's first part as soon as it is recorded.
+  // banjo-nx (2026-10-20, banjo_deko3d_eager_kicks): every list at its own kick, so the GPU works while the render
+  // thread is still replaying the frame.
+  if (((banjo::renut_gpu::LatencyTrimOn() && !detail::g_trim.sent[cur]) || eager) && s.pending_list) {
+    if (detail::UseRingCleaner())
+      detail::RingCleaner::Instance().Wait(s.pending_ticket);
+    else
+      s.uploads[cur].Publish();
+    detail::LatencyTrim &t = detail::g_trim;
+    plume::RenderCommandFence *fence = nullptr;
+    if (t.kick_submits[cur] < VideoState::kKickLists) {
+      std::unique_ptr<plume::RenderCommandFence> &f = t.kick_fences[cur][t.kick_submits[cur]];
+      if (!f)
+        f = s.device->createCommandFence();
+      fence = f.get();
+    }
+    const plume::RenderCommandList *lists[] = {s.pending_list};
+    s.queue->executeCommandLists(lists, 1, nullptr, 0, nullptr, 0, fence);
+    if (fence) {
+      t.last_kick[cur] = plume::Deko3DCopyFence(fence);
+      ++t.kick_submits[cur];
+    }
+    detail::FirstGpuWorkLocked(cur);
+    s.pending_list = nullptr;
+    banjo::renut_gpu::CountKickSubmit(0);
+  }
+#endif
 }
 
 plume::RenderCommandList *Video::CommandListLocked() {

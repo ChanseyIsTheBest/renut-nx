@@ -1,12 +1,11 @@
-banjo-nx Switch test build (two renderers: banjo-nx native, Renut)
-===================================================================
+banjo-nx Switch test build (Renut's renderer on deko3d; no Vulkan driver since package 36m)
+=========================================================================================
 
 SD card layout:
   sdmc:/switch/banjo-nx/banjo-nx.nro
   sdmc:/switch/banjo-nx/renut.toml
-  sdmc:/switch/banjo-nx/banjo_shaders.mesp        <- shader library of the native renderer (NEW: replace the old one)
-  sdmc:/switch/banjo-nx/banjo_shaders.mesp.idx
-  sdmc:/switch/banjo-nx/cache/masseffect_native_pipelines.bin   <- first-boot prewarm list of the native renderer
+  (banjo_shaders.mesp, banjo_shaders.mesp.idx and cache/masseffect_native_pipelines.bin were the native
+   renderer's; since 36m it cannot run, so they are not needed any more. Leaving them there is harmless.)
   sdmc:/switch/banjo-nx/pipeline_list.bin         <- NEW (package 26): the pipelines Renut's renderer builds ahead
   sdmc:/switch/banjo-nx/deko3d_shaders.bin        <- NEW (package 29, replaced in 33): compiled shaders of the deko3d
                                                      renderer (next to the zip in the package folder, not inside it:
@@ -17,9 +16,393 @@ SD card layout:
 Launch with a title takeover (hold R while starting a game, then open the Homebrew Menu), or a forwarder
 with a 39-bit address space. From the Album it will not have enough memory.
 
-Latest changes (this build, 2026-10-19 night, package 35b: the fur fix, the limiter on the display's refresh)
--------------------------------------------------------------------------------------------------------------
-  COPY: banjo-nx.nro (NRO_SIZE bytes, md5 NRO_MD5...), renut.toml and renut_auto.toml (CHANGED: 3 new keys), the
+Latest changes (this build, 2026-10-20 evening, package 36s: the late input's GPU queue part removed)
+-----------------------------------------------------------------------------------------------
+  COPY: banjo-nx.nro (NRO_SIZE bytes, md5 NRO_MD5...), renut.toml, renut_auto.toml and the configs folder
+  (delete the old configs folder first: five configs are gone). deko3d_shaders.bin is 36q's/36r's (cache 56).
+  Your call: banjo_late_input_gpu and banjo_late_input_gpu_margin_us are removed from the code, the tomls and the
+  configs (banjo_late_input_gpu_on/_ab/_margin_4/_8/_10). It was off by default in 36r already, so 36s runs like
+  36r. What your runs showed (controller read -> GPU done, 36k/36r without it, 36m/36q with it): nothing at the
+  30 fps cap; in scenes just able to hold 30 about 6 fps lost; a lower lag only where the frame rate was already
+  far below 30. Plain late input (banjo_late_input) stays on. docs/deko3d-renderer.md section 25.
+  Runs: as 36r (renut_auto.toml, then configs/banjo_gpu_ab_pack.toml on the scripted route).
+
+Package 36r (2026-10-20 evening: the frame rate 36q lost, back)
+---------------------------------------------------------------
+  (36r files: banjo-nx.nro 74,545,349 bytes, md5 c8373cf39bdf...; deko3d_shaders.bin cache 56.)
+  Your 36q run, against 36j/36k on the same route:
+  1. The late input's GPU queue part (banjo_late_input_gpu, since 36l) is OFF again. In the scene where 36j/36k ran
+     29.6-29.9 fps with 33.4 ms of GPU a frame, 36q ran 24.3 fps with the same GPU work: the controller read was
+     held back 29 ms a frame (36j/36k: 8-11 ms), so each frame started too late and the GPU idled about 20 % (what
+     you saw: not 30 fps, the GPU not busy, the CPU not either). It did nothing measurable at 30 fps.
+     configs/banjo_late_input_gpu_on.toml puts it back. Plain late input stays on.
+  2. Two of SA2's render-thread items are OFF: they cost Banjo's render thread more than they saved (your 36q
+     profile: render thread 0.5-1.5 ms a frame slower than 36m; DrawStateLocked 9.5 -> 12.6 % and the shared
+     constants' push 2.7 -> 4.9 % of it). banjo_renut_chain_reuse (with the replayed draws) and
+     banjo_renut_inline_line_compare; configs/banjo_renut_chain_reuse_on.toml and _inline_compare_on.toml for A/Bs.
+     The rest of SA2's work stays on (the game thread's device copies did get cheaper).
+  Expected: 36j/36k's frame rate in the GPU-bound scenes, the render thread at 36m's or a little under.
+  Runs: renut_auto.toml, then configs/banjo_gpu_ab_pack.toml (36q's notes below) on the scripted route.
+
+Package 36q (2026-10-20 evening: the GPU A/B pack, on top of 36p)
+-----------------------------------------------------------------
+  (36q files: banjo-nx.nro 74,545,349 bytes, md5 38d7a82d7c97...; deko3d_shaders.bin cache 56.)
+  0. IMPORTANT, two fixes: 36o and 36p can hang. In the emulator two of today's CPU items hung the game:
+     - SA2's core layout (banjo_renut_core_layout: the game's drawing thread alone on core 0) hung the first frame in
+       4 of 12 runs with it on (36o and 36p have it on);
+     - the Futari port's Begin*Vertices change in 36p (banjo_renut_deferred_chain) hung it within the first minute:
+       N&B draws on two Direct3D devices and that change only works with one, so a draw could get the other's state.
+     Both are off in 36q (0 hangs in the runs since). The rest of SA2's CPU work stays on. If you want to try the core
+     layout on the console anyway: configs/banjo_renut_core_layout_on.toml.
+  The GPU work of this evening: the heaviest scene's shaders were read instruction by instruction and three
+  bigger ideas were tried in the emulator; none of them pays in N&B (docs/deko3d-renderer.md section 24 says why),
+  so they are not in the build. What is in it:
+  1. One run measures two GPU options that were waiting for the console: configs/banjo_gpu_ab_pack.toml turns on
+     banjo_deko3d_light_branch and banjo_deko3d_gpr32 (the fur family with 32 registers: more threads in flight
+     for some extra memory traffic) and switches each off in turn every 4 s. Its log has a "[renut A/B]" line
+     for each (target 15 light branch, 16 gpr32): GPU ms a frame on and off. Run it on the scripted route like
+     renut_auto.toml (it has the same route); the heavy scenes are where it counts. The new cache 56 has the
+     shaders with both on, so nothing compiles during the run.
+  2. A question for you (not done, it changes pixels): the dialogue portrait's box is drawn with the game's 4x
+     MSAA (disable_msaa only covers the main scene). Without it, 5 resolves a frame and their full GPU stalls go,
+     and the portrait's fur is shaded once a pixel instead of up to four times. Say if you want a key for it.
+  Runs: renut_auto.toml, then configs/banjo_gpu_ab_pack.toml, on the scripted route.
+
+Package 36p (2026-10-20 afternoon: 36o plus Begin*Vertices draws in the chain)
+------------------------------------------------------------------------------
+  (36p files: banjo-nx.nro 74,537,157 bytes, md5 ef22c358aad7...; deko3d_shaders.bin was 36j's.)
+  1. From the Futari port (your request there): the draws whose vertices the game writes after the call
+     (Begin*Vertices) keep only what changed in the device too, instead of a whole 12.7 KB copy each. About 1,500
+     per 10 s in N&B's play, so a small part; the emulator's check: 0 of them whole copies, every draw compared,
+     0 differences. configs/banjo_renut_sa2_cpu_off.toml switches it off with the rest.
+  Runs: renut_auto.toml and configs/banjo_renut_sa2_cpu_off.toml on the scripted route.
+
+Package 36o (2026-10-20 afternoon: SA2's Renut CPU work, on top of 36n)
+------------------------------------------------------------------------
+  (36o files: banjo-nx.nro 74,528,965 bytes, md5 512fdcaf3706...; superseded by 36p, test 36p instead.)
+  Your request: the SA2 port's work on Renut's CPU side, taken into banjo-nx (docs/renut-cpu-work-from-sa2.md).
+  On SA2's console it took its render thread from 17.6 to 11.1 ms a frame and its game thread from 19.2 to 15.5.
+  Same pictures: every item does the same work fewer times. Checked in the emulator with both verify keys:
+  thousands of draws compared, 0 differences (one race found and fixed).
+  1. The render thread's queue: woken every 16 draws instead of every draw, done signals only when someone waits,
+     one clock read per batch, the next draw's data fetched ahead.
+  2. A draw takes the previous draw's pipeline, targets, viewport, texture words and framebuffer when nothing they
+     come from changed. SA2 did this for its immediate draws; banjo-nx also does it for the draws replayed from the
+     game's recorded command buffers, which are most of N&B's draws in play.
+  3. The shared constants compared with NEON 64 bytes at a time; fewer of them cleared and re-sent.
+  4. Immediate draws keep only what changed in the device (about 5 KB instead of 12.7 KB).
+  5. The game's drawing thread alone on core 0, the other game threads on cores 1-2 (they used to share cores
+     in 10 ms slices). Its log line: "[renut] banjo_renut_core_layout: ...".
+  What to look at: the "[renut] ... render thread busy X ms a frame" figure against 36n's (your 36m run: about
+  17.5 ms at the 30 fps cap, 22.8 ms in the heavy scenes) and "input -> swap" in the [latency] lines.
+  configs/banjo_renut_sa2_cpu_off.toml switches all of it off (the A/B); _chain_reuse_replays_off.toml and
+  _core_layout_off.toml switch off one part; banjo_renut_cpu_verify.toml checks every draw (slower, for tests).
+  Runs: renut_auto.toml and configs/banjo_renut_sa2_cpu_off.toml on the scripted route.
+
+Package 36n (2026-10-20 afternoon: late input margin 6 ms, stacked textures, on top of 36m)
+-------------------------------------------------------------------------------------------
+  (36n files: banjo-nx.nro 74,455,237 bytes, md5 4ec415aa8393...; deko3d_shaders.bin was 36j's.)
+  Your 36m run (same route as 36j, which had banjo_late_input_gpu off):
+    at the 30 fps cap: controller -> screen 56 ms either way (the GPU is never behind there, so there is nothing to
+    take); in the GPU-bound scenes: 113 -> 91 ms, but about 1 fps lower (22.1 -> 21.1; the GPU idle 4 % more).
+  1. Your call: banjo_late_input_gpu_margin_us = 6000 (new key; 36m used 4000). The controller read is held back
+     2 ms less, so the GPU runs dry less often: expected most of the lost frame back for a few ms of the 21 ms
+     gain. configs/banjo_late_input_gpu_margin_4.toml is 36m's, _8.toml and _10.toml give more frame rate back.
+  2. From the SASRT port: a stacked texture (several layers sampled as one) was seen by deko3d as its first layer
+     only; plume's Vulkan side always read every layer. Fixed. The log says "[textures] first stacked (2D array)
+     texture" / "first volume (3D) texture" if the game uses either (if neither line appears, nothing changes).
+  Runs: renut_auto.toml on the scripted route.
+
+Package 36m (2026-10-20 afternoon: no Vulkan driver, on top of 36l)
+-------------------------------------------------------------------
+  (36m files: banjo-nx.nro 74,447,045 bytes, md5 417e4bd713b2...; deko3d_shaders.bin was 36j's.)
+  1. Your request: Mesa's Vulkan driver (NVK) is not linked into the NRO any more: 14.4 MB smaller (88.9 ->
+     74.4 MB), with nothing of it left inside (checked symbol by symbol). The Vulkan entry points the code
+     still names answer "no driver". Same pictures and speed: the deko3d renderer never used it.
+  2. The NRO now runs only Renut's renderer on deko3d. A config asking for banjo-nx's native renderer or for
+     Renut on Vulkan boots deko3d anyway and says so in the log ("needs Vulkan, which this build does not
+     have"). Those 59 configs (banjo_renderer_native, banjo_renut_vulkan, the native renderer's A/B ones) and
+     renut_normal.toml, banjo_diagnostics.toml and banjo_fragments.toml are left out of the package. Old copies
+     on the SD card do no harm, but they would only run deko3d now.
+  Runs: renut_auto.toml on the scripted route as before (36l's late input check still applies).
+
+Package 36l (2026-10-20 afternoon: late input from the GPU queue, on top of 36k)
+--------------------------------------------------------------------------------
+  (36l files: banjo-nx.nro 88,881,349 bytes, md5 0bf92a198198...; deko3d_shaders.bin was 36j's.)
+  Your 36k run: the latency trim held back 91 frames and every one of them ran the GPU dry, so it backed off and
+  changed nothing (with eager kicks a frame's last part is a small list: holding until only it is left is too
+  late). It is off again. At 30 fps a frame's first GPU work waits about 14 ms for the GPU to finish the frame
+  before; the controller could be read that much later without the GPU starting the frame any later.
+  1. banjo_late_input_gpu (ON): late input also measures that wait (each frame's first GPU work against the
+     GPU finishing the frame before) and delays the controller read by it, less 4 ms. It corrects itself: a
+     later read leaves less wait to measure. Expected: "input -> GPU done" at 30 fps about 10 ms lower; the
+     [latency] line's late input part says "... ms of it from the GPU queue". Same pictures, same frame rate.
+     configs/banjo_late_input_gpu_off.toml is the old way; configs/banjo_late_input_gpu_ab.toml switches it
+     every 4 s (the "[renut A/B] banjo_late_input_gpu" line).
+  Runs: renut_auto.toml and configs/banjo_late_input_gpu_off.toml on the scripted route.
+
+Package 36k (2026-10-20 afternoon: the latency trim on, on top of 36j)
+----------------------------------------------------------------------
+  COPY: renut.toml, renut_auto.toml and the configs folder. The NRO and deko3d_shaders.bin are 36j's (the same
+  files: banjo-nx.nro 88,881,349 bytes, md5 efddb226b227...).
+  Your 36j run: display sync runs on the console now (refresh 16.666 ms; its automatic phase stays at 0, a few late
+  frames every 10 s step it back), no shader compiled at all (the new cache covers your route), the same speed.
+  At 30 fps "input -> GPU done" is the same as 36g's (52-55 ms in play): the GPU, about 80 % busy, is still
+  finishing the frame before when a frame's work arrives, so sending it sooner (eager kicks) does not finish it
+  sooner. The controller is read about a frame before the GPU gets to that frame.
+  1. banjo_deko3d_latency_trim is ON (package 36e, tested in the emulator): after each present the render thread
+     holds the next frame until the GPU has only the current frame's last part left, so the game's controller read
+     (late input) comes that much later and the frame waits less in the GPU's queue. If the GPU ever runs dry
+     because of it, it stops holding for 60 frames by itself. Expected: "input -> GPU done" down by up to a frame
+     where the GPU is the busier part; the [latency] "latency trim" line counts the frames held and how long.
+     configs/banjo_deko3d_latency_trim_off.toml is the old way. Eager kicks and display sync stay on.
+  Runs: renut_auto.toml (everything on) and configs/banjo_deko3d_latency_trim_off.toml on the scripted route.
+
+Package 36j (2026-10-20 midday: display sync made to start, a probe fix, on top of 36i)
+---------------------------------------------------------------------------------------
+  COPY: banjo-nx.nro (88,881,349 bytes, md5 efddb226b227...) and the NEW deko3d_shaders.bin from the package folder. The
+  tomls and configs are 36i's (display sync, eager kicks and skin once on).
+  Your 36i runs: the same speed as 36g (dialogue 42-44 ms of GPU, 22-23 fps; the heaviest 57 ms). Three findings:
+  1. Display sync never ran: "[display] cannot open the display". The game's window (libnx's default window, which
+     the deko3d swapchain uses) has the display open already and the console refuses a second open. The NRO now
+     makes that window itself (the same system calls in the same order) and display sync uses its display.
+     NOT yet run in the emulator (it was busy): this changes how the window is made at start-up; if the game does
+     not start, put 36i's NRO back and tell me. When it works the log says "[display] the frame limiter follows the
+     display's refresh" and every 10 s a [display] line (present -> display, input -> display).
+  2. Eager kicks looked a little slower (input -> GPU done +1.5..+4.8 ms) but that was the probe: it noticed the
+     GPU finishing only at some kicks, and with eager kicks fewer of those were left. It now looks at every kick in
+     both modes, so the A/B compares like with like.
+  3. The 13 shaders your first run compiled are in the new deko3d_shaders.bin (your log named them).
+  Runs: renut_auto.toml (everything on), configs/banjo_display_sync_off.toml, configs/banjo_deko3d_eager_kicks_off.toml.
+
+Package 36i (2026-10-20 midday: input lag at the frame cap, on top of 36h)
+-------------------------------------------------------------------------
+  COPY: banjo-nx.nro (88,881,349 bytes, md5 8a54ce27c322...), renut.toml and renut_auto.toml (CHANGED: 1 new key ON,
+  banjo_display_sync ON) and the configs folder (regenerated: 4 new). deko3d_shaders.bin is 36g's (the same file).
+  1. Your question: less input lag when the game already hits 30 fps. Your 36g logs at 30 fps: controller read ->
+     the game's frame done 12.5 ms, -> the render thread done replaying it 14 ms more, -> the GPU done 28 ms more
+     (54.6 ms in all), then the wait for the display's next refresh. The GPU gets most of the frame only at the
+     end: a finished part goes to it at the game's next kick, not its own. banjo_deko3d_eager_kicks sends the frame
+     in more, smaller parts (100 draws, up to 6 a frame), each at its own kick, so the GPU works while the render
+     thread is still replaying. Expected 8-14 ms less controller -> frame done at 30 fps; the same pictures. ON by
+     default (your request). configs/banjo_deko3d_eager_kicks_off.toml is the old way (its [latency] line's
+     "input -> GPU done" against renut_auto.toml's, on the scripted route, shows what it saves);
+     configs/banjo_deko3d_eager_kicks_ab.toml switches it every 4 s (its "[renut A/B]" line: fps and render thread
+     time with and without it).
+  2. For the wait for the display's refresh (about 8 ms on average): banjo_display_sync (package 35b) releases
+     frames on the display's refresh with a measured phase. ON in these tomls at your request: only the emulator
+     choked on it (if the console stalls or hangs, use configs/banjo_display_sync_off.toml and tell me). Its
+     [display] line every 10 s gives present -> display and input -> display.
+  3. Every millisecond of GPU or render-thread time is also a millisecond of lag at 30 fps (the three steps run
+     one after another), so the GPU A/Bs of 36g help here too.
+  4. The log now warns if a texture uses an "exponent adjust" (another port found Renut ignores it; Banjo's
+     emulator route showed none).
+  Runs: (a) renut_auto.toml (eager kicks and display sync on), (i) configs/banjo_deko3d_eager_kicks_off.toml, (j)
+  configs/banjo_display_sync_off.toml, each on the scripted route; the logs as usual.
+
+Package 36h (2026-10-20 midday: the same pictures and speed as 36g, better logs)
+--------------------------------------------------------------------------------
+  COPY: banjo-nx.nro (88,873,157 bytes, md5 83cdfcd83b4c...). Everything else is 36g's (tomls, configs,
+  deko3d_shaders.bin): if you have 36g on the card, only the NRO changes.
+  Your 36g runs (thank you): against package 35 on the same route the dialogue scene went from 52.7-55.0 to
+  42.4-43.9 ms of GPU a frame (18-19 -> 22-23 fps) and the heaviest moment from 67.3 to 55.8 ms (14.8 -> 17.7
+  fps); the dialogue portrait's fur costs 40-59 us a draw instead of 93. The first run compiled 13 shaders the
+  cache lacked (kept on the card: the second compiled none).
+  1. The log names each shader compiled in play (its size and a hash), so your logs alone let me add them to the
+     next cache (before, that needed pipeline_list.bin).
+  2. The "[renut] skin once" line counts the fur and other skinned draws apart. Skin once for the shadow maps was
+     tried in the emulator and left out (most shadow draws had nothing to reuse).
+  3. The package folder keeps the build's symbol file (renut_<md5>.elf, not in the zip), so the CPU profile in
+     logs/rex can be named function by function.
+  Runs: the A/Bs if you have time, each on the scripted route (renut_auto.toml with the config's keys, or the
+  config itself): configs/banjo_deko3d_skin_once_ab.toml, configs/banjo_deko3d_light_branch_ab.toml,
+  configs/banjo_deko3d_gpr32_ab.toml. Their "[renut A/B]" lines give each one's GPU time with and without it.
+
+Package 36g (2026-10-20 late morning: the fur skinned once a frame, on top of 36f)
+---------------------------------------------------------------------------------
+  COPY: banjo-nx.nro (88,873,157 bytes, md5 3e2ed7be469c...), renut.toml and renut_auto.toml (CHANGED: 1 new key, ON),
+  the configs folder (regenerated: 3 new) and the NEW deko3d_shaders.bin from the package folder (the four fur
+  vertex shaders changed; everything else is 36f's cache). Everything in 36f is in 36g: if you have time for one
+  package, run 36g.
+  1. Exact, GPU (on by default, your choice): Banjo's fur draws every body part once a shell, shell by shell, and every
+     one of those draws skins the same vertices again (12 bone rows loaded and blended a vertex, about half of the
+     fur vertex shader). With banjo_deko3d_skin_once on, a part's first draw of the frame skins and writes each
+     vertex's three skinned rows to a buffer, and the part's other shells read them there: their vertex shader
+     475 -> 231 instructions and 50 -> 30 registers (the other three fur shaders alike). A shell reads the rows only
+     when everything the skinning reads is the same as for the draw that wrote them (vertex and index data, bone
+     data, constants); otherwise it skins as before. The same pixels: the rows are stored and read as the exact
+     bits the writing draw computed. Checked by running the compiled shaders (old, writing, reading) on random
+     inputs: every output equal, bit for bit, in all four shaders; a deliberately broken copy is caught.
+     Your package-35 profile: a fur draw into the 96x96 portrait costs ~93 us of which the pixels are perhaps
+     30-50; if the rest is vertex work, the fur's ~110 draws a frame spend ~4 ms on it and this saves 2-3 ms of
+     the heaviest frames. configs/banjo_deko3d_skin_once_off.toml is the old way; configs/banjo_deko3d_skin_once_ab.toml switches it off and on every 4 s
+     (the "[renut A/B] banjo_deko3d_skin_once (target 17)" line every 10 s), to measure what it saves. Its log line "[renut] skin once ...: W ... wrote their rows, R read them, P skinned as before"
+     should show R about 10-20 times W.
+  Runs: as 36f's (a) renut_auto.toml first (skin once on), then (g) configs/banjo_deko3d_skin_once_ab.toml on the
+  scripted route (renut_auto.toml with banjo_renut_ab_target = 17 and renut_gpu_profile = 10.0 is the same thing for
+  the scripted route). tools/summarise_console_log.py reads all of it from the logs.
+
+Package 36f (2026-10-20 morning: no shader compiles in play, on top of 36e)
+---------------------------------------------------------------------------
+  COPY: banjo-nx.nro (88,803,525 bytes, md5 d25c70dca105...) and the NEW deko3d_shaders.bin from the package folder
+  (deko3d_shaders_f447.bin is 36d's). The tomls and configs are 36e's.
+  Your question from last night, whether all the shaders can be compiled ahead so no thread compiles them in play:
+  they are, except for what the cache does not know yet, and tonight's emulator runs showed why the same few (4-7)
+  were compiled again at every start:
+  1. What the console compiles and learns in a session (shaders into deko3d_shaders.bin, pipelines into
+     pipeline_list.bin) was written but not committed to the card: closing the game with HOME lost it, so the next
+     start compiled the same shaders again. Both files are now committed (shaders at each compile, the pipeline list
+     once a second).
+  2. Old pipeline list records from before package 30 made the renderer build three pipelines with a setting no
+     longer used, compiling their shaders at every boot for nothing. Loaded records now follow the current settings.
+  3. The shaders the game asked for that the cache lacked (new combinations of the game's shader switches) are in
+     the new deko3d_shaders.bin.
+  The log names every shader compiled in play: "[deko3d] uam: run-time variant (stage ..., ... bytes): ...". On the
+  second run of the scripted route that should say nothing; send the logs with pipeline_list.bin as usual and the
+  next cache covers whatever your console found.
+
+Package 36e (2026-10-20 morning: input lag, a compiler fix, on top of 36d)
+--------------------------------------------------------------------------
+  COPY: banjo-nx.nro (88,803,525 bytes, md5 4b58b30807a3...), renut.toml and renut_auto.toml (CHANGED: 2 new keys, both
+  off) and the configs folder (regenerated: 2 new). deko3d_shaders.bin and deko3d_shaders_f447.bin are 36d's (the same files: keep them if you copied 36d; the compiler fix changes none of Banjo's cached shaders, checked byte for byte).
+  Run 36e rather than 36d: 36d's shader compiler can crash on a skinned vertex shader whose bone row has an unused
+  middle word (found by another port; none of Banjo's cached shaders has one, but the console compiles a few
+  variants of its own on a first run).
+  1. Input lag without vsync (off; configs/banjo_deko3d_latency_trim_on.toml): where the GPU is the limit (the
+     heavy scenes), a finished frame used to wait in the GPU's queue for most of a GPU frame (your package 35 logs:
+     swap -> present 66-95 ms at 18 fps), and the game had read your controller that much earlier than needed. On:
+     after each frame the renderer waits until the GPU has only that frame's last part left before it records the
+     next one and lets the game start it, so the controller is read later; the GPU still has work queued. If the
+     GPU ever runs dry because of it, it stops for 60 frames. Expected: about 30-40 ms less lag in the heaviest
+     scenes, nothing in the 30 fps ones. The [latency] line now ends with "input -> GPU done" (the earliest the
+     screen can show the frame), and a "latency trim" line says how often it held back and whether the GPU ran
+     dry. Please run it on the scripted route and send the log: its [latency] and fps lines against run (a)'s.
+  2. NOT exact, your call (off): configs/banjo_renut_portrait_fur_shells_3.toml draws 7 of the 21 fur shells in
+     the 96x96 dialogue portrait only (~2.5 ms of the heaviest frames for a few thousand pixels).
+  Runs: as 36d's, plus (h) configs/banjo_deko3d_latency_trim_on.toml on the scripted route.
+
+Package 36d (2026-10-20 morning: 128-bit bone rows, on top of 36c)
+-----------------------------------------------------------------
+  COPY: banjo-nx.nro (88,787,141 bytes, md5 f9e885bf4813...), renut.toml and renut_auto.toml (CHANGED: 1 new key, on), the
+  configs folder (regenerated: 1 new) and BOTH caches from the package folder: the NEW deko3d_shaders.bin (every
+  skinned vertex shader changed; the old one is refused as another compiler's and everything would compile on the
+  console) and deko3d_shaders_f447.bin (only for the off config). Run 36d rather than 36c: it also fixes a crash
+  in the profiler's stack sampler (on in every profiling config) that another port hit in the same code.
+  1. Exact, GPU: your package-35 profile shows the fur and shadow-map vertex shaders bound by memory, not by
+     arithmetic: the fur drawn into the 96x96 dialogue portrait costs 1.88 ms for 21 draws (89 us each, almost no
+     pixels), and the two shadow-map passes 2.1 ms with no pixel shader. Each skinned vertex reads its bone rows
+     as 48 separate 32-bit loads; the shader compiler now reads each row with one 128-bit load: 12 loads instead of
+     48 in the fur vertex shader (596 -> 560 instructions, 2 more registers), and the same in every skinned vertex
+     shader (the characters, and their copies in the shadow maps). The same words are read: every shader without
+     bone rows compiles byte for byte as before. Estimated 1-2 ms off the heaviest frames, but not certain: the wider
+     loads cost about 2 registers in most skinned shaders (the fur's 48 -> 50 means fewer of them resident at once),
+     so please run (g) below: its GPU lines against run (a)'s decide whether this stays on.
+     configs/banjo_deko3d_uam_wide_rows_off.toml is the A/B (the 32-bit loads, with deko3d_shaders_f447.bin).
+  Runs: as 36c's, plus (g) configs/banjo_deko3d_uam_wide_rows_off.toml on the scripted route (its GPU lines
+  against run (a)'s).
+
+Package 36c (2026-10-20 morning: the yellow flash, on top of 36b)
+----------------------------------------------------------------
+  COPY: banjo-nx.nro (88,787,141 bytes, md5 47cd06522220...), renut.toml and renut_auto.toml (CHANGED: 2 new keys) and
+  the configs folder (regenerated: 4 new). deko3d_shaders.bin is 36b's (the same file: keep it if you copied 36b).
+  Everything in 36b and 36 below is in 36c: if you have time for one package, run 36c.
+  1. The colour flash, a second cause (caught in the emulator with RenderDoc): a whole frame washed yellow. The bloom
+     chain read one of its 80x45 levels through the swizzle 1,1,0,0 (solid yellow) instead of RGBA, because the
+     renderer took the swizzle from the texture's header in game memory, a temporary the game had already
+     rewritten for its next pass, not from the copy the GPU uses (the device's fetch constant). Now a header that
+     differs from the device's copy in anything SetTexture copies unchanged (swizzle, signs, pitch, tiling, number
+     format, mip address) is treated as stale and the device's copy is used. In the emulator the header's yellow
+     swizzle showed up again on that bloom level and was not used. Not rare: the main menu's transition hit it in
+     a run of frames (a texture read with blue and alpha forced to 1), so this is likely also the "menu glow cuts
+     out at 30 fps" and the cyan flashes you reported in package 29/30: please look at the menu and the sky. The
+     log's periodic report has "[flash] device swizzle: N binds in M frames" and "[flash] header vs device (same
+     data): ... by dword" lines (dword 4, the mip levels, differs all the time by design: the sampler's mip limits),
+     and the first 16 stale headers one by one ("its header (same data) is stale").
+     configs/banjo_renut_device_swizzle_off.toml is the old behaviour (A/B; it still counts them).
+  2. Banjo's nose as a flat black block in close-ups (the pizza cutscene): the emulated renderer draws it the same way
+     in frame-matched video, so it is not a deko3d bug. If a 360 shows it rounder or shiny, tell me.
+  3. The two GPU A/Bs in ONE run each: configs/banjo_deko3d_light_branch_ab.toml and configs/banjo_deko3d_gpr32_ab.toml
+     switch their key off and on every 4 s, so the "[renut A/B]" line every 10 s gives the GPU time of the same
+     scenes with and without it (two separate runs differ by more than these keys do). Use them instead of 36b's
+     (d) light_branch_on and 36's gpr32_on runs. Both halves' shaders are in the cache (no compiles); the first
+     switches build the other half's pipelines from it (a short hitch the first time). Run one A/B config at a time:
+     the two keys together have no cached variants.
+  4. NOT exact, your call (off: banjo_renut_fur_shells = 1): configs/banjo_renut_fur_shells_2.toml draws every 2nd
+     fur shell of each mesh (11 of Banjo's 21, the dialogue portrait's too): thinner fur, the same length. The fur is
+     about 18 ms of the heaviest frame, almost all of it pixel work (21 layers of Banjo's pixels through the lit fur
+     shader; re-skinning ~5,000 vertices a shell is well under 1 ms in all), so half the shells should save 6-9 ms:
+     that scene from ~48 ms to ~39-42 ms, about 24-25 fps at the stock clock. Its GPU lines will say. Have a look at Banjo up close and say whether the look is acceptable; its log has
+     "[renut] fur shells ... drawn, ... not drawn".
+  Runs: (a) renut_auto.toml (the scripted route) as before; (b) configs/banjo_deko3d_light_branch_ab.toml on the same
+  route; (c) configs/banjo_deko3d_gpr32_ab.toml; if there is time (d) configs/banjo_renut_diag_fur_vertex_only.toml
+  (only its GPU lines matter), (e) configs/banjo_renut_fur_shells_2.toml, or renut_auto.toml with banjo_renut_fur_shells = 2 for the
+  scripted route (look and GPU lines)
+  and (f) configs/banjo_renut_game_gamma_on.toml to look at.
+
+Package 36b (2026-10-20 morning: skinning and lighting shaders, on top of 36)
+---------------------------------------------------------------------------
+  COPY: banjo-nx.nro (88,778,949 bytes, md5 a1ebb8894ff3...), renut.toml and renut_auto.toml (CHANGED: 2 new keys, both off),
+  the configs folder (regenerated: 3 new) and the NEW deko3d_shaders.bin from the package folder (the skinned
+  characters' vertex shaders and every lit pixel shader changed). Everything in 36 below is in 36b too: if you have
+  time for one package, run 36b.
+  1. Skinned characters' vertex shaders, the same pixels: Banjo's fur runs its vertex shader once a shell (21 shells a
+     frame, and 21 more for the 96x96 portrait of a speaking character in dialogues, whose draws your logs show cost 89 us each for a few thousand
+     pixels: vertex work). A bone's data select that only its own sum read is gone, and each bone row's address
+     arithmetic is done once instead of four times: the fur vertex shader 594 -> 509 instructions and 56 -> 48
+     registers; in the shadow maps 473 -> 388 and 43 -> 35. 324 vertex shaders.
+  2. Lit pixel shaders, the same pixels: the lights' selects whose other value nothing reads are gone (79 in each lit
+     shader): the fur shader in your heaviest scene 775 -> 714 instructions (-8 %), the other lit materials alike, and
+     the depth-of-field composite A5E2 153 -> 134. Each change was checked by running the old and new compiled shader
+     on hundreds of random inputs (bit-identical outputs; a deliberately broken copy is caught).
+  3. The early depth test also for draws whose stencil test cannot write (7 more pipelines; small).
+  4. New warning, expected never: "[renut] fetch data: ... off 16 bytes". If you see it, tell me (item 1 relies on it).
+  5. A/B, off: configs/banjo_deko3d_light_branch_on.toml puts each point light's work in 14 of the heaviest lit shaders
+     in a branch on whether the light reaches the pixels, so groups of 32 pixels all out of its reach skip it (about 35
+     instructions a light); where every light reaches (characters, as the game picks lights per object) the branches
+     cost a few instructions. The same pixels either way; only the console can say which is faster.
+  6. A measurement, not a picture: configs/banjo_renut_diag_fur_vertex_only.toml makes the fur family's pixel shaders
+     discard at once (the fur vanishes), so the GPU profile shows what its draws cost without the pixel work: how much
+     of the fur's ~18 ms is vertex shading (my estimate from your logs: ~5 ms). Its shaders compile on the console the
+     first time (a few seconds of stutter).
+  Runs: as 36's (a), (b), (c) below, then (d) configs/banjo_deko3d_light_branch_on.toml on the scripted route, and if
+  there is time (e) configs/banjo_renut_diag_fur_vertex_only.toml (only its GPU lines matter).
+  One question for you (default unchanged): the game loads a display gamma ramp (about x^1.17: darker midtones), which
+  the Xbox 360 and banjo-nx's own renderer apply and Renut's renderer never has, so the deko3d builds have been a
+  little brighter in the midtones than a 360 since package 26 (three other ports measured the same in theirs).
+  configs/banjo_renut_game_gamma_on.toml applies it exactly (the game's own 256-entry ramp, looked up per 8-bit value
+  in the present pass, as the 360's display does; the log says "[renut] game gamma ramp applied" with its entries:
+  [64]=192 [128]=459 [255]=1019, the same your native renderer logged). Checked in the emulator. Have a look; if you
+  like it, it can become the default (banjo_renut_game_gamma = true).
+
+Package 36 (2026-10-20 night: GPU for the heaviest scene, the colour flash)
+-------------------------------------------------------------------------
+  COPY: banjo-nx.nro (89,372,869 bytes, md5 7395b07e886a...), renut.toml and renut_auto.toml (CHANGED: 4 new keys), the
+  configs folder (regenerated: 5 new) and the NEW deko3d_shaders.bin from the package folder (every pixel shader's
+  text changed again). Keep your pipeline_list.bin, and please copy it into the logs folder you send: the next shader
+  cache built from your console's own list means no shader compiles even on a package's first run (your second run of
+  package 35 compiled none; the first compiled 12 the cache had not predicted).
+  1. GPU, the same pixels (docs/deko3d-renderer.md section 19). Your heaviest scene was 51.6 ms of GPU a frame:
+     - texture size queries read from a buffer instead of a texture instruction per pixel: A5E2 (a full-screen pass,
+       the second heaviest pixel shader of the whole route, 1.9 ms) does 4 texture operations a pixel instead of 8,
+       and the fur shells one fewer (configs/banjo_deko3d_txq_off.toml is the A/B);
+     - draws that write no depth or stencil (particles and other blended effects; not the fur shells, which write
+       depth) test depth before their pixel shader runs, so hidden pixels no longer run it
+       (configs/banjo_deko3d_early_z_off.toml is the A/B);
+     - an A/B only, off: the fur shaders compiled with 32 registers so the GPU can keep more of them in flight, at the
+       price of a few spills (configs/banjo_deko3d_gpr32_on.toml).
+  2. The colour flash: while the game stalls (loading), the renderer re-presented its last frame every 16 ms; if the
+     game had freed or remade that texture meanwhile, the screen showed new memory nobody had cleared (deko3d does
+     not clear it, Vulkan's came cleared), a full-screen colourful frame. Now nothing is re-presented during a stall
+     unless a menu is up (the screen keeps the last frame, as the console does), and a frame no resolve wrote is never
+     shown. If you still see a flash, tell me where (scene / moment) and send that log: a [flash] line names any texture
+     sampled with nothing in it. configs/banjo_renut_stall_present_on.toml brings the old behaviour back.
+  Runs: (a) renut_auto.toml's scripted route: the heavy scenes' GPU line and fps against package 35b. (b) the same with
+     configs/banjo_deko3d_early_z_off.toml, then (c) configs/banjo_deko3d_gpr32_on.toml: these tell which of the two
+     help on the console. Your GPU runs at 460.8 MHz handheld; docked the console's stock GPU clock is 768 MHz.
+
+Package 35b (2026-10-19 night: the fur fix, the limiter on the display's refresh)
+---------------------------------------------------------------------------------
+  COPY: banjo-nx.nro (89,192,645 bytes, md5 98694401fef8...), renut.toml and renut_auto.toml (CHANGED: 3 new keys), the
   configs folder (regenerated: banjo_display_sync_on.toml is new) and the NEW deko3d_shaders.bin from the package
   folder (next to the zip; package 35's is not used: the shaders changed again). Keep your pipeline_list.bin.
   1. The fur regression of package 35, fixed. Your package 35 logs: the heavy scenes' GPU went 48-52 -> 52-55 ms a

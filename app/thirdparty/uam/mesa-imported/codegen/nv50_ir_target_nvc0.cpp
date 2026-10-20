@@ -1,3 +1,4 @@
+#include <cstdlib>
 /*
  * Copyright 2011 Christoph Bumiller
  *
@@ -21,6 +22,11 @@
  */
 
 #include "codegen/nv50_ir_target_nvc0.h"
+
+// banjo-nx (2026-10-19): the per-thread GPR cap of the compile in progress (0: none).
+static thread_local int g_banjoGprCap = 0;
+extern "C" int nv50_ir_banjo_gpr_cap() { return g_banjoGprCap; }
+extern "C" void nv50_ir_set_banjo_gpr_cap(int cap) { g_banjoGprCap = cap; }
 
 namespace nv50_ir {
 
@@ -269,7 +275,14 @@ TargetNVC0::getFileSize(DataFile file) const
    const unsigned int smregs = (chipset >= NVISA_GK104_CHIPSET) ? 65536 : 32768;
    switch (file) {
    case FILE_NULL:          return 0;
-   case FILE_GPR:           return MIN2(gprs, smregs / threads);
+   case FILE_GPR: {
+      // banjo-nx (2026-10-19): a cap on the GPR file for this thread's compile (nv50_ir_set_banjo_gpr_cap: constant
+      // 910 of the deko3d GLSL, banjo_deko3d_gpr32), else UAM_BANJO_MAX_GPR (the PC tool's occupancy tests).
+      static const int env_cap = [] { const char *e = getenv("UAM_BANJO_MAX_GPR"); return e ? atoi(e) : 0; }();
+      const int cap = nv50_ir_banjo_gpr_cap() > 0 ? nv50_ir_banjo_gpr_cap() : env_cap;
+      const unsigned int n = MIN2(gprs, smregs / threads);
+      return cap > 0 ? MIN2(n, unsigned(cap)) : n;
+   }
    case FILE_PREDICATE:     return 7;
    case FILE_FLAGS:         return 1;
    case FILE_ADDRESS:       return 0;

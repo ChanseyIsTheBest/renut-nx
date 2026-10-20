@@ -160,6 +160,14 @@ bool RexSwitchSetCurrentThreadPriorityOk(int priority);
 bool RexSwitchSetCurrentThreadCore(int core);
 
 /*
+ * banjo-nx (2026-10-20, from sa2-nx): the calling thread's core mask (the process's cores only) with 'preferred' as its preferred
+ * core (one of the mask's). False if the kernel refuses it or the mask leaves none of the process's cores.
+ */
+bool RexSwitchSetCurrentThreadMask(int preferred, unsigned long long mask);
+/* banjo-nx (2026-10-20, from sa2-nx): the same for another registered thread, by its pthread (Thread::native_handle()). */
+bool RexSwitchSetThreadMaskOf(void* native_handle, int preferred, unsigned long long mask);
+
+/*
  * The real pin: besides preferring that core, it forbids the others. More dangerous than
  * RexSwitchSetCurrentThreadCore (if that core saturates, the thread does not run). Returns whether
  * it was accepted.

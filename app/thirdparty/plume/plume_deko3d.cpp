@@ -590,7 +590,14 @@ namespace plume {
             view->view.type = DkImageType_1D;
             break;
         case RenderTextureViewDimension::TEXTURE_2D:
-            if (type == DkImageType_2DArray || type == DkImageType_Cubemap || type == DkImageType_CubemapArray)
+            // banjo-nx (2026-10-20, from SASRT's port): a 2D view of a layered 2D image that does not pick one layer
+            // stays a 2D array, as plume's Vulkan back end makes it (VK_IMAGE_VIEW_TYPE_2D_ARRAY when arraySize > 1).
+            // Renut's stacked textures are such views, sampled through sampler2DArray; a single-layer 2D view read
+            // layer 0 only.
+            if (type == DkImageType_2DArray && desc.arraySize > 1 && viewDesc.arrayIndex == 0 &&
+                (viewDesc.arraySize == UINT32_MAX || viewDesc.arraySize > 1))
+                view->view.type = DkImageType_2DArray;
+            else if (type == DkImageType_2DArray || type == DkImageType_Cubemap || type == DkImageType_CubemapArray)
                 view->view.type = DkImageType_2D;
             break;
         case RenderTextureViewDimension::TEXTURE_3D:
@@ -728,6 +735,22 @@ namespace plume {
             DkImageDescriptor local;
             dkImageDescriptorInitialize(&local, &view, loadStore, false);
             memcpy(d, &local, sizeof(local));
+            // banjo-nx (2026-10-19, GPU, txq): the size a texture query of this view returns at level 0: the image's
+            // size at the view's first level; the depth of a 3D image there, else the view's layers (all from its first
+            // when it names no count). tools/deko3d_glsl_opt.py's txq verify (constant 908 = 2) checks it on the GPU.
+            const uint32_t id = descriptorIndex - imageFirst;
+            if (imageSizes.size() <= id)
+                imageSizes.resize(id + 1);
+            const uint32_t m = view.mipLevelOffset;
+            const uint32_t w = std::max(1u, t->desc.width >> m), h = std::max(1u, t->desc.height >> m);
+            const DkImageType type = view.type != DkImageType_None ? view.type : t->type;
+            uint32_t z;
+            if (type == DkImageType_3D)
+                z = std::max(1u, t->desc.depth >> m);
+            else
+                z = view.layerCount ? view.layerCount
+                                    : (t->desc.arraySize > view.layerOffset ? t->desc.arraySize - view.layerOffset : 1u);
+            imageSizes[id] = {w, h, z};
         }
         g_deko3dStats.descriptorWrites++;
         device->descriptorEpoch.fetch_add(1, std::memory_order_release);
@@ -826,6 +849,11 @@ namespace plume {
             return false;
         memset(dkMemBlockGetCpuAddr(pushBlock), 0, DK_MEMBLOCK_ALIGNMENT);
         pushAddr = dkMemBlockGetGpuAddr(pushBlock);
+        texSizeBlock = makeBlock(DK_MEMBLOCK_ALIGNMENT, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, "texture sizes");
+        if (!texSizeBlock)
+            return false;
+        memset(dkMemBlockGetCpuAddr(texSizeBlock), 0, DK_MEMBLOCK_ALIGNMENT);
+        texSizeAddr = dkMemBlockGetGpuAddr(texSizeBlock);
         zeroBlock = makeBlock(ZeroSize, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, "zero vertex buffer");
         if (!zeroBlock)
             return false;
@@ -1113,6 +1141,7 @@ namespace plume {
         usage.uboMask = uint32_t(strtoul(field("ubo=").c_str(), nullptr, 16));
         usage.ssboMask = uint32_t(strtoul(field("ssbo=").c_str(), nullptr, 16));
         usage.textures = field("tex=") == "1";
+        usage.txqMask = uint32_t(strtoul(field("txq=").c_str(), nullptr, 16));  // banjo-nx (2026-10-19)
         // texb=k:textureWord:samplerWord,... in binding order
         const std::string texb = field("texb=");
         size_t q = 0;
@@ -1266,6 +1295,40 @@ namespace plume {
                     memoryFigures(hf, pf);
                     logf("uam: compile %u (stage %u, %zu bytes of GLSL; heap %" PRIu64 " MB free, process %" PRIu64 " MB unused)",
                          logged, uint32_t(job->stage), job->source->size(), hf >> 20, pf >> 20);
+                }
+                // banjo-nx (2026-10-20): every run-time compile's specialization (its constants), so the variants
+                // a cache lacks can be found (tools/deko3d_variant_cache.py rebuilds their keys from these).
+                static uint32_t named = 0;
+                if (named < 64) {
+                    named++;
+                    // The variant's own defines: the lines plume inserted after the first one (2026-10-20: only those;
+                    // the shader's defaults further down are not logged). And which shader: the text without them,
+                    // its size and FNV-1a 64, which tools/deko3d_variant_cache.py --runtime-log matches to a GLSL file
+                    // (so a console log alone completes the next cache).
+                    std::string defines;
+                    const std::string &src = *job->source;
+                    const char *key = "#define SPIRV_CROSS_CONSTANT_ID_";
+                    size_t body = src.find('\n');
+                    body = body == std::string::npos ? src.size() : body + 1;
+                    size_t rest = body;
+                    while (src.compare(rest, strlen(key), key) == 0) {
+                        const size_t e = src.find('\n', rest);
+                        const size_t next = e == std::string::npos ? src.size() : e + 1;
+                        if (defines.size() < 900) {
+                            defines += src.substr(rest + strlen(key), (e == std::string::npos ? src.size() : e) - rest - strlen(key));
+                            defines += ';';
+                        }
+                        rest = next;
+                    }
+                    uint64_t base = 0xcbf29ce484222325ull;
+                    auto mix = [&](size_t from, size_t to) {
+                        for (size_t i = from; i < to; ++i)
+                            base = (base ^ uint8_t(src[i])) * 0x100000001b3ull;
+                    };
+                    mix(0, body);
+                    mix(rest, src.size());
+                    logf("uam: run-time variant (stage %u, %zu bytes, base %zu bytes %016" PRIx64 "): %s",
+                         uint32_t(job->stage), src.size(), body + (src.size() - rest), base, defines.c_str());
                 }
             }
             uam::Result r = uam::compile(stages[std::min<uint32_t>(job->stage, 5)], job->source->c_str());
@@ -1621,6 +1684,7 @@ namespace plume {
             p->uboMask[i] = stages[i]->usage.uboMask;
             p->ssboMask[i] = stages[i]->usage.ssboMask;
             p->texBindings[i] = stages[i]->usage.texBindings;
+            p->txqMask[i] = stages[i]->usage.txqMask;
             p->boundTextures = p->boundTextures || !p->texBindings[i].empty();
             p->textures = p->textures || stages[i]->usage.textures;
         }
@@ -1889,6 +1953,20 @@ namespace plume {
         if (!copy.done && copy.valid && dkFenceWait(&copy.fence, 0) == DkResult_Success)
             copy.done = true;  // signalled once is signalled for good: no second wait
         return copy.done;
+    }
+
+    bool Deko3DFenceCopyWait(Deko3DFenceCopy &copy, RenderDevice *device) {
+        if (copy.done || !copy.valid)
+            return copy.done;
+        Deko3DDevice *d = static_cast<Deko3DDevice *>(device);
+        for (;;) {
+            if (dkFenceWait(&copy.fence, 2'000'000'000ll) == DkResult_Success) {
+                copy.done = true;
+                return true;
+            }
+            if (!d || !d->queue || dkQueueIsInErrorState(d->queue))
+                return false;
+        }
     }
 
     bool Deko3DDeviceLost(RenderDevice *device) {

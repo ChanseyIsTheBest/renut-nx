@@ -5404,6 +5404,12 @@ namespace plume {
         }
 
         volkInitializeCustom(getInstanceProcAddr);
+        // banjo-nx (2026-10-20): a Switch build without the driver (switch_vulkan_stubs.c) answers every lookup with
+        // NULL; the interface stays invalid (no instance) instead of calling through a NULL pointer below.
+        if (vkCreateInstance == nullptr || vkEnumerateInstanceExtensionProperties == nullptr) {
+            fprintf(stderr, "plume: no Vulkan driver in this build.\n");
+            return;
+        }
         VkResult res = VK_SUCCESS;
 #else
         VkResult res = volkInitialize();

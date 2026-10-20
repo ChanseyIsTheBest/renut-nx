@@ -1034,7 +1034,9 @@ void ProfilerMain(void*) {
         if (R_SUCCEEDED(svcQueryMemory(&smi, &spi, ctx.sp)) && (smi.perm & Perm_R)) {
           const u64 lo = smi.addr, hi = smi.addr + smi.size;
           u64 fp = ctx.fp;
-          for (size_t k = 0; k < kFrames && fp >= lo && fp + 16 <= hi && (fp & 7) == 0; ++k) {
+          // banjo-nx (2026-10-20, SASRT's report): x29 can hold anything (recompiled code uses it as a general
+          // register); fp + 16 wrapped past 2^64 for fp near it and passed, and the walk read 0xFFFFFFFFFFFFFFF8.
+          for (size_t k = 0; k < kFrames && fp >= lo && fp < hi && hi - fp >= 16 && (fp & 7) == 0; ++k) {
             out.frames[k] = reinterpret_cast<const u64*>(fp)[1];
             const u64 next = reinterpret_cast<const u64*>(fp)[0];
             if (next <= fp) {

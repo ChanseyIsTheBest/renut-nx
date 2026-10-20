@@ -4,6 +4,8 @@
  *          submit and present.
  */
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -21,6 +23,8 @@
 #include "renut_engine/gpu/render/textures.h"
 #include "renut_engine/gpu/log.h"
 #include "renut_engine/gpu/overlay/overlay_ui.h"
+#include "renut_engine/gpu/overlay/overlay_drawer.h"  // banjo-nx (2026-10-19): HasLatest
+#include "renut_engine/gpu/banjo_renut_tuning.h"
 #include "renut_engine/gpu/backend/render_thread.h"
 #include "renut_engine/gpu/backend/video.h"
 #include "renut_engine/gpu/backend/video_internal.h"
@@ -42,6 +46,11 @@ REXCVAR_DEFINE_STRING(banjo_renut_diag_show_texture, "", "Banjo/Renut",
                       "resolve lines name them) instead of the frame, on screen and in captures");
 REXCVAR_DEFINE_DOUBLE(banjo_renut_diag_show_gamma, 1.0, "Banjo/Renut",
                       "Diagnostic: banjo_renut_diag_show_texture's exponent (depth near 1 shows with 64 or so)");
+
+// banjo-nx (2026-10-20): see GameGamma below.
+REXCVAR_DEFINE_BOOL(banjo_renut_game_gamma, false, "Banjo/Renut",
+                    "Apply the gamma ramp the game loads to the output, as the Xbox 360's display and banjo-nx's own "
+                    "renderer do (N&B's darkens the midtones, about x^1.17). Off: Renut's output as before");
 
 REXCVAR_DEFINE_BOOL(renut_vsync, true, "Nuts&Bolts/Graphics",
                     "Show each frame at the display's refresh: no tearing, and the game runs at "
@@ -111,6 +120,84 @@ FrameFit FitFrame(uint32_t out_w, uint32_t out_h, uint32_t src_w, uint32_t src_h
   return fit;
 }
 
+// banjo-nx (2026-10-20, banjo_renut_game_gamma): the gamma ramp the game loads, which the 360's display applies to
+// every 8-bit value it scans out (N&B's is about x^1.17: entries [64] = 192, [128] = 459, [255] = 1019 of 1023) and
+// Renut's present never did. Off by default (it changes the picture); on, the present looks the ramp up by the value.
+struct GameGamma {
+  std::mutex mutex;
+  std::array<uint16_t, 768> ramp{};  // 10-bit entries: red, green, blue
+  uint32_t version = 0;
+  // Render thread.
+  uint32_t uploaded = 0;
+  std::unique_ptr<plume::RenderTexture> texture;  // 256 x 1, RGBA32F
+  std::unique_ptr<plume::RenderTextureView> view;
+  uint32_t slot = kInvalidDescriptor;
+  float param = 0.0f;  // UtilityPush::param1 of the scan-outs: the slot as raw bits, 0 = no ramp
+};
+GameGamma g_gamma;
+
+// Before the frame's passes (a copy may not be recorded inside one). Caller holds s.mutex.
+void PrepareGameGammaLocked(VideoState &s) {
+  g_gamma.param = 0.0f;
+  if (!REXCVAR_GET(banjo_renut_game_gamma))
+    return;
+  std::array<uint16_t, 768> ramp;
+  uint32_t version;
+  {
+    std::lock_guard lock(g_gamma.mutex);
+    ramp = g_gamma.ramp;
+    version = g_gamma.version;
+  }
+  if (!version || !Video::EnsureCommandListLocked())
+    return;
+  constexpr plume::RenderFormat kFormat = plume::RenderFormat::R32G32B32A32_FLOAT;
+  if (!g_gamma.texture) {
+    g_gamma.texture = s.device->createTexture(plume::RenderTextureDesc::Texture2D(256, 1, 1, kFormat));
+    if (!g_gamma.texture)
+      return;
+    g_gamma.texture->setName("banjo game gamma ramp");
+    g_gamma.view = g_gamma.texture->createTextureView(plume::RenderTextureViewDesc::Texture2D(kFormat));
+    g_gamma.slot = g_gamma.view ? Video::AllocateTextureSlotLocked() : kInvalidDescriptor;
+    if (g_gamma.slot == kInvalidDescriptor) {
+      g_gamma.view.reset();
+      g_gamma.texture.reset();
+      return;
+    }
+    Video::SetTextureSlotLocked(g_gamma.slot, g_gamma.texture.get(), g_gamma.view.get());
+    g_gamma.uploaded = 0;
+  }
+  // Every frame (4 KB): a frame's list can be dropped at start-up (run 78's first upload never arrived: black output),
+  // and the copy is cheaper than tracking that.
+  {
+    UploadAllocation staging = s.uploads[s.frame].Allocate(256 * 16, 512);
+    if (!staging)
+      return;
+    auto *texels = static_cast<float *>(staging.cpu);
+    for (uint32_t i = 0; i < 256; ++i) {
+      texels[i * 4 + 0] = float(ramp[i]) / 1023.0f;
+      texels[i * 4 + 1] = float(ramp[256 + i]) / 1023.0f;
+      texels[i * 4 + 2] = float(ramp[512 + i]) / 1023.0f;
+      texels[i * 4 + 3] = 1.0f;
+    }
+    plume::RenderCommandList *cmd = s.command_list;
+    cmd->barriers(plume::RenderBarrierStage::COPY,
+                  plume::RenderTextureBarrier(g_gamma.texture.get(), plume::RenderTextureLayout::COPY_DEST));
+    cmd->copyTextureRegion(plume::RenderTextureCopyLocation::Subresource(g_gamma.texture.get(), 0, 0),
+                           plume::RenderTextureCopyLocation::PlacedFootprint(staging.ref.ref, kFormat, 256, 1, 1, 256,
+                                                                             staging.ref.offset),
+                           0, 0, 0, nullptr);
+    cmd->barriers(plume::RenderBarrierStage::GRAPHICS,
+                  plume::RenderTextureBarrier(g_gamma.texture.get(), plume::RenderTextureLayout::SHADER_READ));
+    if (g_gamma.uploaded != version) {
+      REXLOG_INFO("[renut] game gamma ramp applied (banjo_renut_game_gamma): [0]={}/{}/{} [64]={}/{}/{} [128]={}/{}/{} "
+                  "[255]={}/{}/{}", ramp[0], ramp[256], ramp[512], ramp[64], ramp[320], ramp[576], ramp[128], ramp[384],
+                  ramp[640], ramp[255], ramp[511], ramp[767]);
+    }
+    g_gamma.uploaded = version;
+  }
+  g_gamma.param = std::bit_cast<float>(g_gamma.slot);  // the slot's bits (present_ps.hlsl); never 0, a dynamic slot
+}
+
 void RecordScanOut(VideoState &s, const PresentImage &image, uint32_t out_w, uint32_t out_h) {
   plume::RenderCommandList *cmd = s.command_list;
   if (image.layout && *image.layout != plume::RenderTextureLayout::SHADER_READ) {
@@ -143,6 +230,7 @@ void RecordScanOut(VideoState &s, const PresentImage &image, uint32_t out_w, uin
   push.texture_index = image.descriptor;
   push.sampler_index = kLinearClampSamplerSlot;
   push.param0 = image.gamma > 0.0f ? image.gamma : s.output_gamma;
+  push.param1 = image.gamma > 0.0f ? 0.0f : g_gamma.param;  // banjo-nx: not on banjo_renut_diag_show_texture's views
   cmd->setGraphicsPushConstants(0, &push, 0, sizeof(push));
   cmd->drawInstanced(3, 1, 0, 0);
 }
@@ -318,6 +406,7 @@ void PresentLocked(VideoState &s, const PresentImage *image) {
   ApplyVsync(s);
   if (s.swap_chain->needsResize() || s.resize_requested.exchange(false, std::memory_order_acq_rel))
     RebuildSwapChain(s);
+  PrepareGameGammaLocked(s);     // banjo-nx (2026-10-20, banjo_renut_game_gamma)
   ServeCaptureLocked(s, image);  // banjo-nx: test captures (banjo_renut_capture.h)
   if (s.swap_framebuffers.empty()) {
     // Minimized or failed resize: keep the frame ring moving without a present.
@@ -451,6 +540,19 @@ int Video::PresentDone(uint64_t index) {
 #endif
 }
 
+void Video::NoteGameGamma(const uint8_t *ramp) {
+  if (!ramp || !REXCVAR_GET(banjo_renut_game_gamma))
+    return;
+  std::array<uint16_t, 768> r;
+  for (uint32_t i = 0; i < 768; ++i)
+    r[i] = uint16_t(((uint32_t(ramp[i * 2]) << 8 | ramp[i * 2 + 1]) >> 6) & 0x3FF);
+  std::lock_guard lock(g_gamma.mutex);
+  if (r != g_gamma.ramp || !g_gamma.version) {
+    g_gamma.ramp = r;
+    ++g_gamma.version;
+  }
+}
+
 void Video::Present(const PresentImage *image) {
   auto &s = State();
   if (s.shutting_down.load(std::memory_order_acquire))
@@ -460,6 +562,7 @@ void Video::Present(const PresentImage *image) {
     return;
   PresentLocked(s, image);
   s.last_guest_present_ms.store(NowMs(), std::memory_order_release);
+  detail::LatencyTrimLocked(s);  // banjo-nx (2026-10-20, input latency, banjo_deko3d_latency_trim)
   {
     // The frame just submitted: the slot before the one SubmitAndAdvance moved to.
     std::lock_guard fence_lock(g_present_fence_mutex);
@@ -486,9 +589,18 @@ void Video::PresentOverlayOnly() {
   std::unique_lock lock(s.mutex, std::try_to_lock);
   if (!lock.owns_lock() || !s.host_ready || s.shutting_down.load(std::memory_order_acquire))
     return;
-  // The last guest frame stays up while the guest stalls.
-  const PresentImage image =
+  // banjo-nx (2026-10-19, the colour flash): while the guest stalls (loading) with nothing of the overlay to show,
+  // nothing is presented: the display keeps the last frame, as the console's does. The re-present of the last front
+  // buffer showed whatever that texture held by then, and the game may free or remake it while it loads: on deko3d a
+  // new image's memory is not cleared (Vulkan's came zeroed), a full-screen frame of other data. With the overlay up
+  // the last frame is presented under it, but only from a texture a resolve wrote (else the overlay on black).
+  // banjo_renut_stall_present = true: as before.
+  if (s.guest_ready && !banjo::renut_gpu::StallPresentOn() && !OverlayDrawer::HasLatest())
+    return;
+  PresentImage image =
       s.guest_ready && s.last_front_buffer ? FrontBufferImageLocked(s.last_front_buffer) : PresentImage{};
+  if (image.texture && !banjo::renut_gpu::StallPresentOn() && !FrontBufferWrittenLocked(s.last_front_buffer))
+    image = PresentImage{};
   PresentLocked(s, image.texture ? &image : nullptr);
 }
 

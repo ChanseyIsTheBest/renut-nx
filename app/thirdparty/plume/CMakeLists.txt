@@ -153,6 +153,10 @@ if(PLUME_PLATFORM_SWITCH)
     endforeach()
     message(STATUS "plume: NVK driver ${PLUME_SWITCH_NVK_LIBRARY}, extra libraries: ${PLUME_SWITCH_NVK_EXTRA_LIBRARIES}")
 
+    # banjo-nx (2026-10-20): PLUME_SWITCH_NVK_LINK OFF links no Vulkan driver (the parent links stubs that answer "not
+    # available": banjo-nx's sdk/src/ui/switch_vulkan_stubs.c); the deko3d back end below is then the only one.
+    option(PLUME_SWITCH_NVK_LINK "Link the static NVK driver into the Switch build" ON)
+    if(PLUME_SWITCH_NVK_LINK)
     # One group, so the linker rescans the driver and its dependencies until nothing new
     # resolves (the driver and its helper archives reference each other).
     target_link_libraries(plume PUBLIC
@@ -166,6 +170,9 @@ if(PLUME_PLATFORM_SWITCH)
         nx
         "-Wl,--end-group"
     )
+    else()
+        target_link_libraries(plume PUBLIC zstd z nx)
+    endif()
 
     # banjo-nx (2026-10-17): the deko3d back end (plume_deko3d*.cpp, banjo-nx docs/deko3d-renderer.md): devkitPro's
     # deko3d and uam (PLUME_SWITCH_UAM_DIR: banjo-nx vendors SwitchWakerHD's patched copy, whose CMake builds the static

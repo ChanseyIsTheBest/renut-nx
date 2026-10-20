@@ -32,6 +32,12 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_variant_log, false, "Banjo/Renut",
                     "Write deko3d_variants.txt next to the executable: each graphics pipeline's vertex and pixel shader "
                     "and specialization constants (tools/deko3d_variant_cache.py builds the deko3d DKSH cache from it)");
 #include <xxhash.h>
+#include <cstdio>  // banjo-nx (2026-10-20): the pipeline list file
+#if defined(_WIN32)
+#include <io.h>  // _commit
+#else
+#include <unistd.h>  // fsync
+#endif
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -340,7 +346,7 @@ std::unique_ptr<plume::RenderPipeline> Build(const PipelineKey &key, const Pipel
 
   // banjo-nx (banjo_gpu_bool_spec): the key's bools as the shaders' specialization constants (banjo_bool_spec.h). One
   // list for every stage: a stage takes the ids it declares (vertex and pixel shader bools have distinct ones).
-  plume::RenderSpecConstant spec[264];  // 256 bools and 900-907
+  plume::RenderSpecConstant spec[272];  // 256 bools and 900-908
   uint32_t spec_count = 0;
   for (uint32_t w = 0; w < 8; ++w) {
     for (uint32_t m = key.bool_mask[w]; m; m &= m - 1) {
@@ -368,6 +374,36 @@ std::unique_ptr<plume::RenderPipeline> Build(const PipelineKey &key, const Pipel
   // (constant 907, 1 by default in the GLSL); off: after it, as Renut's shaders have it.
   if (!banjo::renut_gpu::EarlyHoistOn())
     spec[spec_count++] = plume::RenderSpecConstant(907, 0);
+  // banjo-nx (2026-10-19, GPU): texture sizes from the size buffer (constant 908, 1 by default in the GLSL).
+  if (const uint32_t txq = banjo::renut_gpu::TxqMode(); txq != 1u)
+    spec[spec_count++] = plume::RenderSpecConstant(908, txq);
+  // banjo-nx (2026-10-19, GPU): depth tested before a discarding pixel shader where the draw writes neither depth nor
+  // stencil (RB_DEPTHCONTROL bit 2 depth writes; as BlendSkipMode): constant 909 (tools/deko3d_glsl_opt.py earlyz;
+  // shaders without a discard do not have it and get no define). 2026-10-20: a stencil test that writes nothing (write
+  // mask 0, or every op of both faces KEEP: bits 11-19 front, 23-31 back with bit 7) counts as no stencil writes; the
+  // early tests only skip the shader for pixels the tests would have dropped after it (no occlusion queries here).
+  if (key.pixel_shader && banjo::renut_gpu::EarlyZOn() && !(dc & 4u)) {
+    const bool stencil_ops = ((dc >> 11) & 0x1FF) != 0 || ((dc & 0x80) && ((dc >> 23) & 0x1FF) != 0);
+    const bool stencil_writes = (dc & 1u) && ((key.stencil_ref_mask >> 16) & 0xFF) != 0 && stencil_ops;
+    if (!stencil_writes)
+      spec[spec_count++] = plume::RenderSpecConstant(909, 1);
+  }
+  // banjo-nx (2026-10-19, GPU, A/B): the listed pixel shaders compiled with 32 GPRs at most (constant 910).
+  // (key.reserved bit 1: the off half of the in-run A/B, banjo_renut_ab_target 16.)
+  if (key.pixel_shader && banjo::renut_gpu::Gpr32On() && !(key.reserved & 2u))
+    spec[spec_count++] = plume::RenderSpecConstant(910, 1);
+  // banjo-nx (2026-10-20, GPU A/B): the listed lit shaders' lights in branches (constant 911, pass lightbranch).
+  // (key.reserved bit 0: the off half of the in-run A/B, banjo_renut_ab_target 15.)
+  if (key.pixel_shader && banjo::renut_gpu::LightBranchOn() && !(key.reserved & 1u))
+    spec[spec_count++] = plume::RenderSpecConstant(911, 1);
+  // banjo-nx (2026-10-20, diagnostic): the fur family without its pixel work (constant 912, pass nullps).
+  if (key.pixel_shader && banjo::renut_gpu::NullPsOn())
+    spec[spec_count++] = plume::RenderSpecConstant(912, 1);
+  // banjo-nx (2026-10-20, GPU A/B): the fur's vertex shaders skin once a frame (constant 913, pass skinonce; the draw's
+  // shared word v[84].z picks write or read, render/draw.cpp FurSkinLocked). Only the listed vertex shaders declare it.
+  // (key.reserved bit 2: the off half of the in-run A/B, banjo_renut_ab_target 17.)
+  if (banjo::renut_gpu::SkinOnceOn() && !(key.reserved & 4u))
+    spec[spec_count++] = plume::RenderSpecConstant(913, 1);
   desc.specConstants = spec_count ? spec : nullptr;
   desc.specConstantsCount = spec_count;
   if (REXCVAR_GET(banjo_deko3d_variant_log)) {
@@ -380,9 +416,9 @@ std::unique_ptr<plume::RenderPipeline> Build(const PipelineKey &key, const Pipel
     for (uint32_t i = 0; i < spec_count; ++i)
       line += fmt::format(" {}={}", spec[i].index, spec[i].value);
     // The state the blend skip and the output trim are decided from (tools/deko3d_variant_cache.py skips these).
-    line += fmt::format(" | targets {} format0 {} blend0 {:08X} mask {:04X} depth {:08X} a2c {}", key.color_count,
+    line += fmt::format(" | targets {} format0 {} blend0 {:08X} mask {:04X} depth {:08X} a2c {} gs {}", key.color_count,
                         int(key.color_formats[0]), key.blend_control[0], key.color_mask, key.depth_control,
-                        key.alpha_to_coverage);
+                        key.alpha_to_coverage, key.point_sprite | key.rectangle_list);  // banjo-nx (2026-10-20): gs
     std::lock_guard<std::mutex> lock(log_mutex);
     if (log_file && logged.insert(line).second) {
       log_file << line << '\n';
@@ -544,6 +580,20 @@ bool DecodeRecord(const char *data, size_t size, Job &job) {
   job.key = stored;
   job.key.vertex_shader = vs;
   job.key.pixel_shader = ps;
+  // banjo-nx (2026-10-20): the key as this configuration makes it. A record written with other keys on (Renut's blend
+  // skip before package 30, an A/B half) would be built ahead for no draw, and its shader variants compiled at run time
+  // (the DKSH cache leaves them out): emulator runs compiled three blend-skip variants at every start.
+  if (!banjo::renut_gpu::BlendSkipOn())
+    job.key.blend_skip = 0;
+  if (!banjo::renut_gpu::OutputTrimOn())
+    job.key.output_trim = 0;
+  if (!banjo::renut_gpu::AlphaSpecOn())
+    job.key.alpha_func = 0;
+  if (!banjo::renut_gpu::BoolSpecOn()) {
+    std::memset(job.key.bool_mask, 0, sizeof(job.key.bool_mask));
+    std::memset(job.key.bool_values, 0, sizeof(job.key.bool_values));
+  }
+  job.key.reserved = 0;
   job.hash = HashKey(job.key);
   for (u32 s = 0; s < kMaxVertexStreams; ++s) {
     u8 used;
@@ -576,19 +626,40 @@ bool DecodeRecord(const char *data, size_t size, Job &job) {
 
 // The list's records, and the file the new ones are appended to. Render
 // thread, except the load at the start.
+// banjo-nx (2026-10-20, Peggle 2's report on the DKSH cache): a flushed stream only reaches the file system service,
+// which may keep it buffered; a game closed with HOME (or stopped in the emulator) lost the records of the run, so the
+// same pipelines (and their shader variants) were built again at every start. The file is synced to the card at most
+// once a second (kListSyncNs: the records of the last second may still be lost), not per record (a new area appends
+// hundreds).
 struct PipelineList {
-  std::ofstream out;
+  std::FILE *out = nullptr;
   bool failed = false;
   std::unordered_set<uint64_t> listed;  // key hashes in the file
+  std::chrono::steady_clock::time_point last_sync{};
+  bool unsynced = false;
+  static constexpr auto kListSync = std::chrono::seconds(1);
+
+  void Sync() {
+    if (!out || !unsynced)
+      return;
+    std::fflush(out);
+#if defined(_WIN32)
+    _commit(_fileno(out));
+#else
+    fsync(fileno(out));
+#endif
+    unsynced = false;
+    last_sync = std::chrono::steady_clock::now();
+  }
 
   void Append(const PipelineKey &key, uint64_t hash, const HostVertexLayout &layout) {
     if (failed || !listed.insert(hash).second)
       return;
-    if (!out.is_open()) {
+    if (!out) {
       const std::filesystem::path path = banjo::renut_gpu::NextToExecutable(REXCVAR_GET(renut_pipeline_list));
       std::error_code ec;
       const bool fresh = !std::filesystem::exists(path, ec) || std::filesystem::file_size(path, ec) == 0;
-      out.open(path, std::ios::binary | std::ios::app);
+      out = std::fopen(path.string().c_str(), "ab");
       if (!out) {
         failed = true;
         RGPU_WARN("Pipeline list {} cannot be written; pipelines are not built ahead next time",
@@ -601,17 +672,31 @@ struct PipelineList {
         header.version = kListVersion;
         header.key_size = sizeof(PipelineKey);
         header.streams = kMaxVertexStreams;
-        out.write(reinterpret_cast<const char *>(&header), sizeof(header));
+        std::fwrite(&header, sizeof(header), 1, out);
       }
     }
     const std::vector<char> record = EncodeRecord(key, layout);
     const u32 size = u32(record.size());
-    out.write(reinterpret_cast<const char *>(&size), sizeof(size));
-    out.write(record.data(), std::streamsize(record.size()));
-    out.flush();
+    std::fwrite(&size, sizeof(size), 1, out);
+    std::fwrite(record.data(), 1, record.size(), out);
+    std::fflush(out);
+    unsynced = true;
+    if (std::chrono::steady_clock::now() - last_sync >= kListSync)
+      Sync();
   }
 };
 PipelineList g_list;
+
+}  // namespace
+
+// banjo-nx (2026-10-20): the list's last records synced to the card a second after they were written, if no record
+// came after them (the render thread, once a frame).
+void SyncPipelineListLocked() {
+  if (g_list.unsynced && std::chrono::steady_clock::now() - g_list.last_sync >= PipelineList::kListSync)
+    g_list.Sync();
+}
+
+namespace {
 
 // The records of the list file; empty (and the file started over) when it
 // is missing or from another version.
@@ -918,7 +1003,16 @@ bool BuildDrawLayout(VideoState &s) {
 static plume::RenderPipeline *GetPipelineSlow(const PipelineKey &key, const PipelineInputs &inputs, uint8_t &kind,
                                               uint64_t &memo_epoch);
 
+// banjo-nx (2026-10-20, from sa2-nx, banjo_renut_chain_reuse): GetPipelineLocked's calls counted, and the prebuild epoch: a draw whose key
+// is the previous draw's takes that draw's answer when no lookup was made since and no prebuilt pipeline came in
+// (DrawStateLocked). The answer depends on nothing else: the last key and the memo change only in the lookups, and a
+// memo entry of a generic pipeline is held only for its prebuild epoch.
+uint64_t g_pipeline_lookups = 0;
+uint64_t PipelineLookupsLocked() { return g_pipeline_lookups; }
+uint64_t PrebuildEpochLocked() { return g_prebuild_epoch.load(std::memory_order_acquire); }
+
 plume::RenderPipeline *GetPipelineLocked(const PipelineKey &key, const PipelineInputs &inputs) {
+  ++g_pipeline_lookups;  // banjo-nx (from sa2-nx, banjo_renut_chain_reuse)
   if (g_last_pipeline && std::memcmp(&g_last_key, &key, sizeof(key)) == 0)
     return g_last_pipeline;
   const bool memo_on = banjo::renut_gpu::PipelineMemoOn();

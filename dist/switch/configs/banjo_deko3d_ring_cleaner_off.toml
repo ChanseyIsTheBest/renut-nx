@@ -358,15 +358,65 @@ banjo_deko3d_ring_cleaner = false
 # input -> swap -> present. configs/banjo_deko3d_kick_submit_off.toml and banjo_late_input_off.toml are the A/Bs.
 banjo_deko3d_kick_submit = true
 banjo_late_input = true
+# Input latency (2026-10-20, no vsync): where the GPU is the limit, the next frame is recorded (and the game
+# released) only when the GPU has the current frame's last part left, instead of a whole frame ahead.
+# The [latency] lines say what it does (input -> GPU done, frames held back). Same pixels. ON since package 36k (the
+# console's 36j logs: at the 30 fps cap the GPU, about 80 % busy, is still on the frame before when a frame's work
+# arrives, so its controller read waits about a frame in the queue); configs/banjo_deko3d_latency_trim_off.toml is
+# the old way. OFF again since 36l: with eager kicks a frame's last part is a small list, so holding until only it is
+# left starved the GPU (36k on the console: every held frame ran it dry, the trim backed off).
+banjo_deko3d_latency_trim = false
+# Package 36s: banjo_late_input_gpu (36l-36r: late input also taking the GPU queue's slack) and its margin key are
+# removed. Your console runs: no gain at the 30 fps cap, and in scenes just able to hold 30 it held the controller
+# read back up to 29 ms and cost about 6 fps (36q). Plain late input (above) stays.
 # Package 35b (latency batch 3): the frame limiter (frame_cap) follows the display's refresh: each frame is released at
 # a refresh plus a phase, found by measurement as late as the images still reach the display at the refresh they did
 # before (the limiter's own 33.3 ms timer slid against the display: up to a refresh more of waiting, and uneven frames).
 # The [display] line every 10 s gives present -> display and input -> display. OFF in package 35b: in the emulator
-# every run with it on stalled or hung (not yet explained); configs/banjo_display_sync_on.toml tries it on the console.
+# every run with it on stalled or hung (not yet explained). ON since package 36i at the user's request, for the console
+# (the Ryujinx test runs keep it off); configs/banjo_display_sync_off.toml is the old way.
 # banjo_display_phase_auto = false with banjo_display_phase_us sets the phase by hand.
-banjo_display_sync = false
+banjo_display_sync = true
 banjo_display_phase_auto = true
 banjo_display_phase_max_us = 12000
+# Package 36 (2026-10-19 night). GPU: texture size queries read from a buffer (A5E2: 8 -> 4 texture operations a pixel
+# over the whole screen); discarding pixel shaders of draws that write no depth or stencil (particles and other
+# blended effects; the fur shells write depth) depth tested before they run; both the same pixels. The fur family with 32 GPRs at most is an A/B, off.
+banjo_deko3d_txq_constants = true
+banjo_deko3d_early_z = true
+banjo_deko3d_gpr32 = false
+# GPU A/B (package 36c): the heaviest lit shaders' point lights in branches on their reach (warps out of a light's
+# reach skip it); the same pixels, off until the console says it is faster.
+banjo_deko3d_light_branch = false
+# GPU (package 36g): the fur's meshes skinned once a frame; the other shells read the skinned rows (half the vertex
+# work of their draws). The same pixels. On at the user's request (2026-10-20); configs/banjo_deko3d_skin_once_off.toml
+# is the old way, configs/banjo_deko3d_skin_once_ab.toml switches it off and on every 4 s in one run.
+banjo_deko3d_skin_once = true
+# Input latency (package 36i): the frame goes to the GPU in more, earlier parts (lists of 100 draws, each at its own
+# kick), so at the frame cap the GPU works while the render thread replays the frame. Same pictures. On at the user's
+# request (2026-10-20); configs/banjo_deko3d_eager_kicks_off.toml is the old way, _ab.toml switches it every 4 s.
+banjo_deko3d_eager_kicks = true
+# The colour flash: while the game stalls (loading) the last frame is not re-presented unless a menu is up (the screen
+# keeps the last frame, as the console does), and never from a texture no resolve wrote.
+banjo_renut_stall_present = false
+# The colour flash, 2nd kind (2026-10-20): textures sampled through the swizzle of the device's fetch constant (what
+# the GPU reads), not their header's in guest memory, which the game may be rewriting (a bloom level read as solid
+# yellow turned the whole frame yellow). The same pixels whenever the two agree.
+banjo_renut_device_swizzle = true
+# NOT exact, your call (2026-10-20): 1 draws every fur shell (as the game); 2 draws every 2nd shell of each mesh
+# (11 of Banjo's 21: thinner fur, the same length), 3 every 3rd. The fur is about 18 ms of the heaviest frame.
+banjo_renut_fur_shells = 1
+# NOT exact, your call (2026-10-20): the same for the dialogue portrait (targets of 128 x 128 or less), where 21
+# shells cost ~2.5 ms of the heaviest frames for a few thousand pixels; 3 draws 7 of 21.
+banjo_renut_portrait_fur_shells = 1
+# Package 36d (GPU, exact): each bone row read with one 128-bit load instead of four 32-bit ones (the fur and
+# shadow-map vertex shaders, memory-bound on the console). Needs 36d's deko3d_shaders.bin; off uses
+# deko3d_shaders_f447.bin (in the package too).
+banjo_deko3d_uam_wide_rows = true
+# The gamma ramp the game loads (about x^1.17: darker midtones), which the Xbox 360's display and banjo-nx's
+# own renderer apply and Renut's renderer never has: on, the output looks as on a 360 (the deko3d builds'
+# picture changes). Off by default: your call (2026-10-20).
+banjo_renut_game_gamma = false
 # Package 34 (CPU, 2026-10-19): the render thread's cached vertex and index copies proven by the store cards (every guest
 # store outside the stack marks its 4 KB page; Renut hashes a copy only when one of its pages was written since it was
 # last proven) instead of hashed whole after every kick (gameplay: 16 MB a frame, a quarter of the render thread). The

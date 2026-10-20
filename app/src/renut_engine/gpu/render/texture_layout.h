@@ -102,6 +102,8 @@ struct TextureFetch {
   u32 BasePage() const { return dword[1] >> 12; }
 
   u32 Swizzle() const { return (dword[3] >> 1) & 0xFFF; }
+  // banjo-nx (2026-10-20): the exponent adjust, dword 3 bits 13-18 (signed): the fetch result times 2^adjust.
+  int ExpAdjust() const { return int32_t(dword[3] << 13) >> 26; }
   TextureFilter MagFilter() const { return TextureFilter((dword[3] >> 19) & 3); }
   TextureFilter MinFilter() const { return TextureFilter((dword[3] >> 21) & 3); }
   TextureFilter MipFilter() const { return TextureFilter((dword[3] >> 23) & 3); }

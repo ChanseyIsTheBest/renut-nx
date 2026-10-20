@@ -3,10 +3,12 @@
  */
 #include "renut_engine/gpu/guest/callbacks.h"
 
+#include <atomic>
 #include <deque>
 #include <mutex>
 #include <vector>
 
+#include <rex/cvar.h>
 #include <rex/hook.h>
 #include <rex/ppc.h>
 
@@ -14,6 +16,13 @@
 #include "renut_engine/gpu/backend/render_thread.h"
 #include "renut_engine/gpu/render/textures.h"
 #include "renut_engine/gpu/banjo_renut_checks.h"  // banjo-nx (package 27c)
+
+// banjo-nx (2026-10-20, from sa2-nx): see g_waiting.
+REXCVAR_DEFINE_BOOL(banjo_renut_callbacks_fast, true, "Banjo/Enhancements",
+                    "Renut's renderer: every draw, clear and resolve hook first runs the guest's GPU callbacks the "
+                    "render thread has reached; with none waiting (nearly always) it returns without "
+                    "taking the two locks it took to find that out. Off: the locks every time")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 namespace renut::gpu {
 
@@ -30,6 +39,10 @@ std::deque<Callback> g_callbacks;  // inserted, not run yet, in order
 uint64_t g_last_seq = 0;
 // Set while a thread runs callbacks: they run one at a time, in order.
 bool g_running = false;
+// banjo-nx (2026-10-20, from sa2-nx, banjo_renut_callbacks_fast): g_callbacks.size(), kept with it under g_mutex and read without it.
+// A hook that reads 0 while another thread inserts one runs it at its next call; on the inserting thread the count is
+// in program order.
+std::atomic<size_t> g_waiting{0};
 
 } // namespace
 
@@ -39,6 +52,7 @@ void InsertCallback(u32 function, u32 context) {
     std::lock_guard lock(g_mutex);
     seq = ++g_last_seq;
     g_callbacks.push_back({seq, function, context});
+    g_waiting.store(g_callbacks.size(), std::memory_order_release);
   }
   // The linear textures of the work before it are read now, not when the
   // command list is submitted: after the callback the game may rewrite them
@@ -53,7 +67,17 @@ uint64_t LastCallback() {
   return g_last_seq;
 }
 
+std::atomic<int> g_hook_fast_paths{0};  // banjo-nx (from sa2-nx): callbacks.h
+
+bool HookFastPathsInit() {
+  const bool on = REXCVAR_GET(banjo_renut_callbacks_fast);
+  g_hook_fast_paths.store(on ? 1 : -1, std::memory_order_relaxed);
+  return on;
+}
+
 void RunReadyCallbacks() {
+  if (HookFastPathsOn() && g_waiting.load(std::memory_order_acquire) == 0)
+    return;  // banjo-nx (from sa2-nx): nothing inserted and not run
   const uint64_t reached = render_thread::CallbacksReached();
   std::vector<Callback> ready;
   {
@@ -64,6 +88,7 @@ void RunReadyCallbacks() {
       ready.push_back(g_callbacks.front());
       g_callbacks.pop_front();
     }
+    g_waiting.store(g_callbacks.size(), std::memory_order_release);
     g_running = true;
   }
   for (const Callback &callback : ready) {

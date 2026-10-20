@@ -231,12 +231,59 @@ bool Deko3DVsOutputsOn();
 bool Deko3DUamPrmtOn();
 // banjo_deko3d_early_hoist: constant 907 of the deko3d GLSL (tools/deko3d_glsl_opt.py earlyhoist) left at 1.
 bool EarlyHoistOn();
-// uam's banjo flags (banjo_deko3d_uam_prmt, banjo_deko3d_uam_gvn, banjo_deko3d_uam_uniform_branches); 447 by default.
+// banjo_deko3d_txq_constants / banjo_deko3d_txq_verify (2026-10-19, GPU): constant 908 of the deko3d GLSL
+// (tools/deko3d_glsl_opt.py txq): 1 the texture size buffer (default), 0 the texture query, 2 both and magenta where
+// they differ.
+uint32_t TxqMode();
+// banjo_renut_stall_present (2026-10-19): the overlay pump re-presents the last front buffer while the guest stalls.
+bool StallPresentOn();
+// banjo_deko3d_early_z (2026-10-19, GPU): constant 909 for draws that write neither depth nor stencil.
+bool EarlyZOn();
+// banjo_deko3d_gpr32 (2026-10-19, GPU A/B): constant 910 (the fur family compiled with 32 GPRs at most).
+bool Gpr32On();
+// banjo_deko3d_light_branch (2026-10-20, GPU A/B): constant 911 (the listed lit shaders' lights in branches on their
+// attenuation test, tools/deko3d_glsl_opt.py lightbranch).
+bool LightBranchOn();
+// banjo_deko3d_skin_once (2026-10-20, GPU A/B): constant 913 (the fur's vertex shaders skin once a frame,
+// tools/deko3d_glsl_opt.py skinonce; render/draw.cpp FurSkinLocked). CountSkinOnce: 0 wrote, 1 read, 2 plain, 3 no room.
+bool SkinOnceOn();
+// banjo_deko3d_eager_kicks (2026-10-20, input latency A/B): kick lists of 100 draws, up to 6 a frame, each submitted at
+// its own kick (backend/video.cpp KickLocked); false in the off half of the in-run A/B (target 18).
+bool EagerKicksOn();
+void CountSkinOnce(uint32_t kind);
+// 2026-10-20: a texture bind whose fetch constant has an exponent adjust (not applied by Renut).
+void CountExpAdjust(int adjust);
+// A write that missed an entry of the same shader and size: bit 0 vertex data, 1 bone data, 2 indices, 3 first
+// vertex, 4 shared constants differed.
+void CountSkinMiss(uint32_t fields);
+// banjo_renut_diag_null_ps (2026-10-20, diagnostic): constant 912 (the fur family discards at once).
+bool NullPsOn();
+// banjo_renut_device_swizzle (2026-10-20, the colour flash): textures sampled through the device fetch constant's
+// swizzle, not their header's.
+bool DeviceSwizzleOn();
+// banjo_deko3d_latency_trim (2026-10-20, input latency): hold the render thread after a present until the GPU has
+// finished all but the frame's last part (backend/video.cpp).
+bool LatencyTrimOn();
+// Counts a bind through the device's swizzle in frame 'frame' (the periodic report's "[flash] device swizzle" line).
+void CountDeviceSwizzle(uint32_t frame);
+// Counts a bind whose texture header describes the same data as the device fetch constant but differs in the
+// masked dwords set in 'dwords' (bit i = dword i): the "[flash] header vs device" line.
+void CountHeaderDescDiffer(uint32_t dwords);
+// banjo_renut_fur_shells (2026-10-20, NOT exact): 1 every fur shell drawn; N every Nth of a mesh's run of shells.
+uint32_t FurShellEvery();
+// banjo_renut_portrait_fur_shells: the same for targets of 128 x 128 or less (the dialogue portrait).
+uint32_t PortraitFurShellEvery();
+void CountFurShell(bool drawn);
+// uam's banjo flags (banjo_deko3d_uam_prmt, banjo_deko3d_uam_gvn, banjo_deko3d_uam_uniform_branches,
+// banjo_deko3d_uam_wide_rows); 1471 by default.
 unsigned Deko3DUamFlags();
 // banjo_background_compile_core / banjo_deko3d_compile_priority (2026-10-18): the uam thread's core and priority.
 int Deko3DCompileCore();
 int Deko3DCompilePriority();
 void CountDrawnResolve();
+// 2026-10-20 (the Renut CPU port from sa2-nx): where the render thread's draws come from: 0 immediate (a whole device
+// copy queued by the game thread), 1 replayed from a recorded command buffer (device deltas).
+void CountDrawSource(int source);
 // banjo_renut_resolve_skip (2026-10-19): a resolve whose source and destination are as at the same resolve before is
 // not done again (render/draw.cpp ResolveStateLocked); counted per kind.
 inline bool ResolveSkipOn() { return Latch().resolve_skip; }
@@ -244,6 +291,8 @@ inline bool ResolveSkipOn() { return Latch().resolve_skip; }
 // 1 written late, 2 read stale (the source had changed).
 inline bool DepthWordsLazyOn() { return Latch().depth_words_lazy; }
 void CountLazyWords(int what);
+// 2026-10-20: a draw's fetch data checked for the 16-byte alignment the aw4 shader pass relies on.
+void CountFetchAlignment(bool aligned);
 // banjo_deko3d_depth_handover (2026-10-19, GPU): depth resolves left in their target's image (render/draw.cpp, "Depth
 // hand-over"). Counted: 0 resolves handed over, 1 binds of a target's image, 2 images taken at a whole clear,
 // 3 resolves done after all (the target bound or gone, or the destination needed in its texture), 4 of them from a

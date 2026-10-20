@@ -52,6 +52,10 @@ def restore_text(text):
     if BEGIN in text:
         a = text.index(BEGIN)
         b = text.index(END) + len(END) + 1
+        # The insertion adds an empty line after END (copies + ['']): take it too, or every run on a processed tree
+        # left one more blank line (2026-10-19, found by peggle2-nx and sasrt-nx).
+        if text.startswith('\n', b):
+            b += 1
         text = text[:a] + text[b:]
     return INL_RE.sub(lambda m: f'__imp__{m.group(1)}(ctx, base);', text)
 

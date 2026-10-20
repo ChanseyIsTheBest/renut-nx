@@ -95,6 +95,7 @@ struct HostVertexStream {
 // input location are dropped (no N&B shader reads them).
 struct HostVertexLayout {
   HostVertexStream streams[kMaxVertexStreams];
+  u32 used_mask = 0;  // banjo-nx (2026-10-20, from sa2-nx): bit s = streams[s].used (BindStreams walks it)
   std::vector<plume::RenderInputElement> input_elements;  // semantic names are static strings
 };
 

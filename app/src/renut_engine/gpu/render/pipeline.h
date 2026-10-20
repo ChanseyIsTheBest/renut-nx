@@ -106,6 +106,13 @@ struct PipelineInputs {
 // Built pipeline for the key, compiling it on first use unless the pipeline
 // list (below) built it ahead. nullptr on failure (logged once per key).
 plume::RenderPipeline *GetPipelineLocked(const PipelineKey &key, const PipelineInputs &inputs);
+// banjo-nx (2026-10-20, from sa2-nx, banjo_renut_chain_reuse): GetPipelineLocked's calls so far, and the prebuild epoch.
+uint64_t PipelineLookupsLocked();
+uint64_t PrebuildEpochLocked();
+
+// banjo-nx (2026-10-20): the pipeline list's last records synced to the card once they are a second old (the render
+// thread, once a frame: a game closed with HOME keeps them).
+void SyncPipelineListLocked();
 
 // The pipeline list: every pipeline a draw needed is written to a file
 // (renut_pipeline_list), and at the next start worker threads build the ones

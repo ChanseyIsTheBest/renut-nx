@@ -33,6 +33,9 @@ void Queue(std::function<void()> work);
 // The same without taking State().mutex, for work that takes it itself
 // (Video::Present, record destruction).
 void QueueUnlocked(std::function<void()> work);
+// banjo-nx (2026-10-20, from sa2-nx, banjo_renut_prefetch_next): as Queue, and the two addresses (each may be null)
+// are prefetched while the item before it runs.
+void QueuePrefetched(const void *prefetch0, const void *prefetch1, std::function<void()> work);
 
 // Writes 'fence' to the guest word at 'completion_va' (the device's fence
 // completion, which IsFencePending and BlockOnFence read) once the work queued
