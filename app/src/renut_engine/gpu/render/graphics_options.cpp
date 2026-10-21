@@ -104,8 +104,10 @@ void LatchGraphicsOptionsLocked() {
   g_latched.full_ambient_occlusion = REXCVAR_GET(renut_ambient_occlusion) == "Full";
   // banjo-nx (2026-10-18): deko3d draws every target at the console's scale (its shaders are made for 1x, pass scale1
   // of tools/deko3d_glsl_opt.py): shadow maps follow the resolution (1x) and the ambient occlusion is the game's.
+  // banjo-nx (2026-10-21, internal resolution): the 3D image at 648p or 900p (and the menus at 1080p docked): the shadow
+  // maps stay at the console's size (1x, the game's shadows; not 0.9x), the ambient occlusion the game's.
   if (IsDeko3D()) {
-    g_latched.shadow_follows_resolution = true;
+    g_latched.shadow_follows_resolution = false;
     g_latched.shadow_scale = {};
     g_latched.full_ambient_occlusion = false;
   }
@@ -125,6 +127,12 @@ RenderScale SurfaceRenderScale(const d3d::SurfaceDesc &desc, RenderScale resolut
     return resolution.Times(2);
   if (IsPostProcessBuffer(desc, width, height))
     return {};  // the console's
+  // banjo-nx (2026-10-21, package 36z2): a depth target of a quarter of the screen or less goes with the colour targets
+  // of that size (the post-processing buffers' rule, which takes colour only): a 128x128 one at 0.9x under its 128x128
+  // colour target at 1x cut its draws to 115x115 (console log of 36z: ten draws a frame).
+  if (IsDeko3D() && d3d::IsDepthFormat(desc.Format) && width * 4 <= GuestScreenWidth() &&
+      height * 4 <= kGuestScreenHeight)
+    return {};
   return resolution;
 }
 

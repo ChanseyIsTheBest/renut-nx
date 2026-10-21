@@ -1,5 +1,6 @@
 #pragma once
 #include "profiler/banjo_pc_profiler.h"
+#include "banjo_pgo.h"
 #include <rex/filesystem.h>
 #include <rex/platform.h>
 #include <rex/rex_app.h>
@@ -35,6 +36,8 @@
 #include <filesystem>
 #include <functional>
 #include <string>
+
+REXCVAR_DECLARE(bool, banjo_show_fps);  // banjo-nx (2026-10-21): profiler/profiler.cpp
 
 REXCVAR_DECLARE(bool, banjo_mesa_disk_cache_off);
 REXCVAR_DECLARE(bool, masseffect_nvk_cache_per_stage);
@@ -79,6 +82,7 @@ public:
         //drawer->AddDialog(new FpsOverlayDialog(drawer));
         fps_dialog_ = std::make_unique<FpsOverlayDialog>(drawer);
         fps_dialog_->fpsManager = &fpsManager;
+        fpsManager.showFPS = REXCVAR_GET(banjo_show_fps);  // banjo-nx (2026-10-21)
         drawer->AddDialog(fps_dialog_.get());
         drawer->AddDialog(new RenuLogOverlayDialog(drawer));
         // CPU/GPU profiler window ported from UnleashedRecomp (F5 / banjo_show_profiler).
@@ -196,6 +200,13 @@ public:
         // Sampling CPU profiler for PC tests (nfsmw_perfil_pc_desde_s; off by default).
         nfsmw::perfil_pc::Arrancar();
 #endif
+        // The PGO-instrumented build (BANJO_PGO=generate) saves its counts to pgo/ every 2 minutes (nothing otherwise).
+        banjo::pgo::Start();
+    }
+
+    // The PGO-instrumented build saves its counts when the game loses focus (HOME menu): it may be closed from there.
+    void OnWindowFocusChanged(bool focused) override {
+        if (!focused) banjo::pgo::DumpNow();
     }
 
     void OnShutdown() override {
@@ -208,6 +219,7 @@ public:
         nfsmw::perfil_pc::Parar();
 #endif
         renut::mnk::DetachWindow();
+        banjo::pgo::Stop();
     }
 
     // A game_root folder next to the executable is used when no path was given.

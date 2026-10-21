@@ -169,6 +169,26 @@ REXCVAR_DEFINE_INT32(banjo_renut_fur_shells, 1, "Banjo/Enhancements",
                      "first always: 2 draws 11 of Banjo's 21 shells (thinner fur, the same length). The fur is about "
                      "18 ms of the heaviest frame's GPU at the stock clock")
     .range(1, 4);
+REXCVAR_DEFINE_INT32(banjo_renut_fur_shells_percent, 100, "Banjo/Enhancements",
+                     "NOT exact, the user's call (2026-10-21): the share of each fur part's shells drawn, spread evenly "
+                     "(75: three of every four, the 4th, 8th, ... left out: 16 of Banjo's 21, his outermost shell drawn, "
+                     "so the fur keeps its length), the first always (it writes the skin-once rows); the dialogue "
+                     "portrait's too. 100 draws every shell as "
+                     "the game. Below 100 it takes the place of banjo_renut_fur_shells and banjo_renut_portrait_fur_shells")
+    .range(25, 100);
+REXCVAR_DEFINE_INT32(banjo_renut_portrait_fur_shells_percent, 100, "Banjo/Enhancements",
+                     "NOT exact, the user's call (2026-10-21): banjo_renut_fur_shells_percent for the fur drawn into "
+                     "targets of 128 x 128 or less (the dialogue portrait, 96 x 96): 50 draws every other shell (11 of "
+                     "21, the first always). 100: the same share as the rest of the fur")
+    .range(25, 100);
+REXCVAR_DEFINE_INT32(banjo_renut_portrait_msaa_samples, 0, "Banjo/Enhancements",
+                     "NOT exact, the user's call (2026-10-21): the samples of the colour and depth targets of 128 x 128 "
+                     "or less that the game makes with MSAA (the dialogue portrait's 96 x 96 box, 4x). 0 as the game; 2: "
+                     "2x (half the samples to test, write and resolve; the edges still smoothed); 1: single-sampled (no "
+                     "MSAA: its resolves plain copies, without their GPU stalls, its edges not smoothed: SMAA runs "
+                     "before the HUD, the portrait is part of it). Only lowers a count. disable_msaa covers only the "
+                     "scene target")
+    .range(0, 2);
 REXCVAR_DEFINE_BOOL(banjo_deko3d_uam_wide_rows, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-20, GPU): uam reads each bone row of tools/deko3d_glsl_opt.py's aw4 view "
                     "(a uvec4 of storage buffer 15) with one 128-bit load instead of four 32-bit ones (banjo flag 1024): "
@@ -178,6 +198,63 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_uam_wide_rows, true, "Banjo/Enhancements",
                     "32-bit loads, with a DKSH cache of its own (deko3d_shaders_f447.bin)");
 REXCVAR_DEFINE_BOOL(banjo_renut_diag_null_ps, false, "Banjo/Diagnostics",
                     "Diagnostic (2026-10-20): the fur family's pixel shaders (tools/nullps_shaders.txt) discard at once, so the GPU profile shows their draws' vertex and rasterisation cost alone. The fur vanishes: a measurement, not a picture (configs/banjo_renut_diag_fur_vertex_only.toml)");
+REXCVAR_DEFINE_BOOL(banjo_renut_smaa, false, "Banjo/Enhancements",
+                    "SMAA 1x (2026-10-21, the user's request; Jimenez et al.'s SMAA, MIT: app/thirdparty/smaa): "
+                    "anti-aliasing of the game's 3D image right after its final composite (a draw with one of the pixel "
+                    "shaders of banjo_renut_smaa_after_ps), before the HUD is drawn over it, so the HUD and its text stay "
+                    "as they are. A copy and three full-screen passes at the target's size (luma edges, blending "
+                    "weights, neighbourhood blending; render/smaa.cpp); the in-run A/B target 19 measures its GPU time. "
+                    "It smooths the 3D image's edges: not the game's own picture");
+REXCVAR_DEFINE_INT32(banjo_renut_smaa_quality, 1, "Banjo/Enhancements",
+                     "banjo_renut_smaa's preset: 1 = SMAA's medium (8 search steps, no diagonal or corner detection), "
+                     "2 = high (16 search steps, diagonal search of 8, corner rounding 25: smoother diagonals, more GPU "
+                     "time)")
+    .range(1, 2);
+REXCVAR_DEFINE_DOUBLE(banjo_renut_smaa_threshold, 0.1, "Banjo/Enhancements",
+                      "banjo_renut_smaa's luma edge threshold (SMAA's presets: 0.15 low, 0.1 medium and high, 0.05 "
+                      "ultra): lower finds more edges (and softens more texture detail)");
+REXCVAR_DEFINE_STRING(banjo_renut_smaa_after_ps, "981A6A58F2ABFA42", "Banjo/Enhancements",
+                      "banjo_renut_smaa: pixel shaders (16-digit hex hashes, comma separated) whose draw is the frame's "
+                      "final composite; SMAA runs on its target right after it, once a frame. N&B: 981A6A58F2ABFA42, "
+                      "the bloom and depth-of-field composite before the HUD (emulator trace of 2026-10-21)");
+// banjo-nx (2026-10-21, internal resolution, the user's request; sa2-nx and Peggle 2 switch resolution by mode too).
+REXCVAR_DEFINE_INT32(banjo_renut_render_height_handheld, 720, "Banjo/Enhancements",
+                     "NOT exact, the user's request (2026-10-21): on deko3d, the height of the 3D image in handheld mode: "
+                     "720 = the game's 1280x720; 648 = 1152x648 (0.81 of the pixels to shade); any height from 360 to "
+                     "1080, rounded to a multiple of 9 (whole pixels at every 16:9 size the game uses; package 36z2). "
+                     "The HUD, menus and text stay at the display's resolution: right after the game's final "
+                     "composite (banjo_renut_smaa_after_ps) and SMAA the image is scaled to it "
+                     "(banjo_renut_upscale_filter) and the HUD is drawn over the full-size copy (render/ui_scale.cpp). "
+                     "Frames without that composite for half a second (menus, loading) are drawn at the display's "
+                     "resolution whole. Shadow maps and the post-processing buffers keep the console's sizes. From the "
+                     "next frame")
+    .range(480, 1080);
+REXCVAR_DEFINE_INT32(banjo_renut_render_height_docked, 720, "Banjo/Enhancements",
+                     "NOT exact, the user's request (2026-10-21): banjo_renut_render_height_handheld for docked mode "
+                     "(864 = 1536x864, 1.2x the game's; 900 = 1600x900; with banjo_renut_display_height_docked = 1080 "
+                     "the HUD at 1920x1080). Read at start")
+    .range(480, 1080);
+REXCVAR_DEFINE_INT32(banjo_renut_display_height_docked, 720, "Banjo/Enhancements",
+                     "The display's resolution when docked on deko3d (2026-10-21; the swapchain change from sa2-nx "
+                     "1.0.3.1): 720 = 1280x720, which the console scales to the TV; 1080 = the swapchain made at "
+                     "1920x1080 and the HUD, menus and text drawn at it (1.5x). Docking and undocking switch at the next "
+                     "frame")
+    .range(720, 1080);
+REXCVAR_DEFINE_BOOL(banjo_renut_host_mips, true, "Banjo/Enhancements",
+                    "Renut's renderer: a resolve destination drawn above 1x (docked: the 3D image at 1.2x, the HUD at "
+                    "1.5x) gets an extra host mip level, rebuilt after every resolve, so minified reads of it filter as "
+                    "the guest's 1x texture would (Renut's, made for 1440p and 4K). Off (2026-10-21, NOT exact above "
+                    "1x): level 0 only, as at 1x and in handheld mode; the console log of 36z had it at 4 ms a docked "
+                    "frame (\"resolve host mip levels\")");
+REXCVAR_DEFINE_INT32(banjo_renut_upscale_filter, 0, "Banjo/Enhancements",
+                     "The scaling of the 3D image from banjo_renut_render_height_* to the display's resolution "
+                     "(2026-10-21): 0 = bilinear (one sample a pixel: the cheapest; the user's choice, every config), "
+                     "1 = bicubic Catmull-Rom (five bilinear samples a pixel, sharper)")
+    .range(0, 1);
+REXCVAR_DEFINE_INT32(banjo_renut_diag_smaa_compare_s, 0, "Banjo/Diagnostics",
+                     "banjo_renut_smaa comparison pictures (2026-10-21): every N seconds the same frame's 3D image "
+                     "before and after SMAA (the HUD not drawn yet) as capturas/smaa_NNN_off.tga and _on.tga next to "
+                     "the NRO, at full size (0 = off; render/smaa.cpp)");
 REXCVAR_DEFINE_BOOL(banjo_deko3d_eager_kicks, false, "Banjo/Enhancements",
                     "Input latency A/B (2026-10-20): the frame goes to the GPU in more, earlier parts: a command list ends at a game kick once it holds 100 draws (not 200, at most 6 a frame, not 3) and goes to the GPU at that kick (its upload memory cleaned first), not at the next one. At the frame cap the GPU then works while the render thread is still replaying the frame instead of mostly after the present: the frame is done sooner after its controller read (the [latency] line's \"input -> GPU done\"). The same commands in the same order (configs/banjo_deko3d_eager_kicks_ab.toml; in-run A/B target 18)");
 REXCVAR_DEFINE_BOOL(banjo_deko3d_skin_once, false, "Banjo/Enhancements",
@@ -289,6 +366,13 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_barrier_merge, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-19, GPU): barriers recorded one after another with no GPU work between "
                     "them are emitted as one (the strongest wait, every invalidation) right before the next command "
                     "that does work: one pipeline drain instead of several. Same pixels");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_async_variants, true, "Banjo/Enhancements",
+                    "deko3d renderer (2026-10-21, after a console freeze in a run-time shader compile that never ended): "
+                    "a shader variant missing from the DKSH cache is compiled in the background while its draws use the "
+                    "shader's generic variant (the same pixels: it reads at run time what the specialised one folds), "
+                    "and the pipeline takes its own variant once it is done. No draw waits for a compile; the generic "
+                    "variants of every game shader are in the cache (tools/deko3d_variant_cache.py --generic). Off: the "
+                    "draw waits for the compile, as before. Read at start");
 REXCVAR_DEFINE_BOOL(banjo_deko3d_barrier_lean, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-19, GPU): a transition into a layout that is only written next keeps "
                     "the texture cache (only a read after a write needs it invalidated, and that read's transition "
@@ -380,7 +464,7 @@ REXCVAR_DEFINE_INT32(banjo_renut_ab_target, 0, "Banjo",
                      "banjo_gpu_depth_words_view; 14 banjo_renut_record_worker; 15 banjo_deko3d_light_branch, 16 "
                      "banjo_deko3d_gpr32 and 17 banjo_deko3d_skin_once (2026-10-20: the key on; the off half's "
                      "pipelines are built without its constant); 18 banjo_deko3d_eager_kicks; 19 "
-                     "none (was banjo_late_input_gpu, removed in package 36s). The part is "
+                     "banjo_renut_smaa (2026-10-21; was banjo_late_input_gpu until 36s). The part is "
                      "switched off and on every banjo_renut_ab_s seconds; the \"[renut A/B]\" line every 10 s gives "
                      "both halves' frame rate, render thread and GPU time")
     .range(0, 19);
@@ -502,6 +586,9 @@ std::atomic<uint64_t> g_tex_cards[4], g_tex_cards_bytes{0};  // proven, hashed, 
 std::atomic<uint64_t> g_kind_depth_only{0}, g_kind_depth_plain{0}, g_kind_nothing{0}, g_kind_partial{0};
 std::atomic<uint64_t> g_depth_only_draws{0};  // banjo_gpu_depth_only (package 28)
 std::atomic<uint64_t> g_resolves_drawn{0};  // banjo_deko3d_draw_resolves (2026-10-18)
+std::atomic<uint64_t> g_smaa_runs{0};       // banjo_renut_smaa (2026-10-21)
+std::atomic<uint64_t> g_ui_upscales[2]{};    // internal resolution (2026-10-21): composites scaled up, drawn at full size
+std::atomic<uint64_t> g_ui_depth[2]{};       // internal resolution: UI depth targets filled, draws kept a smaller one
 std::atomic<uint64_t> g_resolves_skipped[2];  // banjo_renut_resolve_skip (2026-10-19): colour, depth
 std::atomic<uint64_t> g_words_lazy[3];  // banjo_renut_depth_words_lazy: not written, written late, read stale
 std::atomic<uint64_t> g_handover[6];    // banjo_deko3d_depth_handover (CountHandOver)
@@ -627,6 +714,7 @@ const char *AbName(int target) {
   case 16: return "banjo_deko3d_gpr32";
   case 17: return "banjo_deko3d_skin_once";
   case 18: return "banjo_deko3d_eager_kicks";
+  case 19: return "banjo_renut_smaa";
   default: return "none";
   }
 }
@@ -839,6 +927,23 @@ void StatsGameFrame() {
               g_words_lazy[0].exchange(0, std::memory_order_relaxed),
               g_words_lazy[1].exchange(0, std::memory_order_relaxed),
               g_words_lazy[2].exchange(0, std::memory_order_relaxed));
+  // banjo-nx (2026-10-21): how many frames had SMAA (banjo_renut_smaa), against the game frames of the line above.
+  if (REXCVAR_GET(banjo_renut_smaa))
+    REXLOG_INFO("[renut] SMAA (banjo_renut_smaa, quality {}, threshold {:.3f}): {} frames", SmaaQuality(),
+                SmaaThreshold(), g_smaa_runs.exchange(0, std::memory_order_relaxed));
+  // banjo-nx (2026-10-21): the internal resolution's frames.
+  {
+    const uint64_t scaled = g_ui_upscales[0].exchange(0, std::memory_order_relaxed);
+    const uint64_t full = g_ui_upscales[1].exchange(0, std::memory_order_relaxed);
+    const uint64_t depth = g_ui_depth[0].exchange(0, std::memory_order_relaxed);
+    const uint64_t kept = g_ui_depth[1].exchange(0, std::memory_order_relaxed);
+    if (scaled || RenderHeightHandheld() != 720 || RenderHeightDocked() != 720)
+      REXLOG_INFO("[renut] internal resolution (banjo_renut_render_height_handheld {}, _docked {}, display docked {}, "
+                  "{} upscale, not exact): {} composites scaled up for the HUD, {} drawn at the display's resolution, "
+                  "{} depth targets scaled up for 3D drawn after the composite, {} draws testing a smaller depth "
+                  "target", RenderHeightHandheld(), RenderHeightDocked(), DisplayHeightDocked(),
+                  UpscaleFilter() ? "bicubic" : "bilinear", scaled, full, depth, kept);
+  }
   if (PushConstantsOn()) {
     REXLOG_INFO("[renut] pushed constants (banjo_deko3d_push_constants): {} draws, {:.1f} KB of float constants and "
                 "{:.1f} KB of shared constants pushed{}",
@@ -894,11 +999,14 @@ void StatsGameFrame() {
                 "without room",
                 k[0], k[1], k[2], k[3], m[5], m[0], m[1], m[2], m[3], m[4], k[4], k[5], k[6], k[7]);
   }
-  if (REXCVAR_GET(banjo_renut_fur_shells) > 1 || REXCVAR_GET(banjo_renut_portrait_fur_shells) > 1) {
+  if (REXCVAR_GET(banjo_renut_fur_shells) > 1 || REXCVAR_GET(banjo_renut_portrait_fur_shells) > 1 ||
+      REXCVAR_GET(banjo_renut_fur_shells_percent) < 100 || REXCVAR_GET(banjo_renut_portrait_fur_shells_percent) < 100) {
     const uint64_t drawn = g_fur_shells[0].exchange(0, std::memory_order_relaxed);
     const uint64_t skipped = g_fur_shells[1].exchange(0, std::memory_order_relaxed);
-    REXLOG_INFO("[renut] fur shells (banjo_renut_fur_shells {}, portrait {}, not exact): {} drawn, {} not drawn",
-                REXCVAR_GET(banjo_renut_fur_shells), REXCVAR_GET(banjo_renut_portrait_fur_shells), drawn, skipped);
+    REXLOG_INFO("[renut] fur shells (banjo_renut_fur_shells {}, portrait {}, percent {}, portrait percent {}, not "
+                "exact): {} drawn, {} not drawn", REXCVAR_GET(banjo_renut_fur_shells),
+                REXCVAR_GET(banjo_renut_portrait_fur_shells), REXCVAR_GET(banjo_renut_fur_shells_percent),
+                REXCVAR_GET(banjo_renut_portrait_fur_shells_percent), drawn, skipped);
   }
   if (const uint64_t binds = g_header_differ[6].exchange(0, std::memory_order_relaxed)) {
     uint64_t d[6];
@@ -982,6 +1090,7 @@ bool Deko3DDepthCompressionOn() { return REXCVAR_GET(banjo_deko3d_depth_compress
 bool Deko3DZcullOn() { return REXCVAR_GET(banjo_deko3d_zcull); }
 bool Deko3DBarrierMergeOn() { return REXCVAR_GET(banjo_deko3d_barrier_merge); }
 bool Deko3DBarrierLeanOn() { return REXCVAR_GET(banjo_deko3d_barrier_lean); }
+bool Deko3DAsyncVariantsOn() { return REXCVAR_GET(banjo_deko3d_async_variants); }
 bool Deko3DVsOutputsOn() { return REXCVAR_GET(banjo_deko3d_vs_outputs); }
 bool Deko3DUamPrmtOn() { return REXCVAR_GET(banjo_deko3d_uam_prmt); }
 bool EarlyHoistOn() { return REXCVAR_GET(banjo_deko3d_early_hoist); }
@@ -993,6 +1102,13 @@ bool SkinOnceOn() { return REXCVAR_GET(banjo_deko3d_skin_once); }
 bool EagerKicksOn() {
   return REXCVAR_GET(banjo_deko3d_eager_kicks) && g_ab_off.load(std::memory_order_relaxed) != 18;
 }
+bool SmaaOn() {
+  return REXCVAR_GET(banjo_renut_smaa) && g_ab_off.load(std::memory_order_relaxed) != 19;
+}
+int SmaaQuality() { return REXCVAR_GET(banjo_renut_smaa_quality); }
+double SmaaThreshold() { return REXCVAR_GET(banjo_renut_smaa_threshold); }
+std::string SmaaAfterPsList() { return REXCVAR_GET(banjo_renut_smaa_after_ps); }
+int32_t SmaaCompareSeconds() { return REXCVAR_GET(banjo_renut_diag_smaa_compare_s); }
 void CountExpAdjust(int adjust) {
   g_exp_adjust[0].fetch_add(1, std::memory_order_relaxed);
   g_exp_adjust[adjust < 0 ? 1 : 2].fetch_add(1, std::memory_order_relaxed);
@@ -1009,6 +1125,9 @@ bool DeviceSwizzleOn() { return REXCVAR_GET(banjo_renut_device_swizzle); }
 bool LatencyTrimOn() { return REXCVAR_GET(banjo_deko3d_latency_trim); }
 uint32_t FurShellEvery() { return uint32_t(REXCVAR_GET(banjo_renut_fur_shells)); }
 uint32_t PortraitFurShellEvery() { return uint32_t(REXCVAR_GET(banjo_renut_portrait_fur_shells)); }
+uint32_t FurShellPercent() { return uint32_t(REXCVAR_GET(banjo_renut_fur_shells_percent)); }
+uint32_t PortraitFurShellPercent() { return uint32_t(REXCVAR_GET(banjo_renut_portrait_fur_shells_percent)); }
+uint32_t PortraitMsaaSamples() { return uint32_t(REXCVAR_GET(banjo_renut_portrait_msaa_samples)); }
 void CountFurShell(bool drawn) { g_fur_shells[drawn ? 0 : 1].fetch_add(1, std::memory_order_relaxed); }
 uint32_t TxqMode() {
   return REXCVAR_GET(banjo_deko3d_txq_verify) ? 2u : REXCVAR_GET(banjo_deko3d_txq_constants) ? 1u : 0u;
@@ -1043,6 +1162,19 @@ void CountDrawSource(int source) {
 void CountDrawnResolve() {
   g_resolves_drawn.fetch_add(1, std::memory_order_relaxed);
 }
+void CountSmaa() {
+  g_smaa_runs.fetch_add(1, std::memory_order_relaxed);
+}
+int32_t RenderHeightHandheld() { return REXCVAR_GET(banjo_renut_render_height_handheld); }
+int32_t RenderHeightDocked() { return REXCVAR_GET(banjo_renut_render_height_docked); }
+int32_t DisplayHeightDocked() { return REXCVAR_GET(banjo_renut_display_height_docked); }
+int UpscaleFilter() { return REXCVAR_GET(banjo_renut_upscale_filter); }
+bool HostMipsOn() {
+  static const bool on = REXCVAR_GET(banjo_renut_host_mips);
+  return on;
+}
+void CountUiUpscale(bool scaled) { g_ui_upscales[scaled ? 0 : 1].fetch_add(1, std::memory_order_relaxed); }
+void CountUiDepth(bool filled) { g_ui_depth[filled ? 0 : 1].fetch_add(1, std::memory_order_relaxed); }
 
 
 

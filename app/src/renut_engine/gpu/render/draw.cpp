@@ -2,6 +2,8 @@
  * @file    gpu/render/draw.cpp
  */
 #include "renut_engine/gpu/render/draw.h"
+#include "renut_engine/gpu/render/smaa.h"
+#include "renut_engine/gpu/render/ui_scale.h"  // banjo-nx (2026-10-21, internal resolution)  // banjo-nx (2026-10-21): banjo_renut_smaa
 
 #include <algorithm>
 #include <array>
@@ -227,6 +229,7 @@ struct SharedConstants {
   // the silhouette"; banjo-nx 2026-10-19): in guest pixels, what the pixel position is relative to: a draw predicated
   // to one tile has the tile's corner (ViewportState::pixel_origin).
   float pixel_origin[2];
+  // [0] banjo_deko3d_skin_once's mode; [1] banjo-nx (2026-10-21): the internal heights (InternalHeightsWord).
   float pad_1352[2];
 };
 static_assert(offsetof(SharedConstants, sampler_indices) == 384);
@@ -1116,6 +1119,10 @@ struct Targets {
   // The size the guest surface header gives; smaller than width x height for
   // a target grown for tiling (SetTilingExtentLocked).
   uint32_t guest_width = 0, guest_height = 0;
+  // banjo-nx (2026-10-21, internal resolution): the device's depth target was left out (DropSmallerDepth); the pipeline
+  // key keeps the draw's depth and stencil words, so its shader variants are the ones it had with the target bound
+  // (constant 909 is decided by them; without a depth format the pipeline takes no depth state from them).
+  bool depth_dropped = false;
 };
 
 // banjo-nx (2026-10-19, banjo_deko3d_depth_handover; "Depth hand-over" below): the targets of the draw whose textures
@@ -1166,6 +1173,43 @@ bool GatherTargets(const GuestDevice &device, Targets &t) {
   t.guest_width = d3d::SurfaceWidth(first->size_word);
   t.guest_height = d3d::SurfaceHeight(first->size_word);
   return true;
+}
+
+// banjo-nx (2026-10-21, internal resolution): see DrawStateLocked. Only a depth target smaller than the first colour
+// target in host pixels (the post-processing buffers at 1x keep the scene's larger one bound, as before).
+void DropSmallerDepth(const GuestDevice &device, Targets &t, uint64_t vs_hash, uint64_t ps_hash) {
+  const HostSurface *c = t.colors[0];
+  HostSurface *d = t.depth;
+  if (d->scale.Size(d->width) >= c->scale.Size(c->width) && d->scale.Size(d->height) >= c->scale.Size(c->height))
+    return;
+  // The depth target is used by a stencil test, or a Z test that can fail or writes (a test with ZFUNC ALWAYS and no
+  // writes is none: render/pipeline.cpp leaves such a test off too).
+  const u32 dc = u32(device.dev().m_ControlPacket.DepthControl);
+  if ((dc & 1) || ((dc & 2) && (((dc >> 4) & 7) != 7 || (dc & 4)))) {
+    // After the composite, into its UI target: the depth target at the display's resolution too (the menus' 3D icons).
+    if (UiRedirectedLocked() && c->scale == UiScale()) {
+      if (d->handed)
+        DepthHandOverBeforeBindLocked(d, nullptr, 0);  // banjo-nx (2026-10-19, banjo_deko3d_depth_handover)
+      if (HostSurface *ui = UiDepthAfterCompositeLocked(d)) {
+        t.depth = ui;
+        g_bound.framebuffer = nullptr;
+        g_bound.pipeline = nullptr;
+        g_bound.layout = false;
+        g_bound.viewport_set = false;
+        return;
+      }
+    }
+    banjo::renut_gpu::CountUiDepth(false);
+    static uint32_t logged = 0;
+    if (LogLimited(logged, 16))
+      RGPU_WARN("A draw tests depth or stencil against a depth target smaller than its colour target ({}x{} at "
+                "{:.3g}x, depth {}x{} at {:.3g}x; VS {:016X} PS {:016X}, RB_DEPTHCONTROL {:08X}): kept, the draw is "
+                "cut to the depth's size", c->width, c->height, c->scale.Factor(), d->width, d->height,
+                d->scale.Factor(), vs_hash, ps_hash, dc);
+    return;
+  }
+  t.depth = nullptr;
+  t.depth_dropped = true;
 }
 
 // gpu_profile: draws into 't', by their host size and attachments.
@@ -1418,7 +1462,11 @@ ViewportState ComputeViewportSlow(const GuestDevice &device, const Targets &t) {
   // positions are the host's plus half a pixel, as Xenia offsets the viewport (draw_util). Without it everything drew
   // half a pixel up-left; the depth of field's 320x180 passes, whose blur taps are one-sided, shifted their result a
   // whole texel: the orange halo above Kazooie's crest. Not in the scissor (whole pixels).
-  const float pixel_center = (banjo::renut_gpu::HalfPixelOffsetOn() && !(device.U32(0x29C0) & 1)) ? 0.5f : 0.0f;
+  // banjo-nx (2026-10-21, package 36z2): half a host pixel, in guest pixels (0.5 / scale): half a guest pixel at a scale
+  // above 1x put the game's full-screen quads (edges on the guest's pixel centres) past the centres of the host's top
+  // row and left column, which were never drawn (the docked white line at 1.25x and 1.5x); at 1x the same as before.
+  const float pixel_center =
+      (banjo::renut_gpu::HalfPixelOffsetOn() && !(device.U32(0x29C0) & 1)) ? 0.5f / t.scale.Factor() : 0.0f;
   // SetViewport's rectangle back from its scale and offset: x = offset - scale
   // and width = 2 * scale; y = offset + scale and height = -2 * scale (the
   // scale is negative: y goes down).
@@ -3092,9 +3140,10 @@ PipelineKey MakeKey(const GuestDevice &device, const ShaderRecord *vs, const Sha
   key.blend_control[2] = cp.BlendControl2;
   key.blend_control[3] = cp.BlendControl3;
   key.color_mask = u32(dev.m_ValuesPacket.ColorMask) & 0xFFFF;
-  key.depth_control = t.depth ? u32(cp.DepthControl) : 0;
-  key.stencil_ref_mask = t.depth ? u32(dev.m_ValuesPacket.StencilRefMask) & 0xFFFFFF : 0;
-  key.stencil_ref_mask_bf = t.depth ? u32(dev.m_ValuesPacket.StencilRefMaskBF) & 0xFFFFFF : 0;
+  const bool depth_words = t.depth || t.depth_dropped;  // banjo-nx (2026-10-21, Targets::depth_dropped)
+  key.depth_control = depth_words ? u32(cp.DepthControl) : 0;
+  key.stencil_ref_mask = depth_words ? u32(dev.m_ValuesPacket.StencilRefMask) & 0xFFFFFF : 0;
+  key.stencil_ref_mask_bf = depth_words ? u32(dev.m_ValuesPacket.StencilRefMaskBF) & 0xFFFFFF : 0;
   key.mode_control = u32(cp.ModeControl) & 0x7;
   key.alpha_to_coverage = (u32(cp.ColorControl) >> 4) & 1;
   if (primitive == kRectangleList) {
@@ -4455,15 +4504,29 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
       g_targets_reuse.targets = targets;
     }
   }
+  // banjo-nx (2026-10-21, internal resolution): after the composite the HUD draws into the UI target (the display's
+  // resolution) with the scene's depth target still bound, at the internal resolution: smaller. A deko3d framebuffer is
+  // as large as its smallest attachment, so it is left out when the draw neither tests nor writes depth or stencil
+  // (RB_DEPTHCONTROL bits 0-1; with the Z test off the GPU writes no depth either): the emulator's draw logs of the HUD
+  // show 00708734, 00700040 and 00700060 only.
+  if (targets.depth && targets.color_count && targets.depth->scale != targets.scale)
+    DropSmallerDepth(device, targets, vs->hash, ps ? ps->hash : 0);
   // banjo-nx (2026-10-20, NOT exact, banjo_renut_fur_shells = N > 1, the user's call): the fur family's meshes are drawn
   // once a shell, shell by shell (each shell draws every part of the body: RenderDoc of Ryujinx shows the same four
   // parts repeating); of each part's draws in a frame (the same shaders and index range) every Nth is drawn, the first
   // always (tools/nullps_shaders.txt: Banjo's fur and the dialogue portrait's).
   // banjo_renut_portrait_fur_shells: the same for draws into a target of 128 x 128 or less (the dialogue portrait,
   // 96 x 96: 21 shells there cost ~2.5 ms of the heaviest frames, mostly vertex work).
+  // banjo_renut_fur_shells_percent (2026-10-21, < 100): that share of each part's shells, spread evenly (the nth draw is
+  // drawn when ceil((n + 1) p / 100) > ceil(n p / 100): 75 draws three, leaves one, ...), the first always (with
+  // Banjo's 21 shells the outermost is drawn too).
   const bool portrait = targets.width <= 128 && targets.height <= 128;
+  // banjo_renut_portrait_fur_shells_percent (2026-10-21): the portrait's own share when below 100.
+  const uint32_t percent = portrait && banjo::renut_gpu::PortraitFurShellPercent() < 100
+                               ? banjo::renut_gpu::PortraitFurShellPercent()
+                               : banjo::renut_gpu::FurShellPercent();
   if (const uint32_t every = portrait ? banjo::renut_gpu::PortraitFurShellEvery() : banjo::renut_gpu::FurShellEvery();
-      every > 1 && ps) {
+      (every > 1 || percent < 100) && ps) {
     const uint64_t h = ps->hash;
     if (h == 0x2F36770769087F99ull || h == 0xC92BA80672FB9774ull || h == 0xB3C10F3D80EF61E2ull ||
         h == 0xD40EBF0336F89333ull) {
@@ -4494,7 +4557,10 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
       }
       bool draw = true;
       if (part) {
-        draw = ++part->n % every == 0;
+        const u32 n = ++part->n;
+        draw = percent < 100 ? (n + 1) * percent / 100 + ((n + 1) * percent % 100 != 0) >
+                                   n * percent / 100 + (n * percent % 100 != 0)
+                             : n % every == 0;
       } else if (free_part) {
         *free_part = {frame, vs, ps, call.start_index, call.start_vertex, call.count, call.base_vertex, call.indexed,
                       portrait, 0};
@@ -4682,6 +4748,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   sc.viewport_size[0] = viewport.guest_size[0];
   sc.viewport_size[1] = viewport.guest_size[1];
   sc.resolution_scale = targets.scale.Factor();
+  sc.pad_1352[1] = std::bit_cast<float>(InternalHeightsWord());  // banjo-nx (2026-10-21): the shaders' codes 4 and 6
   std::memcpy(sc.pixel_origin, viewport.pixel_origin, sizeof(sc.pixel_origin));  // Renut upstream 574b488
   if (call.primitive == kPointList) {
     // PA_SU_POINT_SIZE: height 0-15, width 16-31, half the size in 12.4 fixed
@@ -4962,6 +5029,12 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     preuse = {hint.seq, PipelineLookupsLocked(), prebuild_epoch, pipeline};
   if (!pipeline || !BindTargets(targets))
     return false;
+#if defined(PLUME_DEKO3D)
+  // banjo-nx (2026-10-21, banjo_deko3d_async_variants): a pipeline drawing a shader's generic variant while its own was
+  // compiled in the background takes it once done (one atomic load otherwise), bound again when a stage changed.
+  if (IsDeko3D() && plume::Deko3DRefreshPipeline(pipeline))
+    g_bound.pipeline = nullptr;
+#endif
   plume::RenderCommandList *cmd = s.command_list;
   SetViewport(cmd, viewport.viewport, viewport.scissor, targets.color_count);
 
@@ -5096,6 +5169,19 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   if (export_count) {
     FinishMemExportLocked(s, exports, export_count, export_offsets);
     g_bound.framebuffer = nullptr;  // the copies end any render pass
+  }
+  // banjo-nx (2026-10-21, banjo_renut_smaa): SMAA right after the frame's final composite, before the HUD is drawn over
+  // it (render/smaa.cpp); then (internal resolution) the image scaled to the display's resolution for the HUD
+  // (render/ui_scale.cpp). The passes leave their own targets, pipeline, layout and viewport bound.
+  if (ps && targets.color_count == 1 && !export_count && CompositePs(ps->hash)) {
+    const bool smaa = SmaaAfterPs(ps->hash) && SmaaRunLocked(targets.colors[0]);
+    const bool scaled = UiScaleAfterCompositeLocked(targets.colors[0]);
+    if (smaa || scaled) {
+      g_bound.framebuffer = nullptr;
+      g_bound.pipeline = nullptr;
+      g_bound.layout = false;
+      g_bound.viewport_set = false;
+    }
   }
   return true;
 }
@@ -5265,6 +5351,28 @@ void ClearTargets(const Targets &t, u32 flags, const plume::RenderRect &rect, co
   }
   if (rect.right <= rect.left || rect.bottom <= rect.top)
     return;
+  // banjo-nx (2026-10-21, internal resolution): colour and depth targets of different scales (the HUD's UI target with
+  // the scene's depth, the post-processing buffers at 1x with it) cleared one at a time, each at its own scale.
+  if (t.depth && t.color_count && t.depth->scale != t.scale) {
+    Targets colors = t;
+    colors.depth = nullptr;
+    if (flags & 0xF)
+      ClearTargets(colors, flags & 0xF, rect, color, depth, stencil);
+    if (flags & 0x30) {
+      Targets d;
+      d.depth = t.depth;
+      d.width = t.depth->width;
+      d.height = t.depth->height;
+      d.scale = t.depth->scale;
+      d.guest_width = d3d::SurfaceWidth(t.depth->size_word);
+      d.guest_height = d3d::SurfaceHeight(t.depth->size_word);
+      const plume::RenderRect depth_rect(
+          std::min(rect.left, int32_t(d.width)), std::min(rect.top, int32_t(d.height)),
+          std::min(rect.right, int32_t(d.width)), std::min(rect.bottom, int32_t(d.height)));
+      ClearTargets(d, flags & 0x30, depth_rect, color, depth, stencil);
+    }
+    return;
+  }
   // banjo-nx (2026-10-19, banjo_deko3d_depth_handover): before the target is bound for the clear.
   if (t.depth && t.depth->handed)
     DepthHandOverBeforeBindLocked(t.depth, &rect, flags);

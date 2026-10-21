@@ -24,8 +24,25 @@ log_level = "info"
 # The file log is written by a thread of its own (from futari-nx): the ring thread never waits for the SD card.
 log_file_writer = true
 
+# Controls (2026-10-21, from sa2-nx; your request). Face buttons by position, as on the Xbox 360 pad the game was made
+# for: the bottom button (B on Switch controllers) acts as A, the right one (A) as B, the left one (Y) as X, the top one
+# (X) as Y. false = by letter (the Switch's A acts as A). The settings menus follow it.
+input_xbox_layout = true
+# Two players: the handheld (Joy-Cons on the console) and each connected controller (Pro Controller, Joy-Con pair,
+# single Joy-Con) are players in the order they connect. L+R+ZR opens the system's controller screen (connect a second
+# controller, change the order, split a Joy-Con pair into two). Single Joy-Cons are held sideways, one per player: the
+# four buttons under the right thumb are the face buttons, SL / SR are ZL / ZR, minus or plus is Start.
+input_joycon_sideways = true
+# Per-player button maps: the [input_p1] and [input_p2] sections at the end of this file.
+# The game's on-screen keyboard (naming things) opens the Switch's own keyboard (2026-10-21, your request): type with
+# the touch screen or the controller, + or OK accepts, Cancel keeps the old name. false = the old ImGui text box.
+switch_software_keyboard = true
+
 # Profiler (ported from UnleashedRecomp-NX): on-screen window, per-thread CPU report, stall watchdog.
-banjo_show_profiler = true
+# Your call (2026-10-21): the profiler window and reNut's FPS counter off (the window cost ~7 % of a core redrawing its
+# graphs). The logs are written as before (rex_profile.log, banjo_profiler.log, the [renut] lines). true shows them.
+banjo_show_profiler = false
+banjo_show_fps = false
 banjo_stall_watch_seconds = 1
 # Profiling (on in every config except configs/banjo_cpu_verify.toml):
 # CPU: the SDK's sampler records every thread's code addresses into logs/rex/rex_profile.log.
@@ -396,6 +413,44 @@ banjo_deko3d_skin_once = true
 # kick), so at the frame cap the GPU works while the render thread replays the frame. Same pictures. On at the user's
 # request (2026-10-20); configs/banjo_deko3d_eager_kicks_off.toml is the old way, _ab.toml switches it every 4 s.
 banjo_deko3d_eager_kicks = true
+# Anti-aliasing (2026-10-21, your request): SMAA 1x (Jimenez et al.'s SMAA, MIT) on the 3D image right after the
+# game's final composite and before the HUD is drawn over it, so the HUD and its text stay sharp. SMAA's medium
+# preset; banjo_renut_smaa_quality = 2 is the high one (smoother diagonals, more GPU time). It smooths edges: not the
+# game's own picture. On in every config (your call); false here turns it off. configs/banjo_renut_smaa_ab.toml
+# switches it every 4 s (its GPU time in the "[renut A/B]" lines), _high.toml is the high preset, _compare.toml
+# writes same-frame before/after pictures.
+banjo_renut_smaa = true
+# NOT exact, your call (2026-10-21): 75 % of each fur part's shells (three of every four; 16 of Banjo's 21, his
+# outermost shell drawn, so the fur keeps its length; the dialogue portrait's too). 100 draws every shell as the
+# game; configs/banjo_renut_fur_shells_all.toml does that.
+banjo_renut_fur_shells_percent = 75
+# NOT exact, your call (2026-10-21): the dialogue portrait (the 96 x 96 box in the dialogue window) with half its fur
+# shells (11 of 21) and 2x MSAA instead of the game's 4x (1 = none, 0 = the game's).
+# configs/banjo_renut_portrait_full.toml puts both back.
+banjo_renut_portrait_fur_shells_percent = 50
+banjo_renut_portrait_msaa_samples = 2
+# NOT exact, your request (2026-10-21): the internal resolution. The 3D image at 1152x648 in handheld mode and 1536x864
+# docked; the HUD, menus and text at the display's resolution (1280x720 handheld, 1920x1080 docked: the swapchain is
+# made at 1920x1080 when docked, as sa2-nx does). Right after the game's final composite and SMAA the image is scaled
+# up and the HUD is drawn over it. Menus and loading screens (no composite) are drawn at the display's resolution
+# whole. Shadow maps and the blur buffers keep the console's sizes. Any height from 360 to 1080 for either mode
+# (rounded to a multiple of 9: 648, 702, 756, 810, 864, 900, ...; read at start). configs/banjo_renut_native_720p.toml
+# is the game's own 720p.
+banjo_renut_render_height_handheld = 648
+banjo_renut_render_height_docked = 864
+banjo_renut_display_height_docked = 1080
+# The upscale: 0 = bilinear (your choice, every config: one sample a pixel, the cheapest), 1 = bicubic Catmull-Rom
+# (sharper, five samples a pixel).
+banjo_renut_upscale_filter = 0
+# Your call (2026-10-21, package 36z2): no extra mip level for textures drawn above 1x (docked: the 3D image at 1.2x,
+# the HUD at 1.5x; about 4 ms a docked frame in 36z). NOT exact docked: the blur passes read the full-size image only,
+# as handheld and the game's 720p do. No effect in handheld. configs/banjo_renut_host_mips_on.toml puts them back.
+banjo_renut_host_mips = false
+# Your request (2026-10-21, after the freeze in a shader compile): no draw waits for a shader compile. A shader variant
+# missing from deko3d_shaders.bin is compiled in the background while its draws use the shader's generic variant (the
+# same pixels, a little slower), and the draw takes its own variant once it is done. deko3d_shaders.bin has the generic
+# variant of every shader in the game. false: the draw waits, as before (configs/banjo_deko3d_async_variants_off.toml).
+banjo_deko3d_async_variants = true
 # The colour flash: while the game stalls (loading) the last frame is not re-presented unless a menu is up (the screen
 # keeps the last frame, as the console does), and never from a texture no resolve wrote.
 banjo_renut_stall_present = false
@@ -443,5 +498,47 @@ banjo_renut_diag_gpu_shaders = true
 # shows as it is. configs/banjo_pacing_game.toml puts the game's own pacing back.
 target_refreshRate = 0
 frame_cap = "30"
+
+# ---- Controls per player (2026-10-21, from sa2-nx). Keep these sections at the END of the file: in TOML every line
+# after a [section] header belongs to that section. ----
+# Which Switch buttons press each Xbox 360 button; "" = the default (input_xbox_layout above for a/b/x/y; the button in
+# the same place for the rest). A comma-separated list of: A B X Y L R ZL ZR PLUS MINUS LSTICK RSTICK UP DOWN LEFT RIGHT
+# SL SR, or NONE. Example: a = "B, ZR". Player 1's map also serves players 3 and 4. Read at start.
 banjo_renut_ab_target = 9
 banjo_renut_ab_s = 4
+
+[input_p1]
+a = ""
+b = ""
+x = ""
+y = ""
+lb = ""
+rb = ""
+lt = ""
+rt = ""
+start = ""
+back = ""
+ls = ""
+rs = ""
+up = ""
+down = ""
+left = ""
+right = ""
+
+[input_p2]
+a = ""
+b = ""
+x = ""
+y = ""
+lb = ""
+rb = ""
+lt = ""
+rt = ""
+start = ""
+back = ""
+ls = ""
+rs = ""
+up = ""
+down = ""
+left = ""
+right = ""

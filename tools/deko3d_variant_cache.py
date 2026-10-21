@@ -252,8 +252,35 @@ def read_list(path, blend_skip_on, alpha_guess=ALPHA_GUESS):
     return out
 
 
+def config_specs(prefix, defaults, sspec):
+    """A stage's constants and the configuration's A/B variants of them (the keys' state does not decide these)."""
+    # banjo_deko3d_early_hoist off (constant 907 = 0) too, for the pixel shaders that have it
+    sspecs = [sspec]
+    if prefix == 'ps' and any(cid == 907 for cid, _ in defaults):
+        sspecs.append({**sspec, 907: 0})
+    # banjo_deko3d_txq_constants off (constant 908 = 0, 2026-10-19) too, for the pixel shaders that have it
+    if prefix == 'ps' and any(cid == 908 for cid, _ in defaults):
+        sspecs += [{**s, 908: 0} for s in list(sspecs)]
+    # banjo_deko3d_gpr32 on (constant 910 = 1, 2026-10-19, an A/B) too, for the pixel shaders that have it
+    if prefix == 'ps' and any(cid == 910 for cid, _ in defaults):
+        sspecs += [{**s, 910: 1} for s in list(sspecs) if 908 not in s]
+    # banjo_deko3d_light_branch on (constant 911 = 1, 2026-10-20, an A/B) too, for the pixel shaders that have it;
+    # 2026-10-20 evening: with gpr32 on as well (910 = 1 and 911 = 1: the fur family is on both lists), for the
+    # A/B pack that measures both in one run (banjo_renut_ab_targets "15,16").
+    if prefix == 'ps' and any(cid == 911 for cid, _ in defaults):
+        sspecs += [{**s, 911: 1} for s in list(sspecs) if 908 not in s]
+    # banjo_deko3d_skin_once on (constant 913 = 1, 2026-10-20, an A/B) too, for the vertex shaders that have it
+    if prefix == 'vs' and any(cid == 913 for cid, _ in defaults):
+        sspecs += [{**s, 913: 1} for s in list(sspecs)]
+    return sspecs
+
+
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument('--generic', action='store_true',
+                    help="also every GLSL file's generic variant (2026-10-21, banjo_deko3d_async_variants: what a draw "
+                         "uses while its own variant compiles in the background; no constant of the key's state, the "
+                         "configuration's A/B ones as for the pipelines)")
     ap.add_argument('--variants', action='append', default=[])
     ap.add_argument('--list', action='append', default=[], help="a Renut pipeline list (renut_pipeline_list)")
     ap.add_argument('--glsl', default=os.path.join(ROOT, 'out', 'deko3d_shaders', 'glsl_opt'))
@@ -326,7 +353,7 @@ def main():
                 if at + 1 < len(parts) and parts[at + 1].isdigit():
                     spec[FLAG_GS] = int(parts[at + 1])
             pipelines.append(((parts[1], parts[3]), spec))
-    if not pipelines:
+    if not pipelines and not a.generic:
         sys.exit('deko3d_variant_cache: no pipelines (--list or --variants)')
 
     todo = {}
@@ -348,25 +375,7 @@ def main():
                 continue
             sspec = stage_spec(prefix, spec, vs_shader[0] if vs_shader else None,
                                ps_shader[0] if ps_shader else None, not no_ps)
-            # banjo_deko3d_early_hoist off (constant 907 = 0) too, for the pixel shaders that have it
-            sspecs = [sspec]
-            if prefix == 'ps' and any(cid == 907 for cid, _ in shader[1]):
-                sspecs.append({**sspec, 907: 0})
-            # banjo_deko3d_txq_constants off (constant 908 = 0, 2026-10-19) too, for the pixel shaders that have it
-            if prefix == 'ps' and any(cid == 908 for cid, _ in shader[1]):
-                sspecs += [{**s, 908: 0} for s in list(sspecs)]
-            # banjo_deko3d_gpr32 on (constant 910 = 1, 2026-10-19, an A/B) too, for the pixel shaders that have it
-            if prefix == 'ps' and any(cid == 910 for cid, _ in shader[1]):
-                sspecs += [{**s, 910: 1} for s in list(sspecs) if 908 not in s]
-            # banjo_deko3d_light_branch on (constant 911 = 1, 2026-10-20, an A/B) too, for the pixel shaders that have it;
-            # 2026-10-20 evening: with gpr32 on as well (910 = 1 and 911 = 1: the fur family is on both lists), for the
-            # A/B pack that measures both in one run (banjo_renut_ab_targets "15,16").
-            if prefix == 'ps' and any(cid == 911 for cid, _ in shader[1]):
-                sspecs += [{**s, 911: 1} for s in list(sspecs) if 908 not in s]
-            # banjo_deko3d_skin_once on (constant 913 = 1, 2026-10-20, an A/B) too, for the vertex shaders that have it
-            if prefix == 'vs' and any(cid == 913 for cid, _ in shader[1]):
-                sspecs += [{**s, 913: 1} for s in list(sspecs)]
-            for sspec in sspecs:
+            for sspec in config_specs(prefix, shader[1], sspec):
                 defines = variant_defines(shader[1], sspec)
                 if (prefix, h, defines) in seen:
                     continue
@@ -379,6 +388,34 @@ def main():
                 memo_new[mk] = key
                 todo.setdefault(key, (key, stage, lambda g=shader[0], d=defines: variant_text(g, d).encode('utf-8')))
                 names.setdefault(key, f'{name} {defines}')
+    # 2026-10-21 (banjo_deko3d_async_variants): every shader's generic variant, so no draw waits for a compile: plume
+    # draws with it (the key's state constants left out: the bools, 900, 901, 903-906, 909) while the draw's own variant
+    # compiles in the background.
+    if a.generic:
+        gen_added = 0
+        for name in sorted(os.listdir(a.glsl)):
+            m = re.fullmatch(r'(vs|ps)_([0-9A-F]{16})\.glsl', name)
+            if not m:
+                continue
+            prefix, h = m.group(1), m.group(2)
+            shader = glsl_of(prefix, h)
+            if shader is None:
+                continue
+            for sspec in config_specs(prefix, shader[1], {}):
+                defines = variant_defines(shader[1], sspec)
+                if (prefix, h, defines) in seen:
+                    continue
+                seen.add((prefix, h, defines))
+                mk = f'{name}|{signature[name]}|{defines}'
+                key = memo.get(mk)
+                if key is None:
+                    key = fnv1a64(variant_text(shader[0], defines).encode('utf-8'))
+                memo_new[mk] = key
+                todo.setdefault(key, (key, 'vert' if prefix == 'vs' else 'frag',
+                                      lambda g=shader[0], d=defines: variant_text(g, d).encode('utf-8')))
+                names.setdefault(key, f'{name} {defines} (generic)')
+                gen_added += 1
+        print(f'deko3d_variant_cache: generic variants: {gen_added} the lists did not have')
     # 2026-10-20: the variants a console compiled in play, from its renut logs ("uam: run-time variant (stage S, N bytes,
     # base M bytes HASH): defines"): the shader is the GLSL file of M bytes whose FNV-1a 64 is HASH, the variant's
     # defines the first ascending run of the line's constants (as plume inserted them after the first line).

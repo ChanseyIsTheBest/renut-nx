@@ -4,6 +4,7 @@
 #include "renut_engine/gpu/render/surfaces.h"
 
 #include <algorithm>
+#include <numeric>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -20,6 +21,13 @@
 #include "renut_engine/gpu/guest/widescreen.h"
 #include "renut_engine/gpu/log.h"
 #include "renut_engine/gpu/backend/video.h"
+#if defined(PLUME_DEKO3D)
+#include <plume_deko3d.h>  // banjo-nx (2026-10-21, from sa2-nx 1.0.3.1): Deko3DSetSwapChainSize
+#endif
+#if defined(__SWITCH__)
+#include <switch.h>
+#include <rex/ui/switch_saltynx.h>  // banjo-nx (2026-10-21): the console's mode, Reverse-NX obeyed
+#endif
 
 REXCVAR_DEFINE_STRING(renut_resolution, "720p", "Nuts&Bolts/Graphics",
                       "Internal render resolution, by its height: 480p, 720p (the game's own), "
@@ -33,6 +41,25 @@ namespace {
 // ResolutionScale, once latched.
 RenderScale g_resolution_scale;
 bool g_resolution_latched = false;
+
+// banjo-nx (2026-10-21, internal resolution): UiScale, the composite's UI target and this frame's redirect to it, and how
+// many frames in a row have had no composite (kMenuFrames of them: menus or loading, drawn at the display's resolution
+// whole; from the start too, so the boot logos and title are).
+constexpr uint32_t kMenuFrames = 30;
+RenderScale g_ui_scale;
+// The internal heights (render_scale.h codes 4 and 6), as the shaders read them: handheld | docked << 16.
+uint32_t g_internal_heights = 720u | 720u << 16;
+struct UiTarget {
+  HostSurface *scene = nullptr;  // the composite's target it was made for, and that target's generation then
+  uint64_t scene_generation = 0;
+  std::unique_ptr<HostSurface> surface;
+  bool redirect = false;
+};
+// The composite's target's, and (made when a draw after the composite tests depth: the menus' 3D icons) the depth
+// target's bound with it.
+UiTarget g_ui, g_ui_depth;
+bool g_composite_seen = false;
+uint32_t g_frames_without_composite = kMenuFrames;
 
 struct FramebufferKey {
   const HostSurface *colors[d3d::kMaxRenderTargets] = {};
@@ -138,6 +165,15 @@ void FreeDepthViews(std::vector<DepthImage::View> &views) {
 }
 
 void RetireTarget(HostSurface &surface) {
+  // banjo-nx (2026-10-21, internal resolution): the composite's target goes, and its UI target with it.
+  for (UiTarget *u : {&g_ui, &g_ui_depth}) {
+    if (&surface == u->scene) {
+      u->scene = nullptr;
+      u->redirect = false;
+      if (u->surface && u->surface->texture)
+        RetireTarget(*u->surface);
+    }
+  }
   if (surface.depth && surface.handed)
     DepthHandOverBeforeRetireLocked(&surface);  // banjo-nx (2026-10-19, banjo_deko3d_depth_handover)
   FreeDepthViews(surface.handover_views);
@@ -180,6 +216,18 @@ bool BuildTarget(HostSurface &surface, const d3d::SurfaceDesc &desc, uint32_t mi
   const uint32_t host_height = surface.scale.Size(surface.height);
   surface.depth = d3d::IsDepthFormat(surface.format_word);
   surface.samples = SampleCount(surface.info_word);
+  // banjo-nx (2026-10-21, banjo_renut_portrait_msaa_samples, NOT exact, the user's call): the small targets the game makes
+  // with MSAA (the dialogue portrait's 96 x 96 box, 4x; colour and depth alike, so a framebuffer's attachments still
+  // match) with fewer samples: 2 for 2x, 1 single-sampled. The pipelines take the target's sample count; single-sampled,
+  // its resolves become copies.
+  if (const uint32_t want = banjo::renut_gpu::PortraitMsaaSamples();
+      want && uint32_t(surface.samples) > want && surface.width <= 128 && surface.height <= 128) {
+    static uint32_t logged = 0;
+    if (logged++ < 8)
+      RGPU_INFO("Surface {:08X}: {}x{} {} with x{} MSAA made x{} (banjo_renut_portrait_msaa_samples)", surface.guest_va,
+                surface.width, surface.height, surface.depth ? "depth" : "colour", u32(surface.samples), want);
+    surface.samples = want == 2 ? plume::RenderSampleCount::COUNT_2 : plume::RenderSampleCount::COUNT_1;
+  }
   if (surface.depth) {
     surface.format = DepthTargetFormat(surface.format_word);  // banjo-nx (2026-10-19, banjo_deko3d_depth24)
     if (banjo::renut_gpu::Depth24On()) {
@@ -243,15 +291,88 @@ void LatchResolutionScaleLocked() {
                     : resolution == "1440p" ? 3u
                     : resolution == "4K"    ? 4u
                                             : 0u};
-  // banjo-nx (2026-10-18): the deko3d renderer draws at the console's resolution only; its shaders are made for it
-  // (tools/deko3d_glsl_opt.py, pass scale1: no per-texture scale divisor, resolution_scale 1).
-  if (IsDeko3D() && scale.code != 0) {
-    static bool logged = false;
-    if (!logged) {
-      logged = true;
-      RGPU_WARN("renut_resolution = \"{}\" is not taken on deko3d: it draws at the console's 1280x720", resolution);
+  RenderScale ui = scale;
+  // banjo-nx (2026-10-18): the deko3d renderer drew at the console's resolution only (tools/deko3d_glsl_opt.py, pass
+  // scale1). banjo-nx (2026-10-21, internal resolution, the user's request; the docked 1920x1080 swapchain from sa2-nx
+  // 1.0.3.1): its package is made without scale1 and fragscale now (with scalecodes: codes 4 and 6 are 9/10 and 5/4,
+  // render_scale.h), and the console's mode picks the heights: the display's (720 handheld, banjo_renut_display_height_
+  // docked docked) for the HUD and the swapchain, banjo_renut_render_height_handheld / _docked for the 3D image of
+  // gameplay frames (those with the final composite within the last kMenuFrames frames). renut_resolution is not taken.
+  if (IsDeko3D()) {
+    const bool docked = ConsoleDocked();
+    const int32_t display = docked ? banjo::renut_gpu::DisplayHeightDocked() : 720;
+    const int32_t render =
+        docked ? banjo::renut_gpu::RenderHeightDocked() : banjo::renut_gpu::RenderHeightHandheld();
+    RenderScale display_scale, render_scale;
+    if (!RenderScale::FromRatio(uint32_t(std::max(display, 1)), 720, display_scale) ||
+        (display_scale.code != 0 && display_scale.code != 2)) {
+      static bool logged = false;
+      if (!logged) {
+        logged = true;
+        RGPU_WARN("banjo_renut_display_height_docked = {} is not 720 or 1080: 720", display);
+      }
+      display_scale = {};
     }
-    scale = {};
+    // banjo-nx (2026-10-21, package 36z2, the user's request): any height of 360 to 1080 for either mode, read once
+    // (the keys are the config's): codes 4 (handheld) and 6 (docked) of render_scale.h get height / 720, rounded to a
+    // multiple of 9 so every 16:9 size the game uses (1280x720, 640x360, 320x180) is whole host pixels at it, and the
+    // shaders the same heights. 720 is 1x (code 0); 1080 is code 2 (1.5x, the docked display's: no upscale then).
+    static const struct Heights {
+      int32_t handheld, docked;
+    } heights = [] {
+      auto pick = [](int32_t want, const char *name) {
+        const int32_t h = std::clamp((std::clamp(want, 360, 1080) + 4) / 9 * 9, 360, 1080);
+        if (h != want)
+          RGPU_INFO("banjo_renut_render_height_{} = {}: {} (a multiple of 9 from 360 to 1080)", name, want, h);
+        return h;
+      };
+      const int32_t hh = pick(banjo::renut_gpu::RenderHeightHandheld(), "handheld");
+      const int32_t dh = pick(banjo::renut_gpu::RenderHeightDocked(), "docked");
+      auto set = [](uint32_t code, int32_t h) {
+        const uint32_t g = std::gcd(uint32_t(h), 720u);
+        RenderScale::kNumerators[code] = uint32_t(h) / g;
+        RenderScale::kDenominators[code] = 720u / g;
+      };
+#if defined(PLUME_DEKO3D)
+      set(RenderScale::kHandheldCode, hh);
+      set(RenderScale::kDockedCode, dh);
+#endif
+      g_internal_heights = uint32_t(hh) | uint32_t(dh) << 16;
+      RGPU_INFO("Internal heights: handheld {}x{}, docked {}x{}", RenderScale{RenderScale::kHandheldCode}.Size(1280),
+                hh, RenderScale{RenderScale::kDockedCode}.Size(1280), dh);
+      return Heights{hh, dh};
+    }();
+    const int32_t chosen = docked ? heights.docked : heights.handheld;
+    render_scale = chosen == 720    ? RenderScale{}
+                   : chosen == 1080 ? RenderScale{2}
+                                    : RenderScale{docked ? RenderScale::kDockedCode : RenderScale::kHandheldCode};
+    (void)render;
+    g_frames_without_composite = g_composite_seen ? 0 : std::min(g_frames_without_composite + 1, kMenuFrames);
+    g_composite_seen = false;
+    ui = display_scale;
+    scale = g_frames_without_composite < kMenuFrames ? render_scale : display_scale;
+#if defined(PLUME_DEKO3D)
+    // The swapchain at the display's size (from sa2-nx 1.0.3.1): the present scales the frame to it.
+    static int32_t last_display = 0;
+    if (last_display != display) {
+      last_display = display;
+      plume::Deko3DSetSwapChainSize(display == 1080 ? 1920u : 1280u, display == 1080 ? 1080u : 720u);
+      RGPU_INFO("[renut] {} mode: the swapchain at {}", docked ? "docked" : "handheld",
+                display == 1080 ? "1920x1080" : "1280x720");
+    }
+#endif
+  }
+  // The frame's redirect to the UI target ends with it.
+  for (UiTarget *u : {&g_ui, &g_ui_depth}) {
+    if (u->redirect) {
+      u->redirect = false;
+      ++g_surface_epoch;
+    }
+  }
+  if (ui != g_ui_scale) {
+    g_ui_scale = ui;
+    ++g_surface_epoch;
+    RGPU_INFO("HUD resolution {}x{} ({:.3g}x)", ui.Size(GuestScreenWidth()), ui.Size(720), ui.Factor());
   }
   if (!g_resolution_latched || scale != g_resolution_scale) {
     RGPU_INFO("Render resolution {}x{} ({:.3g}x)", scale.Size(GuestScreenWidth()), scale.Size(720),
@@ -335,6 +456,11 @@ HostSurface *GetHostSurfaceLocked(u32 surface_va) {
     m.surface->size_word = desc->Size;
     m.surface->info_word = desc->SurfaceInfo;
     m.surface->format_word = desc->Format;
+    // banjo-nx (2026-10-21, internal resolution): the composite's target after the composite: its UI target.
+    if (g_ui.redirect && m.surface == g_ui.scene)
+      return g_ui.surface.get();
+    if (g_ui_depth.redirect && m.surface == g_ui_depth.scene)
+      return g_ui_depth.surface.get();
     return m.surface;
   }
   HostSurface *result = GetHostSurfaceSlow(surface_va, desc);
@@ -346,7 +472,110 @@ HostSurface *GetHostSurfaceLocked(u32 surface_va) {
     m.epoch = g_surface_epoch;
     m.surface = result;
   }
+  if (g_ui.redirect && result && result == g_ui.scene)
+    return g_ui.surface.get();  // banjo-nx (2026-10-21, internal resolution)
+  if (g_ui_depth.redirect && result && result == g_ui_depth.scene)
+    return g_ui_depth.surface.get();
   return result;
+}
+
+// banjo-nx (2026-10-21, internal resolution): see surfaces.h.
+RenderScale UiScale() { return g_ui_scale; }
+
+bool UiRedirectedLocked() { return g_ui.redirect; }
+
+void NoteCompositeLocked() { g_composite_seen = true; }
+
+void RedirectToUiSurfaceLocked() {
+  if (g_ui.scene && g_ui.surface && g_ui.surface->texture && !g_ui.redirect) {
+    g_ui.redirect = true;
+    ++g_surface_epoch;
+  }
+}
+
+void RedirectDepthToUiLocked() {
+  if (g_ui_depth.scene && g_ui_depth.surface && g_ui_depth.surface->texture && !g_ui_depth.redirect) {
+    g_ui_depth.redirect = true;
+    ++g_surface_epoch;
+  }
+}
+
+uint32_t InternalHeightsWord() { return g_internal_heights; }
+
+bool ConsoleDocked() {
+#if defined(__SWITCH__)
+  return rex::ui::switch_saltynx::BaseMode(appletGetOperationMode() == AppletOperationMode_Console);
+#else
+  return false;
+#endif
+}
+
+namespace {
+
+// The UI target 'u' for 'scene' (colour or depth): kept while it fits, made again otherwise.
+HostSurface *MakeUiTarget(UiTarget &u, HostSurface *scene) {
+  if (!scene || !scene->texture)
+    return nullptr;
+  HostSurface *ui = u.surface.get();
+  if (ui && ui->texture && u.scene == scene && u.scene_generation == scene->generation &&
+      ui->scale == g_ui_scale && ui->width == scene->width && ui->height == scene->height &&
+      ui->format == scene->format && ui->samples == scene->samples) {
+    ui->size_word = scene->size_word;
+    ui->info_word = scene->info_word;
+    ui->format_word = scene->format_word;
+    return ui;
+  }
+  if (!ui) {
+    u.surface = std::make_unique<HostSurface>();
+    ui = u.surface.get();
+  } else if (ui->texture) {
+    RetireTarget(*ui);
+  }
+  ui->guest_va = scene->guest_va;
+  ui->size_word = scene->size_word;
+  ui->info_word = scene->info_word;
+  ui->format_word = scene->format_word;
+  ui->width = scene->width;
+  ui->height = scene->height;
+  ui->scale = g_ui_scale;
+  ui->depth = scene->depth;
+  ui->format = scene->format;
+  ui->samples = scene->samples;
+  ui->writes = 0;
+  std::fill(std::begin(ui->profile_labels), std::end(ui->profile_labels), UINT32_MAX);
+  const uint32_t host_width = ui->scale.Size(ui->width), host_height = ui->scale.Size(ui->height);
+  plume::RenderDevice *device = Video::Device();
+  const plume::RenderMultisampling multisampling(ui->samples);
+  ui->texture = device->createTexture(
+      ui->depth ? plume::RenderTextureDesc::DepthTarget(host_width, host_height, ui->format, multisampling)
+                : plume::RenderTextureDesc::ColorTarget(host_width, host_height, ui->format, multisampling));
+  ui->layout = plume::RenderTextureLayout::UNKNOWN;
+  ui->generation = g_next_generation++;
+  ++g_surface_epoch;
+  if (!TextureCreated(ui->texture.get())) {
+    ui->texture.reset();
+    u.scene = nullptr;
+    if (!ReportDeviceLost(device))
+      RGPU_ERROR("UI {} target for {:08X}: {}x{} creation failed", ui->depth ? "depth" : "colour", scene->guest_va,
+                 host_width, host_height);
+    return nullptr;
+  }
+  ui->texture->setName(ui->depth ? "renut UI depth surface" : "renut UI surface");
+  u.scene = scene;
+  u.scene_generation = scene->generation;
+  RGPU_INFO("UI {} target for {:08X}: {}x{} (the 3D image {}x{})", ui->depth ? "depth" : "colour", scene->guest_va,
+            host_width, host_height, scene->scale.Size(scene->width), scene->scale.Size(scene->height));
+  return ui;
+}
+
+}  // namespace
+
+HostSurface *UiSurfaceLocked(HostSurface *scene) {
+  return scene && !scene->depth ? MakeUiTarget(g_ui, scene) : nullptr;
+}
+
+HostSurface *UiDepthSurfaceLocked(HostSurface *scene_depth) {
+  return scene_depth && scene_depth->depth ? MakeUiTarget(g_ui_depth, scene_depth) : nullptr;
 }
 
 HostSurface *GetHostSurfaceSlow(u32 surface_va, const d3d::SurfaceDesc *desc) {
@@ -422,6 +651,9 @@ HostSurface *SurfaceByGenerationLocked(uint64_t generation) {
   for (const auto &[key, surface] : g_targets)
     if (surface && surface->texture && surface->generation == generation)
       return surface.get();
+  for (const UiTarget *u : {&g_ui, &g_ui_depth})  // banjo-nx (2026-10-21): the UI targets are no view's
+    if (u->surface && u->surface->texture && u->surface->generation == generation)
+      return u->surface.get();
   return nullptr;
 }
 
@@ -435,6 +667,13 @@ void SurfaceMemoryLocked(size_t &targets, uint64_t &bytes) {
     const uint64_t texel = plume::RenderFormatSize(surface->format);
     bytes += uint64_t(surface->scale.Size(surface->width)) * surface->scale.Size(surface->height) *
              texel * surface->samples;
+  }
+  for (const UiTarget *u : {&g_ui, &g_ui_depth}) {  // banjo-nx (2026-10-21)
+    if (const HostSurface *ui = u->surface.get(); ui && ui->texture) {
+      ++targets;
+      bytes += uint64_t(ui->scale.Size(ui->width)) * ui->scale.Size(ui->height) *
+               plume::RenderFormatSize(ui->format) * ui->samples;
+    }
   }
 }
 

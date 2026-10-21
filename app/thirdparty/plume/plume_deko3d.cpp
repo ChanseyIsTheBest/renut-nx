@@ -1210,19 +1210,19 @@ namespace plume {
         shader->device = this;
         shader->stage = DkStage(header.stage);
         const char *glsl = static_cast<const char *>(data) + sizeof(header);
-        shader->glsl.assign(glsl, header.glslSize);
+        shader->glsl = std::make_shared<const std::string>(glsl, header.glslSize);
         if (header.dkshSize)
             shader->defaultDksh.assign(reinterpret_cast<const uint8_t *>(glsl) + header.glslSize,
                                        reinterpret_cast<const uint8_t *>(glsl) + header.glslSize + header.dkshSize);
-        shader->usage = parseUsage(shader->glsl);
+        shader->usage = parseUsage(*shader->glsl);
         // banjo-nx (2026-10-18): the varying locations it declares ("layout(location = N) in / out" lines).
         {
             const char *key = "\nlayout(location = ";
             size_t p = 0;
-            while ((p = shader->glsl.find(key, p)) != std::string::npos) {
+            while ((p = shader->glsl->find(key, p)) != std::string::npos) {
                 p += strlen(key);
                 char *end = nullptr;
-                const unsigned long loc = strtoul(shader->glsl.c_str() + p, &end, 10);
+                const unsigned long loc = strtoul(shader->glsl->c_str() + p, &end, 10);
                 if (loc < 32 && end && strncmp(end, ") in ", 5) == 0)
                     shader->usage.inputMask |= 1u << loc;
                 else if (loc < 32 && end && strncmp(end, ") out ", 6) == 0)
@@ -1230,11 +1230,11 @@ namespace plume {
             }
         }
         {
-            const size_t z = shader->glsl.find("\n// banjo-vszero=0x");
+            const size_t z = shader->glsl->find("\n// banjo-vszero=0x");
             if (z != std::string::npos)
-                shader->usage.zeroOutputMask = uint32_t(strtoul(shader->glsl.c_str() + z + 19, nullptr, 16));  // after "0x"
+                shader->usage.zeroOutputMask = uint32_t(strtoul(shader->glsl->c_str() + z + 19, nullptr, 16));  // after "0x"
         }
-        shader->specDefaults = parseSpecDefaults(shader->glsl);
+        shader->specDefaults = parseSpecDefaults(*shader->glsl);
         for (const SpecDefault &d : shader->specDefaults)
             shader->specIds.push_back(d.id);
         return shader;
@@ -1283,6 +1283,20 @@ namespace plume {
                     break;
                 job = compileQueue.front();
                 compileQueue.erase(compileQueue.begin());
+            }
+            // banjo-nx (2026-10-21): a background job's text, made now from the shared one (one at a time).
+            if (job->async) {
+                const std::string &glsl = *job->request.glsl;
+                const size_t nl = job->request.defines.empty() ? std::string::npos : glsl.find('\n');
+                if (nl == std::string::npos) {
+                    job->ownSource = glsl;
+                }
+                else {
+                    job->ownSource.reserve(glsl.size() + job->request.defines.size());
+                    job->ownSource.append(glsl, 0, nl + 1);
+                    job->ownSource += job->request.defines;
+                    job->ownSource.append(glsl, nl + 1, std::string::npos);
+                }
             }
             static const uam::Stage stages[] = {uam::Stage::Vertex, uam::Stage::TessCtrl, uam::Stage::TessEval,
                                                 uam::Stage::Geometry, uam::Stage::Fragment, uam::Stage::Compute};
@@ -1334,6 +1348,16 @@ namespace plume {
             uam::Result r = uam::compile(stages[std::min<uint32_t>(job->stage, 5)], job->source->c_str());
             g_deko3dStats.shaderCompileNs += armTicksToNs(armGetSystemTick()) - t0;
             g_deko3dStats.shaderCompiles++;
+            if (job->async) {
+                job->ownSource.clear();
+                job->ownSource.shrink_to_fit();
+                job->ok = r.ok;
+                job->ownDksh = std::move(r.dksh);
+                job->ownLog = std::move(r.log);
+                finishAsync(job);
+                delete job;
+                continue;
+            }
             {
                 std::lock_guard<std::mutex> lock(compileMutex);
                 job->ok = r.ok;
@@ -1362,7 +1386,9 @@ namespace plume {
                     waiterPriority < g_deko3dOptions.compilePriority;
         {
             std::lock_guard<std::mutex> lock(compileMutex);
-            compileQueue.push_back(&job);
+            // banjo-nx (2026-10-21): ahead of the background compiles (a draw waits for this one).
+            auto at = std::find_if(compileQueue.begin(), compileQueue.end(), [](const CompileJob *j) { return j->async; });
+            compileQueue.insert(at, &job);
             lend = lend && compileThreadHandle != 0;
             if (lend) {
                 compileWaiters.push_back(waiterPriority);
@@ -1377,6 +1403,109 @@ namespace plume {
             applyCompilePriority();
         }
         return job.ok;
+    }
+
+    // banjo-nx (2026-10-21, asyncVariants): a background compile done (uam thread): into the cache file and the device's
+    // variants (an invalid one when it failed: its draws keep the generic variant), then the epoch that provisional
+    // pipelines look at. No shader object: the next loadVariant of the variant finds it in 'variants'.
+    void Deko3DDevice::finishAsync(CompileJob *job) {
+        auto fresh = std::make_unique<Deko3DShaderVariant>();
+        const uint64_t key = job->request.key;
+        if (job->ok) {
+            if (g_cacheStore)
+                g_cacheStore(key, job->ownDksh);
+            fresh->valid = loadCode(job->ownDksh, fresh->shader, job->request.name.c_str());
+        }
+        else {
+            g_deko3dStats.shaderCompileFailures++;
+            static std::atomic<uint32_t> logged{0};
+            if (logged.fetch_add(1) < 32)
+                logf("uam failed for %s (variant %016" PRIx64 ", in the background: the generic variant stays): %s",
+                     job->request.name.empty() ? "a shader" : job->request.name.c_str(), key, job->ownLog.c_str());
+        }
+        {
+            std::lock_guard<std::mutex> lock(variantMutex);
+            auto &slot = variants[key];
+            if (!slot)
+                slot = std::move(fresh);
+        }
+        {
+            std::lock_guard<std::mutex> lock(compileMutex);
+            asyncQueued.erase(key);
+            if (job->background)
+                asyncBackgroundQueued--;
+        }
+        g_deko3dStats.variantBackground++;
+        asyncEpoch.fetch_add(1, std::memory_order_release);
+    }
+
+    bool Deko3DDevice::refreshPipeline(Deko3DGraphicsPipeline *p, bool &changed) {
+        changed = false;
+        const uint64_t epoch = asyncEpoch.load(std::memory_order_acquire);
+        std::lock_guard<std::mutex> refresh(refreshMutex);
+        if (!p->provisional.load(std::memory_order_relaxed))
+            return false;
+        if (epoch == p->pendingEpoch)
+            return true;
+        p->pendingEpoch = epoch;
+        bool waiting = false;
+        for (int i = 0; i < 3; i++) {
+            Deko3DVariantRequest &req = p->pending[i];
+            const uint64_t key = req.key;
+            if (key == 0)
+                continue;
+            {
+                std::lock_guard<std::mutex> lock(compileMutex);
+                if (asyncQueued.count(key)) {
+                    waiting = true;
+                    continue;
+                }
+            }
+            // Done: its variant (invalid when it failed: the generic one stays). Neither queued nor done: a background
+            // thread's request the queue had no room for, queued now as a draw's.
+            const DkShader *s = nullptr;
+            bool done = false;
+            {
+                std::lock_guard<std::mutex> lock(variantMutex);
+                auto it = variants.find(key);
+                if (it != variants.end() && it->second) {
+                    done = true;
+                    if (it->second->valid)
+                        s = &it->second->shader;
+                }
+            }
+            if (!done) {
+                queueAsync(req, false);
+                waiting = true;
+                continue;
+            }
+            const DkShader *old = p->stageShaders[i];
+            if (s != nullptr && s != old) {
+                // Each pointer at once (a recording thread may bind the pipeline now): any mix of generic and own
+                // stages draws the same pixels.
+                for (uint32_t k = 0; k < p->shaderCount; k++) {
+                    if (p->shaders[k] == old) {
+                        __atomic_store_n(&p->shaders[k], s, __ATOMIC_RELEASE);
+                        break;
+                    }
+                }
+                __atomic_store_n(&p->stageShaders[i], s, __ATOMIC_RELEASE);
+                g_deko3dStats.variantUpgrades++;
+                changed = true;
+            }
+            req = Deko3DVariantRequest();
+        }
+        if (!waiting)
+            p->provisional.store(false, std::memory_order_release);
+        return waiting;
+    }
+
+    bool Deko3DRefreshPipelineSlow(RenderPipeline *pipeline) {
+        auto *p = static_cast<Deko3DGraphicsPipeline *>(pipeline);
+        bool changed = false;
+        if (p->device)
+            p->device->refreshPipeline(p, changed);
+        return changed;
     }
 
     // compileMutex held: the uam thread at its own priority, or the highest a waiting thread has.
@@ -1437,7 +1566,60 @@ namespace plume {
         return true;
     }
 
-    const DkShader *Deko3DDevice::loadVariant(const Deko3DShader *base, const RenderSpecConstant *specConstants, uint32_t specConstantsCount) {
+    // banjo-nx (2026-10-21, asyncVariants): the specializations a generic variant drops. Each only folds what the shader
+    // reads at run time when its constant has the default (tools/deko3d_glsl_opt.py): the game's bools (1000-1255, read
+    // from SharedConstants.booleans), blend skip (900: no discard), output trim (901: every channel written, the write
+    // mask drops them), the alpha function (903: SharedConstants.alpha_test_func), the tessellation kind (904), the
+    // vertex shader's outputs (905: all written) and the pixel shader's zero inputs (906: read, zero), early depth (909:
+    // after the shader). The configuration's (907, 908, 910-913) stay: skin-once (913) writes rows other draws read.
+    static bool genericDrops(uint32_t id) {
+        return (id >= 1000 && id <= 1255) || id == 900 || id == 901 || id == 903 || id == 904 || id == 905 || id == 906 ||
+               id == 909;
+    }
+
+    static thread_local bool t_backgroundThread = false;
+    void Deko3DSetBackgroundThread(bool background) { t_backgroundThread = background; }
+
+    // At most this many background threads' requests wait at a time (each a few hundred bytes, but the uam thread does
+    // about one a second on the console: a pipeline-list prebuild over a cache that lacks them would queue thousands).
+    static constexpr uint32_t kAsyncBackgroundCap = 256;
+
+    bool Deko3DDevice::queueAsync(const Deko3DVariantRequest &request, bool background) {
+        {
+            std::lock_guard<std::mutex> lock(compileMutex);
+            if (asyncQueued.count(request.key))
+                return true;
+            if (background && asyncBackgroundQueued >= kAsyncBackgroundCap)
+                return false;
+            asyncQueued.insert(request.key);
+            auto *job = new CompileJob();
+            job->async = true;
+            job->background = background;
+            job->stage = request.stage;
+            job->request = request;
+            job->source = &job->ownSource;
+            job->dksh = &job->ownDksh;
+            job->log = &job->ownLog;
+            if (background) {
+                asyncBackgroundQueued++;
+                compileQueue.push_back(job);
+            }
+            else {
+                // a draw's: ahead of the background threads' ones (after the waited-for and the other draws' ones)
+                auto at = std::find_if(compileQueue.begin(), compileQueue.end(),
+                                       [](const CompileJob *j) { return j->async && j->background; });
+                compileQueue.insert(at, job);
+            }
+        }
+        compileWake.notify_one();
+        return true;
+    }
+
+    const DkShader *Deko3DDevice::loadVariant(const Deko3DShader *base, const RenderSpecConstant *specConstants, uint32_t specConstantsCount,
+                                              Deko3DVariantRequest *pending) {
+        if (pending)
+            pending->key = 0;
+        uint64_t *pendingKey = pending ? &pending->key : nullptr;
         Deko3DShaderImpl *shader = const_cast<Deko3DShaderImpl *>(static_cast<const Deko3DShaderImpl *>(base));
         // The constants this shader has whose value differs from its default, by id.
         std::string defines;
@@ -1454,23 +1636,48 @@ namespace plume {
                 }
             }
         }
+        // banjo-nx (2026-10-21): with pendingKey, the generic variant instead (the constants genericDrops drops left
+        // out), when it is another one: for a variant that is compiling in the background, or that failed.
+        bool droppable = false;
+        if (pendingKey) {
+            for (const SpecDefault &d : shader->specDefaults) {
+                for (uint32_t i = 0; i < specConstantsCount && !droppable; i++)
+                    droppable = specConstants[i].index == d.id && specConstants[i].value != d.value && genericDrops(d.id);
+            }
+        }
+        auto generic = [&]() -> const DkShader * {
+            std::vector<RenderSpecConstant> kept;
+            for (uint32_t i = 0; i < specConstantsCount; i++) {
+                if (!genericDrops(specConstants[i].index))
+                    kept.push_back(specConstants[i]);
+            }
+            g_deko3dStats.variantFallbacks++;
+            return loadVariant(base, kept.data(), uint32_t(kept.size()), nullptr);
+        };
+        bool failed = false;
         {
             std::lock_guard<std::mutex> lock(shader->mutex);
             auto it = shader->known.find(specKey);
-            if (it != shader->known.end())
-                return it->second;
+            if (it != shader->known.end()) {
+                if (it->second || !droppable)
+                    return it->second;
+                failed = true;  // failed (in the background): the generic variant from now on
+            }
         }
+        if (failed)
+            return generic();
         // The variant's text: the GLSL with the constants defined after its first line (#version).
         std::string source;
-        const size_t nl = shader->glsl.find('\n');
+        const std::string &glsl = *shader->glsl;
+        const size_t nl = glsl.find('\n');
         if (defines.empty() || nl == std::string::npos) {
-            source = shader->glsl;
+            source = glsl;
         }
         else {
-            source.reserve(shader->glsl.size() + defines.size());
-            source.append(shader->glsl, 0, nl + 1);
+            source.reserve(glsl.size() + defines.size());
+            source.append(glsl, 0, nl + 1);
             source += defines;
-            source.append(shader->glsl, nl + 1, std::string::npos);
+            source.append(glsl, nl + 1, std::string::npos);
         }
         const uint64_t key = fnv1a64(source.data(), source.size());
         Deko3DShaderVariant *variant = nullptr;
@@ -1490,6 +1697,17 @@ namespace plume {
             if (!have && g_cacheLookup && g_cacheLookup(key, dksh)) {
                 g_deko3dStats.shaderCacheHits++;
                 have = true;
+            }
+            // banjo-nx (2026-10-21, asyncVariants): compiled on the uam thread in the background (once), the generic
+            // variant until then.
+            if (!have && droppable && g_deko3dOptions.asyncVariants) {
+                pending->key = key;
+                pending->glsl = shader->glsl;
+                pending->defines = defines;
+                pending->stage = shader->stage;
+                pending->name = shader->name;
+                queueAsync(*pending, t_backgroundThread);  // no room: the draw that needs it queues it (refresh)
+                return generic();
             }
             if (!have) {
                 std::string log;
@@ -1515,8 +1733,13 @@ namespace plume {
             variant = slot.get();
         }
         const DkShader *out = variant->valid ? &variant->shader : nullptr;
-        std::lock_guard<std::mutex> lock(shader->mutex);
-        shader->known[specKey] = out;
+        {
+            std::lock_guard<std::mutex> lock(shader->mutex);
+            shader->known[specKey] = out;
+        }
+        // banjo-nx (2026-10-21): a failed variant (in the background or not): its draws take the generic one.
+        if (out == nullptr && droppable)
+            return generic();
         return out;
     }
 
@@ -1637,6 +1860,9 @@ namespace plume {
         p->type = Deko3DPipeline::Type::Graphics;
         p->device = this;
         p->layout = static_cast<const Deko3DPipelineLayout *>(desc.pipelineLayout);
+        // banjo-nx (2026-10-21, asyncVariants): the epoch before any of its variants is queued, so one done meanwhile
+        // still moves it.
+        p->pendingEpoch = asyncEpoch.load(std::memory_order_acquire);
         const Deko3DShader *stages[3] = {static_cast<const Deko3DShader *>(desc.vertexShader),
                                          static_cast<const Deko3DShader *>(desc.geometryShader),
                                          static_cast<const Deko3DShader *>(desc.pixelShader)};
@@ -1671,9 +1897,15 @@ namespace plume {
                 continue;
             const bool own = i == 0 && !vsSpec.empty();
             const bool ownPs = i == 2 && !psSpec.empty();
-            const DkShader *s = loadVariant(stages[i], own ? vsSpec.data() : ownPs ? psSpec.data() : desc.specConstants,
-                                            own ? uint32_t(vsSpec.size()) : ownPs ? uint32_t(psSpec.size())
-                                                                                  : desc.specConstantsCount);
+            const RenderSpecConstant *stageSpec = own ? vsSpec.data() : ownPs ? psSpec.data() : desc.specConstants;
+            const uint32_t stageSpecCount = own ? uint32_t(vsSpec.size()) : ownPs ? uint32_t(psSpec.size()) : desc.specConstantsCount;
+            Deko3DVariantRequest request;
+            const DkShader *s = loadVariant(stages[i], stageSpec, stageSpecCount,
+                                            g_deko3dOptions.asyncVariants ? &request : nullptr);
+            if (request.key != 0) {
+                p->pending[i] = std::move(request);
+                p->provisional.store(true, std::memory_order_relaxed);
+            }
             if (!s) {
                 ok = false;
                 continue;

@@ -45,6 +45,9 @@ class InputDriver {
                                       X_INPUT_KEYSTROKE* out_keystroke) = 0;
 
   virtual void OnWindowAvailable(rex::ui::Window* /*window*/) {}
+  // sa2-nx: every device after the input system (re)assigned guest players (DeviceInfo::ordinal, 0 = player 1); a
+  // driver with per-player settings picks them up here. Called with all drivers' devices.
+  virtual void OnDevicesAssigned(const std::vector<DeviceInfo>& /*devices*/) {}
 
   void set_is_active_callback(std::function<bool()> is_active_callback) {
     is_active_callback_ = is_active_callback;

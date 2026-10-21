@@ -123,7 +123,9 @@ if(REXGLUE_PLATFORM_SWITCH)
         src/renut_engine/mnk_controls_switch.cpp
         # Unleashed's sampling CPU profiler and stall watchdog (libnx only).
         src/profiler/cpu_profiler_switch.cpp
-        src/profiler/stall_watch_switch.cpp)
+        src/profiler/stall_watch_switch.cpp
+        # PGO profile collection (BANJO_PGO=generate; empty otherwise). From sa2-nx.
+        src/banjo_pgo.cpp)
 else()
     list(APPEND RENUT_SOURCES src/renut_engine/mnk_controls.cpp
         # Switch profiler counters the native renderer calls (no-ops on PC).
@@ -400,6 +402,99 @@ foreach(_banjo_target renut_recomp renut)
     endif()
 endforeach()
 message(STATUS "banjo: sa2-nx's CPU rounds: definitions '${_banjo_round_definitions}'")
+
+# banjo-nx (2026-10-21, the user's request): link-time and profile-guided optimisation of the Switch build, from
+# sa2-nx (its app/CMakeLists.txt and docs/enhancements.md, "Link-time optimisation of a recompiled program"). Both OFF
+# in the everyday build folder (app/out/switch): a release is built in folders of its own (docs/pgo-lto.md).
+#   - BANJO_SWITCH_LTO: the recompiled game (renut_recomp), the app (renut), Renut's renderer (banjo_renut_gpu) and
+#     plume are compiled to GIMPLE (-flto -fno-fat-lto-objects) and optimised as one program at the link (-flto=N
+#     -flto-partition=balanced: N parallel LTRANS jobs, low for the build machine's memory). The SDK libraries and uam
+#     stay out. The link repeats -ffp-contract=off and -fno-strict-aliasing (the LTRANS stage must not fuse what the
+#     compile stage kept apart), and xxHash is built with XXH_FORCE_MEMORY_ACCESS=0: nfsmw-nx's LTO+PGO builds hit
+#     xxHash's default (a strict-aliasing violation) once it was inlined into a cache-key function (garbage keys).
+#   - BANJO_PGO=generate: an instrumented NRO that streams its branch counts to pgo/ next to the NRO
+#     (src/banjo_pgo.cpp; registered in a section, not by constructors: libgcov's exit-time files do not fit the
+#     Switch). Value profiling is off: its shared lists are not safe without atomic updates.
+#   - BANJO_PGO=use: the counts merged on the PC (tools/pgo_merge.py) from BANJO_PGO_DIR (pgo/ at the root): one
+#     .gcda per object, named by the object's path in the build folder with # for each separator
+#     (-fprofile-prefix-path), so the instrumented and the optimised builds may use different build folders. Code the
+#     sessions did not run is compiled as without a profile (-fprofile-partial-training); functions changed since the
+#     instrumented build keep no profile (-Wno-coverage-mismatch). GCC instruments before its interprocedural inliner,
+#     so the instrumented build needs no LTO: only the sources and the compile options must match.
+#   - With a profile, the game code's inliner limits (sa2-nx's measurements): max-inline-insns-auto 64 (the
+#     compiler's 30 refused call sites that ran billions of times) and inline-unit-growth 12 (without it the higher
+#     limit fills the default 40 per cent with code the sessions never ran). Compile options that do not touch a
+#     recorded profile.
+if(REXGLUE_PLATFORM_SWITCH)
+    option(BANJO_SWITCH_LTO "Link-time optimisation of the game code, the app and Renut's renderer (Switch)" OFF)
+    set(BANJO_SWITCH_LTO_JOBS "4" CACHE STRING "Parallel LTRANS jobs of the Switch LTO link")
+    option(BANJO_SWITCH_IPA_PTA "-fipa-pta at the Switch LTO link (sa2-nx and UnleashedRecomp-NX use it)" OFF)
+    set(BANJO_SWITCH_INLINE_AUTO "64" CACHE STRING
+        "max-inline-insns-auto of the game code with a profile (empty: the compiler's)")
+    set(BANJO_SWITCH_INLINE_UNIT_GROWTH "12" CACHE STRING
+        "inline-unit-growth of the game code with a profile (empty: the compiler's)")
+    set(BANJO_PGO "" CACHE STRING "Profile-guided optimisation of the Switch build: empty, generate or use")
+    set_property(CACHE BANJO_PGO PROPERTY STRINGS "" generate use)
+    set(BANJO_PGO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../pgo" CACHE PATH "Folder of the PGO profile (.gcda files)")
+    set(_banjo_opt_targets renut_recomp renut banjo_renut_gpu plume)
+    if(BANJO_SWITCH_LTO)
+        set(_banjo_lto_compile -flto -fno-fat-lto-objects)
+        set(_banjo_lto_link -flto=${BANJO_SWITCH_LTO_JOBS} -flto-partition=balanced -ffp-contract=off
+                            -fno-strict-aliasing)
+        if(BANJO_SWITCH_IPA_PTA)
+            list(APPEND _banjo_lto_compile -fipa-pta)
+            list(APPEND _banjo_lto_link -fipa-pta)
+        endif()
+        foreach(target ${_banjo_opt_targets})
+            if(TARGET ${target})
+                target_compile_options(${target} PRIVATE ${_banjo_lto_compile})
+                target_compile_definitions(${target} PRIVATE XXH_FORCE_MEMORY_ACCESS=0)
+            endif()
+        endforeach()
+        target_link_options(renut PRIVATE ${_banjo_lto_link})
+        message(STATUS "banjo: Switch LTO (${BANJO_SWITCH_LTO_JOBS} jobs)")
+    endif()
+    get_filename_component(_banjo_pgo_dir "${BANJO_PGO_DIR}" ABSOLUTE)
+    file(TO_NATIVE_PATH "${_banjo_pgo_dir}" _banjo_pgo_dir)
+    file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}" _banjo_pgo_prefix)
+    if(BANJO_PGO STREQUAL "generate")
+        set(_banjo_pgo "-fprofile-generate=${_banjo_pgo_dir}" "-fprofile-prefix-path=${_banjo_pgo_prefix}"
+                       -fno-profile-values -fprofile-update=single -fprofile-info-section=gcov_info)
+        target_compile_definitions(renut PRIVATE BANJO_PGO_GENERATE=1)
+    elseif(BANJO_PGO STREQUAL "use")
+        if(NOT EXISTS "${BANJO_PGO_DIR}")
+            message(FATAL_ERROR "BANJO_PGO=use: no profile in ${BANJO_PGO_DIR}")
+        endif()
+        # -fprofile-correction: the counts were taken without atomic updates (-fprofile-update=single) while several
+        # threads ran the same code, so a few increments were lost and some blocks' counts do not add up; GCC
+        # smooths them instead of stopping.
+        set(_banjo_pgo "-fprofile-use=${_banjo_pgo_dir}" "-fprofile-prefix-path=${_banjo_pgo_prefix}"
+                       -fprofile-correction -fno-profile-values -fprofile-partial-training -Wno-missing-profile
+                       -Wno-coverage-mismatch)
+        set(_banjo_inline_options "")
+        if(BANJO_SWITCH_INLINE_AUTO)
+            list(APPEND _banjo_inline_options --param=max-inline-insns-auto=${BANJO_SWITCH_INLINE_AUTO})
+        endif()
+        if(BANJO_SWITCH_INLINE_UNIT_GROWTH)
+            list(APPEND _banjo_inline_options --param=inline-unit-growth=${BANJO_SWITCH_INLINE_UNIT_GROWTH})
+        endif()
+        if(_banjo_inline_options AND TARGET renut_recomp)
+            target_compile_options(renut_recomp PRIVATE ${_banjo_inline_options})
+            set_property(SOURCE src/cpu/banjo_hot_guest.cpp APPEND PROPERTY COMPILE_OPTIONS ${_banjo_inline_options})
+        endif()
+    elseif(BANJO_PGO)
+        message(FATAL_ERROR "BANJO_PGO must be empty, generate or use (got ${BANJO_PGO})")
+    endif()
+    if(BANJO_PGO)
+        foreach(target ${_banjo_opt_targets})
+            if(TARGET ${target})
+                target_compile_options(${target} PRIVATE ${_banjo_pgo})
+            endif()
+        endforeach()
+        target_link_options(renut PRIVATE ${_banjo_pgo})
+        message(STATUS "banjo: PGO ${BANJO_PGO} (${BANJO_PGO_DIR})")
+    endif()
+endif()
 
 # The app includes imgui.h and xxhash.h directly. An installed SDK package puts
 # them in its single include folder; when the SDK is built from source

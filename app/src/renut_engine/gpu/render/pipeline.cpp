@@ -55,6 +55,9 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_variant_log, false, "Banjo/Renut",
 #include "renut_engine/gpu/guest/resources.h"
 #include "renut_engine/gpu/render/shader_library.h"
 #include "renut_engine/gpu/banjo_renut_tuning.h"
+#if defined(PLUME_DEKO3D)
+#include <plume_deko3d.h>  // banjo-nx (2026-10-21): Deko3DSetBackgroundThread
+#endif
 
 REXCVAR_DEFINE_STRING(renut_pipeline_list, "pipeline_list.bin", "Nuts&Bolts/Graphics",
                       "The pipelines the renderer has built, which it builds ahead of use at the "
@@ -817,6 +820,11 @@ void PrebuildWorker() {
   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 #endif
   banjo::renut_gpu::OnPrebuildWorkerStart();  // banjo-nx: its core and priority on the Switch
+#if defined(PLUME_DEKO3D)
+  // banjo-nx (2026-10-21, banjo_deko3d_async_variants): its pipelines' missing variants are compiled after the draws'
+  // ones, a few at a time (the rest when a draw needs them).
+  plume::Deko3DSetBackgroundThread(true);
+#endif
   std::unique_lock lock(g_prebuild.mutex);
   for (;;) {
     g_prebuild.work.wait(lock, [] { return g_prebuild.stop || !g_prebuild.queue.empty(); });

@@ -222,6 +222,7 @@ bool Deko3DZcullOn();
 // banjo_deko3d_barrier_merge / _lean (2026-10-19, GPU): fewer pipeline drains and texture cache invalidations.
 bool Deko3DBarrierMergeOn();
 bool Deko3DBarrierLeanOn();
+bool Deko3DAsyncVariantsOn();  // banjo_deko3d_async_variants (2026-10-21)
 // banjo_deko3d_alpha_spec (2026-10-18): the alpha test's function in the pipeline key (constant 903).
 inline bool AlphaSpecOn() { return Latch().alpha_spec; }
 // banjo_deko3d_tess_spec / banjo_deko3d_vs_outputs (2026-10-18): constants 904 and 905 of the deko3d shaders.
@@ -250,6 +251,13 @@ bool SkinOnceOn();
 // banjo_deko3d_eager_kicks (2026-10-20, input latency A/B): kick lists of 100 draws, up to 6 a frame, each submitted at
 // its own kick (backend/video.cpp KickLocked); false in the off half of the in-run A/B (target 18).
 bool EagerKicksOn();
+// banjo_renut_smaa (2026-10-21): SMAA on the final composite (render/smaa.cpp); false in the off half of the in-run A/B
+// (target 19). Its preset (1 medium, 2 high), luma threshold and the composite's pixel shaders (hex, comma separated).
+bool SmaaOn();
+int SmaaQuality();
+double SmaaThreshold();
+std::string SmaaAfterPsList();
+int32_t SmaaCompareSeconds();  // banjo_renut_diag_smaa_compare_s
 void CountSkinOnce(uint32_t kind);
 // 2026-10-20: a texture bind whose fetch constant has an exponent adjust (not applied by Renut).
 void CountExpAdjust(int adjust);
@@ -273,6 +281,13 @@ void CountHeaderDescDiffer(uint32_t dwords);
 uint32_t FurShellEvery();
 // banjo_renut_portrait_fur_shells: the same for targets of 128 x 128 or less (the dialogue portrait).
 uint32_t PortraitFurShellEvery();
+// banjo_renut_fur_shells_percent (2026-10-21, NOT exact): the share of each fur part's shells drawn (100 = all).
+uint32_t FurShellPercent();
+// banjo_renut_portrait_fur_shells_percent / banjo_renut_portrait_msaa_samples (2026-10-21, NOT exact): the dialogue
+// portrait (targets of 128 x 128 or less): its fur shells' share (100 = as the rest) and its MSAA samples (0 = the
+// game's, 1 = none, 2 = 2x).
+uint32_t PortraitFurShellPercent();
+uint32_t PortraitMsaaSamples();
 void CountFurShell(bool drawn);
 // uam's banjo flags (banjo_deko3d_uam_prmt, banjo_deko3d_uam_gvn, banjo_deko3d_uam_uniform_branches,
 // banjo_deko3d_uam_wide_rows); 1471 by default.
@@ -281,6 +296,17 @@ unsigned Deko3DUamFlags();
 int Deko3DCompileCore();
 int Deko3DCompilePriority();
 void CountDrawnResolve();
+void CountSmaa();  // banjo_renut_smaa: a frame done
+// banjo-nx (2026-10-21, internal resolution, NOT exact): the 3D image's heights by mode, the display's when docked, the
+// upscale's filter (0 bilinear, 1 bicubic), and a composite scaled up for the HUD (or drawn at the display's size).
+int32_t RenderHeightHandheld();
+int32_t RenderHeightDocked();
+int32_t DisplayHeightDocked();
+int UpscaleFilter();
+bool HostMipsOn();  // banjo_renut_host_mips (read at start)
+void CountUiUpscale(bool scaled);
+// A UI depth target filled (true), or a draw that kept a depth target smaller than its colour target (false).
+void CountUiDepth(bool filled);
 // 2026-10-20 (the Renut CPU port from sa2-nx): where the render thread's draws come from: 0 immediate (a whole device
 // copy queued by the game thread), 1 replayed from a recorded command buffer (device deltas).
 void CountDrawSource(int source);

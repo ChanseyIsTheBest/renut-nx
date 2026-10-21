@@ -22,12 +22,16 @@ namespace rex::input::nx {
 // Polls the pads directly from HID shared memory on the calling guest thread.
 // Unlike the SDL driver it needs no window and no UI-thread event pump.
 //
-// Slot 0 merges the handheld controllers with player 1, so the console works
-// both undocked and with a Pro Controller or detached Joy-Cons. Slots 1-3 are
-// players 2-4.
+// banjo-nx (2026-10-21): ported from sa2-nx's driver (per-player maps, Xbox layout, controller applet).
+// One slot per controller the system reports: slot 0 is the handheld (Joy-Cons attached to the console), slots 1-4
+// are players No1-No4 (Pro Controllers, Joy-Con pairs, single Joy-Cons held sideways). Each connected slot is a device;
+// the input system gives devices guest users in connection order, so the handheld and a Pro Controller are players 1
+// and 2. (Before 2026-10-07 the handheld and No1 shared slot 0: a second controller connected in handheld mode
+// became No1 and also drove player 1.)
 class SwitchInputDriver final : public InputDriver {
  public:
-  static constexpr size_t kSlotCount = 4;
+  static constexpr size_t kSlotCount = 5;   // the handheld and No1-No4
+  static constexpr size_t kPlayerCount = 4;  // players the system may assign (padConfigureInput)
 
   explicit SwitchInputDriver(rex::ui::Window* window, size_t window_z_order);
   ~SwitchInputDriver() override;
@@ -35,6 +39,7 @@ class SwitchInputDriver final : public InputDriver {
   X_STATUS Setup() override;
 
   void EnumerateDevices(std::vector<DeviceInfo>& out) override;
+  void OnDevicesAssigned(const std::vector<DeviceInfo>& devices) override;
   X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) override;
   X_RESULT GetDeviceCapabilities(DeviceId id, uint32_t flags,
                                  X_INPUT_CAPABILITIES* out_caps) override;
@@ -60,6 +65,8 @@ class SwitchInputDriver final : public InputDriver {
   void Poll(size_t index);
   /* SDK menus on the gamepad: L+R+D-pad. See the .cpp. */
   void DispatchMenuShortcuts(Slot& slot, uint64_t held);
+  /* The system's controller applet (connect, reorder, split Joy-Cons), on the UI thread. */
+  void ShowControllerApplet();
 
   std::mutex mutex_;
   std::array<std::unique_ptr<Slot>, kSlotCount> slots_;

@@ -195,6 +195,21 @@ Each variant is the base config with a few keys changed, so two logs compare dir
                                    "[renut A/B]" line's fps and render thread time with and without it
   banjo_deko3d_eager_kicks_off.toml  package 36i: the frame to the GPU as before (200-draw lists at the next kick;
                                    banjo_deko3d_eager_kicks off, on by default since 36i at the user's request)
+  banjo_renut_fur_shells_all.toml  package 36x: every fur shell drawn (banjo_renut_fur_shells_percent 100; 75 by default
+                                   since 36x, the user's call)
+  banjo_renut_portrait_full.toml   package 36y: the dialogue portrait as the game draws it (every fur shell, its 4x MSAA;
+                                   36y's tomls: 50 % shells and 2x MSAA)
+  banjo_deko3d_async_variants_off.toml  package 36z3: a draw whose shader variant is not in deko3d_shaders.bin waits
+                                   for its compile again (36z3: drawn with the generic variant meanwhile)
+  banjo_renut_host_mips_on.toml    package 36z2: Renut's extra host mip level for resolve destinations above 1x again
+                                   (docked: the 3D image at 1.2x, the HUD at 1.5x; about 4 ms a docked frame in 36z;
+                                   off in renut.toml and every other config, your call)
+  banjo_renut_native_720p.toml     package 36z: the game's own 1280x720 everywhere (renut.toml: the 3D image at 648p
+                                   handheld and 900p docked, the HUD at 720p / 1080p; NOT exact)
+  banjo_renut_smaa_high.toml       package 36u: SMAA's high preset (banjo_renut_smaa_quality 2)
+  banjo_renut_smaa_ab.toml         package 36u: SMAA switched off and on every 4 s (in-run A/B target 19): its GPU time
+  banjo_renut_smaa_compare.toml    package 36u: every 15 s the same frame before and after SMAA as
+                                   capturas/smaa_NNN_off.tga / _on.tga (banjo_renut_diag_smaa_compare_s)
   banjo_display_sync_on.toml       package 35b: the frame limiter on the display's refresh (banjo_display_sync on;
                                    off by default: the emulator stalled with it), for a console try
   banjo_display_sync_off.toml      package 36i: the frame limiter on its own 33.3 ms timer again (banjo_display_sync
@@ -576,6 +591,26 @@ VARIANTS = {
     "banjo_deko3d_eager_kicks_off.toml": dict(PROFILING, **RENUT, banjo_deko3d_eager_kicks="false"),
     "banjo_deko3d_eager_kicks_ab.toml": dict(PROFILING, **RENUT, banjo_deko3d_eager_kicks="true",
                                              banjo_renut_ab_target="18", banjo_renut_ab_s="4"),
+    # 2026-10-21 (package 36u): SMAA on the final composite (render/smaa.cpp), on in every config (the user's call): the
+    # high preset, in-run A/B 19, comparison pictures.
+    "banjo_renut_smaa_high.toml": dict(PROFILING, **RENUT, banjo_renut_smaa="true", banjo_renut_smaa_quality="2"),
+    # 2026-10-21 (package 36x): every fur shell again (75 % in renut.toml, the user's call; NOT exact).
+    "banjo_renut_fur_shells_all.toml": dict(PROFILING, **RENUT, banjo_renut_fur_shells_percent="100"),
+    # 2026-10-21 (package 36y): the dialogue portrait as the game draws it (50 % shells and 2x MSAA in renut.toml).
+    "banjo_renut_portrait_full.toml": dict(PROFILING, **RENUT, banjo_renut_portrait_fur_shells_percent="100",
+                                           banjo_renut_portrait_msaa_samples="0"),
+    # 2026-10-21 (package 36z): the game's own 720p (648p handheld, 900p docked with the HUD at 1080p in renut.toml).
+    # 2026-10-21 (package 36z3): draws wait for their shader compiles again (as before 36z3).
+    "banjo_deko3d_async_variants_off.toml": dict(PROFILING, **RENUT, banjo_deko3d_async_variants="false"),
+    # 2026-10-21 (package 36z2): Renut's host mip levels for targets above 1x again (off in renut.toml, the user's call).
+    "banjo_renut_host_mips_on.toml": dict(PROFILING, **RENUT, banjo_renut_host_mips="true"),
+    "banjo_renut_native_720p.toml": dict(PROFILING, **RENUT, banjo_renut_render_height_handheld="720",
+                                         banjo_renut_render_height_docked="720",
+                                         banjo_renut_display_height_docked="720"),
+    "banjo_renut_smaa_ab.toml": dict(PROFILING, **RENUT, banjo_renut_smaa="true", banjo_renut_ab_target="19",
+                                     banjo_renut_ab_s="4"),
+    "banjo_renut_smaa_compare.toml": dict(PROFILING, **RENUT, banjo_renut_smaa="true",
+                                          banjo_renut_diag_smaa_compare_s="15"),
     "banjo_deko3d_skin_once_ab.toml": dict(PROFILING, **RENUT, banjo_deko3d_skin_once="true",
                                            banjo_renut_ab_target="17", banjo_renut_ab_s="4"),
     "banjo_renut_diag_fur_vertex_only.toml": dict(PROFILING, **RENUT, banjo_renut_diag_gpu_shaders="true",
@@ -612,14 +647,19 @@ VARIANTS = {
 
 
 def apply(text, changes):
+    # 2026-10-21: renut.toml ends with the per-player input sections ([input_p1], [input_p2]); a key renut.toml does
+    # not have goes before the first section (in TOML every line after a [section] header belongs to it), and only
+    # the top-level part is searched for the keys.
+    first = re.search(r"^\[", text, re.M)
+    top, sections = (text[:first.start()], text[first.start():]) if first else (text, "")
     for key, value in changes.items():
         line = "%s = %s" % (key, value)
         pattern = re.compile(r"^%s\s*=.*$" % re.escape(key), re.M)
-        if pattern.search(text):
-            text = pattern.sub(line, text)
+        if pattern.search(top):
+            top = pattern.sub(line, top)
         else:
-            text = text.rstrip("\n") + "\n" + line + "\n"
-    return text
+            top = top.rstrip("\n") + "\n" + line + "\n" + ("\n" if sections else "")
+    return top + sections
 
 
 # Package 28: configs of banjo-nx's renderer's own keys (its A/B targets, tests and diagnostics), which boot that

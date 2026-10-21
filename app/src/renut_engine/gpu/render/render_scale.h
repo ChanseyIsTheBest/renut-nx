@@ -18,10 +18,23 @@ namespace renut::gpu {
 // content that is not rendered (guest textures). Shaders get the code in the
 // descriptor index (kResolutionScaleShift) and have the same factors
 // (renutTextureScale in shader_common.h).
+// banjo-nx (2026-10-21, internal resolution, the user's request): on deko3d codes 4 and 6 are the internal resolutions
+// of handheld and docked mode instead of 3 (4K) and 6 (ambient occlusion at twice 4K), which the Switch never draws: any
+// height (banjo_renut_render_height_handheld / _docked), height / 720 reduced, set once by LatchResolutionScaleLocked
+// (SetInternalHeights) before any target is made. The shaders read the same heights from SharedConstants (v[84].w:
+// handheld | docked << 16; tools/deko3d_glsl_opt.py pass scalecodes). The PC's back ends keep Renut's table (their
+// shaders are made from shader_common.h).
 struct RenderScale {
   static constexpr uint32_t kCount = 8;
+#if defined(PLUME_DEKO3D)
+  static inline uint32_t kNumerators[kCount] = {1, 2, 3, 2, 9, 4, 5, 4};
+  static inline uint32_t kDenominators[kCount] = {1, 3, 2, 1, 10, 1, 4, 3};
+#else
   static constexpr uint32_t kNumerators[kCount] = {1, 2, 3, 2, 3, 4, 6, 4};
   static constexpr uint32_t kDenominators[kCount] = {1, 3, 2, 1, 1, 1, 1, 3};
+#endif
+  // banjo-nx (2026-10-21): the codes of the internal resolutions (deko3d; on the PC 3x and 6x, as Renut's).
+  static constexpr uint32_t kHandheldCode = 4, kDockedCode = 6;
 
   uint32_t code = 0;
 

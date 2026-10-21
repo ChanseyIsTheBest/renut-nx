@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -25,19 +27,60 @@
 
 #include <switch.h>
 
-// Face buttons (1.0.1). By default each Switch button acts as the Xbox 360 button with the same
-// letter: A accepts and B goes back, as in other Switch games. With true they go by position, as on
-// an Xbox pad: the bottom one (B on the Switch) acts as A, the mapping of 1.0.0. It applies at once;
-// the settings menu reads it too (window_switch.cpp).
-REXCVAR_DEFINE_BOOL(input_xbox_layout, false, "Input",
-                    "Face buttons by position, as on an Xbox pad (the bottom button, B, acts as A). "
-                    "false = by letter: A accepts and B goes back");
+// banjo-nx (2026-10-21, the user's request "copy SA2"): this file is sa2-nx's driver as of 2026-10-20 (credit:
+// sa2-nx): per-player button maps (input_p1_* / input_p2_*), the Xbox 360 layout by position by default, the
+// handheld and players No1-No4 as separate controllers, single Joy-Cons held sideways and the controller applet
+// (L+R+ZR). Banjo's previous driver merged the handheld with No1 and went by letter.
+
+// Face buttons. By position (the default since 2026-10-07, the user's choice): as on the Xbox 360 pad the game was
+// made for, the bottom button (B on Switch controllers) acts as A, the right one (A) as B, the left one (Y) as X and
+// the top one (X) as Y. false = by letter (the Switch's A acts as A), as in other Switch games. It applies at once;
+// the settings menu reads it too (window_switch.cpp). input_p1_* / input_p2_* below override single buttons.
+REXCVAR_DEFINE_BOOL(input_xbox_layout, true, "Input",
+                    "Face buttons by position, as on an Xbox 360 pad (the bottom button, B, acts as A). "
+                    "false = by letter: the Switch's A acts as A");
+
+// Remapping, per player: which Switch buttons press each Xbox 360 button, read at start (renut.toml sections
+// [input_p1] and [input_p2]: a = "B, ZR" there is input_p1_a). Empty = the default (the layout above for A/B/X/Y; for
+// the rest, the button in the same place). A comma-separated list of: A B X Y L R ZL ZR PLUS MINUS LSTICK RSTICK UP
+// DOWN LEFT RIGHT SL SR, or NONE. Player 1's map also serves players 3 and 4. Single Joy-Cons held sideways name their
+// four face buttons by the place they take there (the right one is A, the bottom one B, the top one X, the left one Y),
+// as two-handed controllers do.
+#define REX_INPUT_MAP_CVARS(P, WHO)                                                                                 \
+  REXCVAR_DEFINE_STRING(input_##P##_a, "", "Input", WHO ": Switch buttons for the Xbox A button (empty = default)"); \
+  REXCVAR_DEFINE_STRING(input_##P##_b, "", "Input", WHO ": Switch buttons for the Xbox B button");                  \
+  REXCVAR_DEFINE_STRING(input_##P##_x, "", "Input", WHO ": Switch buttons for the Xbox X button");                  \
+  REXCVAR_DEFINE_STRING(input_##P##_y, "", "Input", WHO ": Switch buttons for the Xbox Y button");                  \
+  REXCVAR_DEFINE_STRING(input_##P##_lb, "", "Input", WHO ": Switch buttons for the left bumper (default L)");       \
+  REXCVAR_DEFINE_STRING(input_##P##_rb, "", "Input", WHO ": Switch buttons for the right bumper (default R)");      \
+  REXCVAR_DEFINE_STRING(input_##P##_lt, "", "Input", WHO ": Switch buttons for the left trigger (default ZL)");     \
+  REXCVAR_DEFINE_STRING(input_##P##_rt, "", "Input", WHO ": Switch buttons for the right trigger (default ZR)");    \
+  REXCVAR_DEFINE_STRING(input_##P##_start, "", "Input", WHO ": Switch buttons for Start (default PLUS)");           \
+  REXCVAR_DEFINE_STRING(input_##P##_back, "", "Input", WHO ": Switch buttons for Back (default MINUS)");            \
+  REXCVAR_DEFINE_STRING(input_##P##_ls, "", "Input", WHO ": Switch buttons for the left stick click (LSTICK)");     \
+  REXCVAR_DEFINE_STRING(input_##P##_rs, "", "Input", WHO ": Switch buttons for the right stick click (RSTICK)");    \
+  REXCVAR_DEFINE_STRING(input_##P##_up, "", "Input", WHO ": Switch buttons for D-pad up (default UP)");             \
+  REXCVAR_DEFINE_STRING(input_##P##_down, "", "Input", WHO ": Switch buttons for D-pad down (default DOWN)");       \
+  REXCVAR_DEFINE_STRING(input_##P##_left, "", "Input", WHO ": Switch buttons for D-pad left (default LEFT)");       \
+  REXCVAR_DEFINE_STRING(input_##P##_right, "", "Input", WHO ": Switch buttons for D-pad right (default RIGHT)")
+REX_INPUT_MAP_CVARS(p1, "Player 1");
+REX_INPUT_MAP_CVARS(p2, "Player 2");
+#undef REX_INPUT_MAP_CVARS
+
+// Single Joy-Cons (one per player, for multiplayer) are held sideways: the system is told so (it then turns the
+// stick for that grip), and the four buttons under the player's right thumb become the face buttons. SL and SR are
+// the triggers (ZL / ZR), the minus or plus button is Start, the stick is the left
+// stick. false = held upright (the system's default; no remapping).
+REXCVAR_DEFINE_BOOL(input_joycon_sideways, true, "Input",
+                    "Single Joy-Cons are held sideways, one per player (face buttons, stick and SL/SR turned "
+                    "accordingly)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 // Route recording for unattended test runs: the game's own pad input, written and played back here.
 // MINUS on pad 1 marks the start (and, while recording, the end), so the load time before the route does not
 // matter; the game does not see MINUS while either is set. Lines: "ms<TAB>npad buttons (hex)<TAB>lx ly rx ry".
 REXCVAR_DEFINE_STRING(input_record, "", "Input",
-                      "Record pad 1 to this file (e.g. sdmc:/switch/masseffect-nx/route.tsv) between two MINUS presses");
+                      "Record pad 1 to this file (e.g. sdmc:/switch/banjo-nx/route.tsv) between two MINUS presses");
 REXCVAR_DEFINE_STRING(input_play, "", "Input",
                       "Play this recorded file (input_record) back as pad 1, starting at the next MINUS press");
 
@@ -59,41 +102,163 @@ constexpr uint32_t kRepeatRateMs = 100;
 // counter, so a pad that reconnects never gets an id it had before.
 constexpr uint64_t kDeviceIdTag = 0x4E5800;  // "NX"
 
-struct ButtonMapping {
-  uint64_t npad;
-  uint16_t xinput;
+// Which Switch buttons press each Xbox 360 button: per player (1, and 2; players 3-4 use player 1's), one table per
+// face-button layout (input_xbox_layout), that player's overrides (input_p1_* / input_p2_*) applied to both. Built
+// once at Setup.
+struct ButtonTable {
+  std::array<uint64_t, 16> buttons{};  // per XInput button bit (X_INPUT_GAMEPAD_*: bit i)
+  uint64_t left_trigger = 0, right_trigger = 0;
 };
+std::array<std::array<ButtonTable, 2>, 2> g_tables;  // [player 1 / 2][0 by letter, 1 by position]
 
-// Face buttons by letter (the default): the Switch's A is the Xbox A.
-constexpr std::array<ButtonMapping, 4> kFrontsPerLetter = {{
-    {HidNpadButton_A, X_INPUT_GAMEPAD_A},
-    {HidNpadButton_B, X_INPUT_GAMEPAD_B},
-    {HidNpadButton_X, X_INPUT_GAMEPAD_X},
-    {HidNpadButton_Y, X_INPUT_GAMEPAD_Y},
-}};
+constexpr int BitIndex(uint16_t bit) { return std::countr_zero(bit); }
 
-// By position (input_xbox_layout), as on an Xbox pad: the bottom one is A.
-// On Switch pads that button is labelled B.
-constexpr std::array<ButtonMapping, 4> kFrontsPerPosition = {{
-    {HidNpadButton_B, X_INPUT_GAMEPAD_A},
-    {HidNpadButton_A, X_INPUT_GAMEPAD_B},
-    {HidNpadButton_Y, X_INPUT_GAMEPAD_X},
-    {HidNpadButton_X, X_INPUT_GAMEPAD_Y},
-}};
+// One name of input_p1_* / input_p2_*: the Switch buttons it stands for (0 for NONE), false when unknown.
+bool SwitchButtonByName(std::string name, uint64_t& out) {
+  for (char& c : name) c = char(std::toupper(static_cast<unsigned char>(c)));
+  static const std::pair<const char*, uint64_t> kNames[] = {
+      {"A", HidNpadButton_A},          {"B", HidNpadButton_B},          {"X", HidNpadButton_X},
+      {"Y", HidNpadButton_Y},          {"L", HidNpadButton_L},          {"R", HidNpadButton_R},
+      {"ZL", HidNpadButton_ZL},        {"ZR", HidNpadButton_ZR},        {"PLUS", HidNpadButton_Plus},
+      {"+", HidNpadButton_Plus},       {"MINUS", HidNpadButton_Minus},  {"-", HidNpadButton_Minus},
+      {"LSTICK", HidNpadButton_StickL}, {"L3", HidNpadButton_StickL},  {"RSTICK", HidNpadButton_StickR},
+      {"R3", HidNpadButton_StickR},    {"UP", HidNpadButton_Up},        {"DOWN", HidNpadButton_Down},
+      {"LEFT", HidNpadButton_Left},    {"RIGHT", HidNpadButton_Right},  {"SL", HidNpadButton_AnySL},
+      {"SR", HidNpadButton_AnySR},     {"NONE", 0},
+  };
+  for (const auto& [n, mask] : kNames)
+    if (name == n) {
+      out = mask;
+      return true;
+    }
+  return false;
+}
 
-// The other buttons are the same with both layouts.
-constexpr std::array<ButtonMapping, 10> kButtonMappings = {{
-    {HidNpadButton_Up, X_INPUT_GAMEPAD_DPAD_UP},
-    {HidNpadButton_Down, X_INPUT_GAMEPAD_DPAD_DOWN},
-    {HidNpadButton_Left, X_INPUT_GAMEPAD_DPAD_LEFT},
-    {HidNpadButton_Right, X_INPUT_GAMEPAD_DPAD_RIGHT},
-    {HidNpadButton_Plus, X_INPUT_GAMEPAD_START},
-    {HidNpadButton_Minus, X_INPUT_GAMEPAD_BACK},
-    {HidNpadButton_L, X_INPUT_GAMEPAD_LEFT_SHOULDER},
-    {HidNpadButton_R, X_INPUT_GAMEPAD_RIGHT_SHOULDER},
-    {HidNpadButton_StickL, X_INPUT_GAMEPAD_LEFT_THUMB},
-    {HidNpadButton_StickR, X_INPUT_GAMEPAD_RIGHT_THUMB},
-}};
+// "A, ZR" -> their buttons; false (and logged) when a name is unknown, then the default stays.
+bool ParseButtonList(const char* cvar, const std::string& list, uint64_t& out) {
+  uint64_t mask = 0;
+  std::string token;
+  auto flush = [&]() {
+    if (token.empty()) return true;
+    uint64_t m = 0;
+    if (!SwitchButtonByName(token, m)) {
+      REXLOG_WARN("{}: unknown Switch button \"{}\" (A B X Y L R ZL ZR PLUS MINUS LSTICK RSTICK UP DOWN LEFT RIGHT "
+                  "SL SR NONE); the default is kept",
+                  cvar, token);
+      return false;
+    }
+    mask |= m;
+    token.clear();
+    return true;
+  };
+  for (char c : list) {
+    if (c == ',' || c == ';' || c == '|' || c == ' ' || c == '\t') {
+      if (!flush()) return false;
+    } else {
+      token += c;
+    }
+  }
+  if (!flush()) return false;
+  out = mask;
+  return true;
+}
+
+void BuildButtonTables() {
+  for (auto& player : g_tables) {
+    for (int layout = 0; layout < 2; ++layout) {
+      ButtonTable& t = player[layout];
+      t = {};
+      const bool by_position = layout == 1;
+      t.buttons[BitIndex(X_INPUT_GAMEPAD_A)] = by_position ? HidNpadButton_B : HidNpadButton_A;
+      t.buttons[BitIndex(X_INPUT_GAMEPAD_B)] = by_position ? HidNpadButton_A : HidNpadButton_B;
+      t.buttons[BitIndex(X_INPUT_GAMEPAD_X)] = by_position ? HidNpadButton_Y : HidNpadButton_X;
+      t.buttons[BitIndex(X_INPUT_GAMEPAD_Y)] = by_position ? HidNpadButton_X : HidNpadButton_Y;
+      t.buttons[BitIndex(X_INPUT_GAMEPAD_DPAD_UP)] = HidNpadButton_Up;
+      t.buttons[BitIndex(X_INPUT_GAMEPAD_DPAD_DOWN)] = HidNpadButton_Down;
+      t.buttons[BitIndex(X_INPUT_GAMEPAD_DPAD_LEFT)] = HidNpadButton_Left;
+      t.buttons[BitIndex(X_INPUT_GAMEPAD_DPAD_RIGHT)] = HidNpadButton_Right;
+      t.buttons[BitIndex(X_INPUT_GAMEPAD_START)] = HidNpadButton_Plus;
+      t.buttons[BitIndex(X_INPUT_GAMEPAD_BACK)] = HidNpadButton_Minus;
+      t.buttons[BitIndex(X_INPUT_GAMEPAD_LEFT_SHOULDER)] = HidNpadButton_L;
+      t.buttons[BitIndex(X_INPUT_GAMEPAD_RIGHT_SHOULDER)] = HidNpadButton_R;
+      t.buttons[BitIndex(X_INPUT_GAMEPAD_LEFT_THUMB)] = HidNpadButton_StickL;
+      t.buttons[BitIndex(X_INPUT_GAMEPAD_RIGHT_THUMB)] = HidNpadButton_StickR;
+      t.left_trigger = HidNpadButton_ZL;
+      t.right_trigger = HidNpadButton_ZR;
+    }
+  }
+  // The overrides: the same in both layouts, since they name Switch buttons.
+  struct Override {
+    const char* name;
+    std::string value;
+    int bit;  // XInput bit index; -1 / -2 = left / right trigger
+  };
+#define REX_INPUT_OVERRIDES(P)                                                                      \
+  {                                                                                                 \
+    {"input_" #P "_a", REXCVAR_GET(input_##P##_a), BitIndex(X_INPUT_GAMEPAD_A)},                  \
+    {"input_" #P "_b", REXCVAR_GET(input_##P##_b), BitIndex(X_INPUT_GAMEPAD_B)},                  \
+    {"input_" #P "_x", REXCVAR_GET(input_##P##_x), BitIndex(X_INPUT_GAMEPAD_X)},                  \
+    {"input_" #P "_y", REXCVAR_GET(input_##P##_y), BitIndex(X_INPUT_GAMEPAD_Y)},                  \
+    {"input_" #P "_lb", REXCVAR_GET(input_##P##_lb), BitIndex(X_INPUT_GAMEPAD_LEFT_SHOULDER)},    \
+    {"input_" #P "_rb", REXCVAR_GET(input_##P##_rb), BitIndex(X_INPUT_GAMEPAD_RIGHT_SHOULDER)},   \
+    {"input_" #P "_lt", REXCVAR_GET(input_##P##_lt), -1},                                         \
+    {"input_" #P "_rt", REXCVAR_GET(input_##P##_rt), -2},                                         \
+    {"input_" #P "_start", REXCVAR_GET(input_##P##_start), BitIndex(X_INPUT_GAMEPAD_START)},      \
+    {"input_" #P "_back", REXCVAR_GET(input_##P##_back), BitIndex(X_INPUT_GAMEPAD_BACK)},         \
+    {"input_" #P "_ls", REXCVAR_GET(input_##P##_ls), BitIndex(X_INPUT_GAMEPAD_LEFT_THUMB)},       \
+    {"input_" #P "_rs", REXCVAR_GET(input_##P##_rs), BitIndex(X_INPUT_GAMEPAD_RIGHT_THUMB)},      \
+    {"input_" #P "_up", REXCVAR_GET(input_##P##_up), BitIndex(X_INPUT_GAMEPAD_DPAD_UP)},          \
+    {"input_" #P "_down", REXCVAR_GET(input_##P##_down), BitIndex(X_INPUT_GAMEPAD_DPAD_DOWN)},    \
+    {"input_" #P "_left", REXCVAR_GET(input_##P##_left), BitIndex(X_INPUT_GAMEPAD_DPAD_LEFT)},    \
+    {"input_" #P "_right", REXCVAR_GET(input_##P##_right), BitIndex(X_INPUT_GAMEPAD_DPAD_RIGHT)}, \
+  }
+  const Override overrides[2][16] = {REX_INPUT_OVERRIDES(p1), REX_INPUT_OVERRIDES(p2)};
+#undef REX_INPUT_OVERRIDES
+  for (size_t player = 0; player < g_tables.size(); ++player) {
+    for (const Override& o : overrides[player]) {
+      if (o.value.empty()) continue;
+      uint64_t mask = 0;
+      if (!ParseButtonList(o.name, o.value, mask)) continue;
+      for (ButtonTable& t : g_tables[player]) {
+        if (o.bit == -1) t.left_trigger = mask;
+        else if (o.bit == -2) t.right_trigger = mask;
+        else t.buttons[o.bit] = mask;
+      }
+      REXLOG_INFO("{} = {}", o.name, o.value);
+    }
+  }
+}
+
+// The presses of a single Joy-Con held sideways, as a two-handed controller reports the same places (the right face
+// button is A, the bottom one B, the top one X, the left one Y). The system names a single Joy-Con's buttons as they
+// are printed; held sideways the left Joy-Con's arrow buttons and the right Joy-Con's letters turn a quarter: same
+// table as devkitPro's SDL (pad_mapping_left_joy / pad_mapping_right_joy). SL / SR are the triggers (ZL / ZR) and stay
+// readable as SL / SR for input_p1_* / input_p2_*; minus or plus is Start; the stick
+// click is LSTICK.
+uint64_t SidewaysLeftJoyCon(uint64_t p) {
+  uint64_t v = 0;
+  if (p & HidNpadButton_Down) v |= HidNpadButton_A;
+  if (p & HidNpadButton_Left) v |= HidNpadButton_B;
+  if (p & HidNpadButton_Right) v |= HidNpadButton_X;
+  if (p & HidNpadButton_Up) v |= HidNpadButton_Y;
+  if (p & HidNpadButton_LeftSL) v |= HidNpadButton_ZL | HidNpadButton_LeftSL;
+  if (p & HidNpadButton_LeftSR) v |= HidNpadButton_ZR | HidNpadButton_LeftSR;
+  if (p & HidNpadButton_Minus) v |= HidNpadButton_Plus;
+  if (p & HidNpadButton_StickL) v |= HidNpadButton_StickL;
+  return v;
+}
+uint64_t SidewaysRightJoyCon(uint64_t p) {
+  uint64_t v = 0;
+  if (p & HidNpadButton_X) v |= HidNpadButton_A;
+  if (p & HidNpadButton_A) v |= HidNpadButton_B;
+  if (p & HidNpadButton_Y) v |= HidNpadButton_X;
+  if (p & HidNpadButton_B) v |= HidNpadButton_Y;
+  if (p & HidNpadButton_RightSL) v |= HidNpadButton_ZL | HidNpadButton_RightSL;
+  if (p & HidNpadButton_RightSR) v |= HidNpadButton_ZR | HidNpadButton_RightSR;
+  if (p & HidNpadButton_Plus) v |= HidNpadButton_Plus;
+  if (p & HidNpadButton_StickR) v |= HidNpadButton_StickL;
+  return v;
+}
 
 // The order of this list is also the order in which events are sent if
 // multiple buttons change at once. Same table as the SDL driver.
@@ -197,6 +362,9 @@ struct SwitchInputDriver::Slot {
   PadState pad{};
   bool connected = false;
   DeviceId id = DeviceId::kInvalid;
+  // The guest player this controller is (0 = player 1), as the input system assigned it (OnDevicesAssigned): picks
+  // the button table (player 2's map for player 2, player 1's for the others).
+  uint32_t ordinal = 0;
 
   X_INPUT_STATE state{};
   bool state_changed = false;
@@ -262,20 +430,22 @@ X_STATUS SwitchInputDriver::Setup() {
     REXLOG_ERROR("SwitchInputDriver: hidInitialize failed: 0x{:08X}", rc);
     return X_STATUS_UNSUCCESSFUL;
   }
-  padConfigureInput(kSlotCount, HidNpadStyleSet_NpadStandard);
+  padConfigureInput(kPlayerCount, HidNpadStyleSet_NpadStandard);
+  // Single Joy-Cons are held sideways (input_joycon_sideways): the system then turns their stick for that grip.
+  if (REXCVAR_GET(input_joycon_sideways)) {
+    hidSetNpadJoyHoldType(HidNpadJoyHoldType_Horizontal);
+  }
 
+  // Slot 0 the handheld, slots 1-4 the system's players No1-No4 (see the header).
   static constexpr std::array<HidNpadIdType, kSlotCount> kNpadIds = {
-      HidNpadIdType_No1, HidNpadIdType_No2, HidNpadIdType_No3, HidNpadIdType_No4};
+      HidNpadIdType_Handheld, HidNpadIdType_No1, HidNpadIdType_No2, HidNpadIdType_No3, HidNpadIdType_No4};
   for (size_t i = 0; i < kSlotCount; ++i) {
     auto slot = std::make_unique<Slot>();
     slot->npad_id = kNpadIds[i];
-    if (i == 0) {
-      padInitialize(&slot->pad, HidNpadIdType_No1, HidNpadIdType_Handheld);
-    } else {
-      padInitialize(&slot->pad, kNpadIds[i]);
-    }
+    padInitialize(&slot->pad, kNpadIds[i]);
     slots_[i] = std::move(slot);
   }
+  BuildButtonTables();
   hidPermitVibration(true);
   initialized_ = true;
   return X_STATUS_SUCCESS;
@@ -409,28 +579,37 @@ void SwitchInputDriver::Poll(size_t index) {
   uint64_t held = padGetButtons(&slot.pad);
   HidAnalogStickState left = padGetStickPos(&slot.pad, 0);
   HidAnalogStickState right = padGetStickPos(&slot.pad, 1);
-  if (index == 0) {
+  // A single Joy-Con held sideways (input_joycon_sideways): its presses as a two-handed controller's, and its one
+  // stick as the left stick (the right Joy-Con reports its stick as stick 1). The system already turned the stick.
+  if (index != 0 && REXCVAR_GET(input_joycon_sideways)) {
+    const uint32_t style = padGetStyleSet(&slot.pad);
+    const uint32_t whole = HidNpadStyleTag_NpadJoyDual | HidNpadStyleTag_NpadFullKey | HidNpadStyleTag_NpadHandheld;
+    if (!(style & whole) && (style & HidNpadStyleTag_NpadJoyLeft)) {
+      held = SidewaysLeftJoyCon(held);
+      right = HidAnalogStickState{};
+    } else if (!(style & whole) && (style & HidNpadStyleTag_NpadJoyRight)) {
+      held = SidewaysRightJoyCon(held);
+      left = right;
+      right = HidAnalogStickState{};
+    }
+  }
+  // Route recording (a test tool) follows player 1: the handheld, or No1 when the handheld is not in use.
+  if (index == 0 || (index == 1 && !slots_[0]->connected)) {
     RouteRecording(held, left, right);
   }
   DispatchMenuShortcuts(slot, held);
   X_INPUT_GAMEPAD gamepad{};
+  const ButtonTable& table = g_tables[slot.ordinal == 1 ? 1 : 0][REXCVAR_GET(input_xbox_layout) ? 1 : 0];
   uint16_t buttons = 0;
-  const auto& fronts =
-      REXCVAR_GET(input_xbox_layout) ? kFrontsPerPosition : kFrontsPerLetter;
-  for (const ButtonMapping& mapping : fronts) {
-    if (held & mapping.npad) {
-      buttons |= mapping.xinput;
-    }
-  }
-  for (const ButtonMapping& mapping : kButtonMappings) {
-    if (held & mapping.npad) {
-      buttons |= mapping.xinput;
+  for (int i = 0; i < 16; ++i) {
+    if (held & table.buttons[i]) {
+      buttons |= uint16_t(1u << i);
     }
   }
   gamepad.buttons = buttons;
   // ZL and ZR are digital.
-  gamepad.left_trigger = (held & HidNpadButton_ZL) ? 0xFF : 0;
-  gamepad.right_trigger = (held & HidNpadButton_ZR) ? 0xFF : 0;
+  gamepad.left_trigger = (held & table.left_trigger) ? 0xFF : 0;
+  gamepad.right_trigger = (held & table.right_trigger) ? 0xFF : 0;
   // HID reports up as positive Y, like XInput, so no inversion is needed.
   gamepad.thumb_lx = ClampStickAxis(left.x);
   gamepad.thumb_ly = ClampStickAxis(left.y);
@@ -531,6 +710,42 @@ void SwitchInputDriver::DispatchMenuShortcuts(Slot& slot, uint64_t held) {
   }
   slot.menu_shortcuts = ab_now ? (slot.menu_shortcuts | kBitAb)
                                  : (slot.menu_shortcuts & ~kBitAb);
+
+  /*
+   * L+R+ZR opens the system's controller applet: connect a second controller, change the player order, or split a
+   * Joy-Con pair into two sideways Joy-Cons for two players. On the UI thread, like the menus (it blocks until the
+   * player closes it).
+   */
+  const uint64_t kBitApplet = uint64_t(1) << 9;
+  const bool applet_now = modifier && (held & HidNpadButton_ZR) != 0;
+  const bool applet_before = (slot.menu_shortcuts & kBitApplet) != 0;
+  if (applet_now && !applet_before) {
+    REXLOG_INFO("menu shortcut: controllers");
+    auto show = [this] { ShowControllerApplet(); };
+    rex::ui::Window* const window = window_ui_.load(std::memory_order_acquire);
+    if (!window || !window->app_context().CallInUIThread(show)) {
+      show();
+    }
+  }
+  slot.menu_shortcuts = applet_now ? (slot.menu_shortcuts | kBitApplet) : (slot.menu_shortcuts & ~kBitApplet);
+}
+
+void SwitchInputDriver::ShowControllerApplet() {
+  HidLaControllerSupportArg arg;
+  hidLaCreateControllerSupportArg(&arg);
+  arg.hdr.player_count_min = 0;
+  arg.hdr.player_count_max = static_cast<s8>(kPlayerCount);
+  arg.hdr.enable_take_over_connection = 1;  // the controllers already connected stay
+  arg.hdr.enable_left_justify = 1;          // players numbered without gaps
+  arg.hdr.enable_permit_joy_dual = 1;       // a Joy-Con pair is one player
+  arg.hdr.enable_single_mode = 0;           // several players (single Joy-Cons sideways allowed)
+  HidLaControllerSupportResultInfo info{};
+  const Result rc = hidLaShowControllerSupport(&info, &arg);
+  if (R_FAILED(rc)) {
+    REXLOG_WARN("controller applet: failed (0x{:08X})", rc);
+  } else {
+    REXLOG_INFO("controller applet: {} player(s), selected npad {}", int(info.player_count), int(info.selected_id));
+  }
 }
 
 SwitchInputDriver::Slot* SwitchInputDriver::FindSlot(DeviceId id) {
@@ -557,7 +772,7 @@ void SwitchInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
     DeviceInfo info;
     info.id = slot.id;
     const uint32_t style = padGetStyleSet(&slot.pad);
-    if (i == 0 && slot.pad.active_handheld) {
+    if (i == 0) {
       info.name = "Nintendo Switch (handheld)";
     } else if (style & HidNpadStyleTag_NpadFullKey) {
       info.name = "Pro Controller";
@@ -570,9 +785,27 @@ void SwitchInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
     } else {
       info.name = "Nintendo Switch controller";
     }
-    info.guid = "switch-npad-" + std::to_string(i + 1);
+    info.guid = i == 0 ? std::string("switch-handheld") : "switch-npad-" + std::to_string(i);
     info.synthetic = false;
     out.push_back(std::move(info));
+  }
+}
+
+void SwitchInputDriver::OnDevicesAssigned(const std::vector<DeviceInfo>& devices) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (size_t i = 0; i < kSlotCount; ++i) {
+    auto& slot = slots_[i];
+    if (!slot) continue;
+    uint32_t ordinal = 0;
+    const DeviceInfo* assigned = nullptr;
+    for (const DeviceInfo& device : devices)
+      if (device.id == slot->id) ordinal = device.ordinal, assigned = &device;
+    slot->ordinal = ordinal;
+    // banjo-nx (2026-10-21): which controller is which player, in the log (two-player checks).
+    if (assigned) {
+      REXLOG_INFO("controller: {} ({}) is player {}", assigned->name,
+                  i == 0 ? std::string("handheld") : "No" + std::to_string(i), ordinal + 1);
+    }
   }
 }
 
@@ -614,7 +847,7 @@ X_RESULT SwitchInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t flags,
   std::memset(out_caps, 0, sizeof(*out_caps));
   out_caps->type = 0x01;      // XINPUT_DEVTYPE_GAMEPAD
   out_caps->sub_type = 0x01;  // XINPUT_DEVSUBTYPE_GAMEPAD
-  const bool handheld = slot->npad_id == HidNpadIdType_No1 && slot->pad.active_handheld;
+  const bool handheld = slot->npad_id == HidNpadIdType_Handheld;
   out_caps->flags = handheld ? 0 : X_INPUT_CAPS_WIRELESS;
   out_caps->gamepad.buttons = 0xF3FF;
   out_caps->gamepad.left_trigger = 0xFF;
@@ -638,8 +871,7 @@ X_RESULT SwitchInputDriver::SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* v
   HidNpadIdType npad_id = slot->npad_id;
   uint32_t style = 0;
   int count = 0;
-  if (slot->npad_id == HidNpadIdType_No1 && slot->pad.active_handheld) {
-    npad_id = HidNpadIdType_Handheld;
+  if (slot->npad_id == HidNpadIdType_Handheld) {
     style = HidNpadStyleTag_NpadHandheld;
     count = 2;
   } else {

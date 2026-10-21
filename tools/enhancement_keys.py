@@ -72,10 +72,15 @@ def localized_rows():
 
 def toml_values():
     out = {}
+    section = ''  # 2026-10-21: [input_p1] a = ... is the cvar input_p1_a
     for line in open(TOML, encoding='utf-8'):
+        s = re.match(r'^\s*\[(\w+)\]', line)
+        if s:
+            section = s.group(1) + '_'
+            continue
         m = re.match(r'^\s*(\w+)\s*=\s*([^#\n]+?)\s*(#.*)?$', line)
         if m:
-            out[m.group(1)] = m.group(2).strip().strip('"')
+            out[section + m.group(1)] = m.group(2).strip().strip('"')
     return out
 
 

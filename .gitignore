@@ -40,3 +40,5 @@ shaders_nfsmw/
 tools/difftest/dp.*
 tools/difftest/shtool/obj/
 tools/difftest/shtool/bin/
+# 2026-10-21: the PGO profile (.gcda files merged from an instrumented run; tools/pgo_merge.py, docs/pgo-lto.md)
+pgo/

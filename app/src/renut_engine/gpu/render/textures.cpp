@@ -543,8 +543,9 @@ bool Create(HostTexture &t, const TextureFetch &fetch, bool render_target,
   const uint32_t w = scale.Size((t.width + bs - 1) / bs * bs);
   const uint32_t h = scale.Size((t.height + bs - 1) / bs * bs);
   t.extra_levels = 0;
+  // banjo-nx (2026-10-21, banjo_renut_host_mips): off, no host levels at all (as at 1x and below).
   if (render_target && host_levels && t.dimension == TextureDimension::Tex2D &&
-      State().texture_mip_ps) {
+      State().texture_mip_ps && banjo::renut_gpu::HostMipsOn()) {
     // No more than the host size has.
     const uint32_t host_levels_max = 32 - uint32_t(std::countl_zero(std::max(w, h)));
     t.extra_levels = std::min(ExtraLevels(scale), host_levels_max - 1);

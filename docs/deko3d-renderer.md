@@ -879,3 +879,218 @@ reachable its slack (which includes the delay already applied, the waits seen la
 up to 29 ms and the frames missed their slot. The gain was only where the frame rate was already far below 30. The
 lag left at the cap is the work itself (game thread + recording + GPU) and the wait for the display's refresh; only a
 read timed from the refresh could take the latter. sa2-nx, futari-nx, Peggle 2 and SASRT were told to remove it too.
+
+## 26. SMAA 1x before the HUD (2026-10-21, package 36u, the user's request)
+
+`banjo_renut_smaa` (on in renut.toml, renut_auto.toml and every config since 36u, the user's call; off in code) anti-aliases the 3D image with SMAA 1x
+(Jorge Jimenez, Jose I. Echevarria, Belen Masia, Fernando Navarro, Diego Gutierrez: SMAA.hlsl, AreaTex.h and
+SearchTex.h from github.com/iryoku/smaa, MIT licence, in app/thirdparty/smaa with its LICENSE.txt). An alternative to
+MSAA: the game's 2x MSAA stays off (disable_msaa), SMAA costs three full-screen passes and a copy at 1280x720.
+
+**Where:** an emulator trace of a gameplay frame (banjo_renut_diag_resolve_trace + banjo_renut_diag_draw_log_s) shows
+the 3D scene (1280x720 8-bit, ~730 draws, resolved in two halves), depth of field into a second 1280x720 target, the
+bloom chain, then on that second target one full-screen composite (pixel shader 981A6A58F2ABFA42, opaque, colour mask
+RGB) followed by the HUD (alpha-blended: minimap, icons, text) and the resolve to the front buffer. SMAA runs right
+after the composite draw (render/draw.cpp, end of DrawStateLocked; `banjo_renut_smaa_after_ps` lists the composite
+shaders), once a frame: the image is post-processed and tone-mapped (gamma space, what luma edge detection expects)
+and no HUD is drawn yet. In the emulator run it ran in every cutscene and gameplay frame; the boot logos, title and
+menus have no such composite and are left as they are.
+
+**Passes** (render/smaa.cpp, shaders/host/smaa*.hlsl, the utility layout like DrawResolveCopy): the target copied into
+`src` (resolve_copy_ps), luma edges of `src` into R8G8 `edges` (cleared first), blending weights into RGBA8 `weights`
+(SMAA's medium preset; `banjo_renut_smaa_quality = 2` the high one with diagonal and corner detection), neighbourhood
+blending of `src` written back into the target with the RGB write mask (its alpha kept). SMAA's point samples are
+clamped texel loads, its other samples the linear clamp sampler; the bindless slots go in the push block as raw bits
+(Ryujinx follows a handle only back to a constant buffer load). `banjo_renut_smaa_threshold` (0.1) is the luma
+threshold. The passes reset the draw path's bound framebuffer, pipeline, layout and viewport; the target's `writes`
+is bumped (resolve skip).
+
+**Checks:** emulator run 137 (SMAA every frame of the intro and gameplay, pictures right) and run 138 with
+`banjo_renut_diag_smaa_compare_s` (the same frame before and after SMAA, read back and written as TGA without stalls):
+builds/smaa_comparison_2026-10-21 (6 scenes full size and 3x crops, 25 pairs in all/). Stair-steps on furniture,
+fences, roofs and characters smoothed; textures keep their detail; about 9,000-57,000 pixels of 921,600 change a
+frame. GPU cost on the console: configs/banjo_renut_smaa_ab.toml (in-run A/B target 19) measures it.
+
+**Cheaper, same pixels (36v, the user's request after 36u's console run).** 36u's four full-screen passes cost 3.3-5.3
+ms a frame at 460.8 MHz (GPU profile "SMAA"; the matching windows +4-5 ms; the t220 scene 30.0 -> 25.9 fps). Now:
+- the copy folded into the edge pass (a second render target: the pixel the edge pass reads anyway): one full-screen
+  pass and one barrier less;
+- a depth mask (D16) written by the edge pass (SV_Depth): 0 on edge pixels, 0.5 on pixels without an edge of their own
+  whose right or bottom luma step reaches the threshold (only those can take weights from a neighbour), 1 elsewhere.
+  The weights pass (viewport depth 0.25, GREATER) shades only the edge pixels into a target cleared to 0, which is
+  what the reference writes everywhere else; the blend pass (0.75, GREATER) only the pixels it can change, the others
+  keeping the composite's value, which the blend would write unchanged. Both `[earlydepthstencil]`;
+- the edge detection without the reference's discard (0 written where it would discard), its point samples through
+  the point clamp sampler (no clamping arithmetic);
+- one barrier before each of the three passes (plume's deko3d back end merges a point's transitions).
+`banjo_renut_diag_smaa_compare_s` now also runs the full-screen passes in its frames: emulator run 139, 23 frames
+(4,587-110,974 pixels changed by SMAA each): 0 pixels differ between the masked and the full-screen results.
+
+
+**36w: only the masked pixels write.** 36v's console run: SMAA 2.47 ms a frame on average (36u 3.77; the composite's own
+0.80 ms the same in all three runs, so the label holds SMAA's own work). The edge pass still wrote edges, a copy and the
+mask for all 921,600 pixels (about 7.4 MB and three render-target writes a pixel). Now:
+- the edge and mask targets are cleared (fast clears: plume's deko3d colour targets are compressed, the depth targets
+  with depth compression on) and the edge pass discards where the reference does, also keeping the pixels only the
+  blend can change: only the masked pixels (about a sixth in gameplay) write edges and mask;
+- no copy in the edge pass: the blend pass reads the game's target (untouched until the end) and writes 'src' on the
+  masked pixels; a fourth pass copies those pixels back into the target (red, green, blue), masked the same way;
+- the mask the other way round (cleared to 0, edge pixels 1, the blend's other pixels 0.5) so the masked passes use
+  the test LESS (weights at 0.75, blend and copy at 0.25), the direction the coarse depth culling (zcull) works in,
+  rejecting whole tiles left as cleared;
+- a GPU profile label per pass: "SMAA edges", "SMAA weights", "SMAA blend", "SMAA copy".
+Not done (looked at): quad-shared lumas (QuadReadAcrossX/Y would cut the edge pass's 5 fetches to about 3, but uam has
+no subgroup quad operations); half-precision arithmetic, skipping frames or the HUD's area (not the same pixels); a
+compute edge pass (no early depth test for the passes after it); gathers (no fewer fetches for SMAA's cross pattern).
+
+**36x.** The comparison frames now run SMAA's own shaders end to end (SMAALumaEdgeDetectionPS with its discard into a
+cleared target, the full-screen weights and blending: shaders/host/smaa_edge_ref_ps.hlsl) and compare the target after
+the optimised passes with that: emulator run 142, 24 frames, 0 pixels differ (36w's passes). Tried and dropped: the edge
+pass's lumas shared in each 2x2 quad through fine derivatives (ddx_fine/ddy_fine are the very subtraction SMAA takes
+the absolute value of; 3 samples a pixel instead of 5): emulator run 141 differed from SMAA in 6,000-72,000 pixels a
+frame and found fewer edges, so the derivatives are not that subtraction there (Ryujinx's quad emulation or the
+hardware's); not shippable without proof on the console.
+Also in 36x, the user's call (NOT exact): `banjo_renut_fur_shells_percent` (default 100; 75 in the tomls): that share
+of each fur part's shells, spread evenly (draw n when ceil((n+1)p/100) > ceil(np/100)), the first always.
+
+**36y (console data of 36w).** 36w: SMAA 3.12 ms a frame on average (36v 2.79): edges 1.46, weights 0.88, blend 0.36,
+copy 0.27. The edge pass costs the same with every pixel writing (36v) or a sixth (36w): it is bound by its five samples
+a pixel, not its writes, and the copy pass was a loss. 36y = 36v's three passes (the copy as the edge pass's second
+target, the mask written for every pixel, no clears but the weights') with 36w's LESS mask (cleared nowhere now: every
+pixel written) and the labels "SMAA edges", "SMAA weights", "SMAA blend". The weights pass (0.3-1.8 ms, by the scene's
+edges: grass) and the edge pass are what is left; the exact means for those are spent.
+Also 36y (the user's call, NOT exact): `banjo_renut_portrait_fur_shells_percent` (50 in the tomls: 11 of 21 shells in
+targets of 128 x 128 or less) and `banjo_renut_portrait_msaa_samples` (2 in the tomls, the user's choice over 1: the
+game's small MSAA targets, the dialogue portrait's 96 x 96 4x box, made 2x in BuildTarget, colour and depth alike;
+pipelines take the target's sample count; 1 makes them single-sampled: resolves become copies, alpha to coverage
+the alpha test as on the scene).
+
+## 27. Internal resolution: the 3D image at 648p / 900p, the HUD at the display's (2026-10-21, package 36z, the user's request)
+
+NOT exact (the user's call: a smart cut). `banjo_renut_render_height_handheld` (648 in the tomls, 720 in code) and
+`banjo_renut_render_height_docked` (900) set the 3D image's height; `banjo_renut_display_height_docked` (1080 in the
+tomls, 720 in code) the display's when docked. The HUD, menus and text are drawn at the display's resolution (1280x720
+handheld, 1920x1080 docked). configs/banjo_renut_native_720p.toml is the game's own 720p everywhere. The upscale is
+bilinear in every config (the user's choice: `banjo_renut_upscale_filter = 0`, also the code's default); 1 is bicubic.
+
+**Where the split is.** The emulator trace of section 26: the 3D scene into BBB103F0 (1280x720, depth BBB104F0), the
+depth of field into BBB10470 with that depth bound, the bloom chain (1x buffers), the final composite (981A6A58F2ABFA42)
+into BBB10470, the HUD into BBB10470 (the depth still bound; draw logs of runs 64 and 150: every HUD draw has
+RB_DEPTHCONTROL 00708734, 00700040 or 00700060, no Z or stencil test), the resolve of BBB10470 to the front buffer. So:
+- every target is drawn at the internal resolution (`ResolutionScale`, latched at the Swap; shadow maps and the
+  post-processing buffers keep the console's sizes, graphics_options.cpp);
+- right after the composite and SMAA (render/draw.cpp, the same hook), render/ui_scale.cpp draws the composite's target
+  into its UI target at the display's resolution (`UiSurfaceLocked`: same format and samples, not any EDRAM view's
+  target) with shaders/host/ui_upscale_ps.hlsl: one bilinear sample a pixel and nothing else (no branch, uniform
+  bindless indices, no clear, no blending, the whole write mask: a partial one would read the target back; one
+  barrier for both images), so it costs a read of the image and a write of it; ui_upscale_bicubic_ps.hlsl is
+  Catmull-Rom in the usual five bilinear taps (`banjo_renut_upscale_filter` 1). GPU profile label "UI upscale";
+- from then to the Swap every lookup of the composite's target answers the UI target (`RedirectToUiSurfaceLocked`,
+  GetHostSurfaceLocked; the surface epoch bumped, so the per-draw memos look again): the HUD's draws and clears and the
+  resolve to the front buffer, which is then at the display's size and the present shows it as it is;
+- the HUD's framebuffer leaves the scene's depth target out when it is smaller than the colour target and the draw
+  neither tests nor writes depth or stencil (`DropSmallerDepth`: a deko3d framebuffer is as large as its smallest
+  attachment; a Z test with ZFUNC ALWAYS and no writes counts as none); the pipeline key keeps the draw's depth words
+  (`Targets::depth_dropped`), so its shader variants (constant 909) and the DKSH cache entries stay the same;
+- the menus draw 3D icons after the composite (the single-player menu's item bar: Banjo heads, consoles, controller;
+  pixel shader B2E98780B07392BC, RB_DEPTHCONTROL 00708766: GEQUAL with writes; emulator run 146: up to 918 such draws
+  in 10 s). The first draw of a frame that tests depth after the redirect fills a UI depth target at the display's
+  resolution from the scene's (`UiDepthAfterCompositeLocked`, shaders/host/ui_depth_upscale_ps.hlsl: nearest texel,
+  values copied as they are, the stencil cleared to 0; label "UI depth upscale") and the depth target's lookups are
+  redirected there too until the Swap. Gameplay frames never make it (their HUD tests no depth). A draw that still
+  keeps a smaller depth target is counted and logged ("A draw tests depth or stencil against a depth target smaller
+  ..." with its shaders); the [renut] internal resolution line counts both every 10 s;
+- clears of colour and depth targets of different scales are made one at a time, each at its own scale;
+- frames without the composite for 30 frames in a row (menus, loading screens, and the boot) are drawn at the display's
+  resolution whole: no split there, the menus' text stays sharp. The first gameplay frame after a menu is drawn at the
+  display's resolution too; the targets are made again at each switch (a few MB, once).
+
+**Shaders.** The GLSL package was made with tools/deko3d_glsl_opt.py's passes scale1 (every texture's scale code folded
+to 0) and fragscale (the pixel position not divided by the render scale): both assume 1x. The default pass list now
+leaves them out and starts with a new pass, scalecodes: the scale-code chain shader_common.h's renutTextureScale
+compiles to (`code == 4u ? 3.0`, `code == 6u ? 6.0`) gets this renderer's factors for codes 4 and 6, 9/10 and 5/4
+(render_scale.h has the same on deko3d; 4K and AO at 6x, which those codes were, are never drawn on the Switch; the
+PC's back ends keep Renut's table and shaders). 2271 of 4881 shaders change (2209 pixel shaders: `gl_FragCoord.xy /
+resolution_scale` instead of `/ 1.0`; the 168 with a scale-code read), all checked through uam; DKSH cache 57 has their
+variants (cache 56's for the rest).
+
+**Docked.** From sa2-nx 1.0.3.1 (credited in the code): plume's `Deko3DSetSwapChainSize` makes the swapchain
+1920x1080 when docked (the window gets that size with nwindowSetDimensions once the old swapchain has let go of its
+buffers); `ConsoleDocked` is libnx's operation mode with Reverse-NX obeyed (rex::ui::switch_saltynx::BaseMode, as the
+SDK's window). Docking and undocking take effect at the next frame.
+
+**36z2 (console log of 36z; the user's requests: 864p docked, any height in the config).**
+- Docked was 41.3 ms of GPU a frame (24 fps) in the scene that ran at 30 fps handheld (33.0 ms): the GPU runs at 768
+  MHz docked but the memory at 1600 MHz in both modes, so the memory-bound passes grow with their pixels (colour
+  resolves 1.74x, depth resolves 1.56x, SMAA 1.39x, present 2.05x, UI upscale 2.16x) while the scene's draws stay
+  level (0.98x); and Renut's extra host mip level for every resolve destination above 1x ("resolve host mip levels")
+  cost 3.98 ms, which handheld (0.9x) never has. `banjo_renut_host_mips` (on in code, Renut's) switches it: off in
+  renut.toml, renut_auto.toml and every config but configs/banjo_renut_host_mips_on.toml (the user's call; NOT exact
+  above 1x: level 0 only, as at 1x).
+- Any height: render_scale.h's codes 4 (handheld) and 6 (docked) are set once from the keys (height / 720 reduced;
+  360 to 1080, rounded to a multiple of 9 so 1280x720, 640x360 and 320x180 are whole host pixels); the shaders read the
+  same heights from SharedConstants pad_1352[1] (v[84].w: handheld | docked << 16), the scalecodes pass's chain constants
+  now `float(v[84].w & 0xFFFF) / 720` and `float(v[84].w >> 16) / 720`. 720 is code 0, 1080 code 2 (no upscale when
+  docked at 1080). Docked default 864 (1536x864, 1.2x).
+- The docked white line: the half-pixel offset (`banjo_renut_half_pixel_offset`, section 12) was half a guest pixel,
+  scaled with the viewport: at 1.25x and 1.5x the game's full-screen quads (edges on the guest's pixel centres) began
+  0.625 / 0.75 host pixels in, past the centres of the top row and left column, which kept stale values (white in the
+  emulator's docked frames: rows 236,236,236, columns 221,221,221). Now half a host pixel (0.5 / scale guest pixels):
+  the same at 1x, 0.05 host pixels more at 0.9x.
+- A 128x128 colour target (a post-processing size: 1x) had its 128x128 depth target at the internal scale (0.9x:
+  115x115): ten draws a frame were cut. Depth targets of a quarter of the screen or less are 1x now too.
+
+## 28. No draw waits for a shader compile (2026-10-21, package 36z3, `banjo_deko3d_async_variants`, the user's request)
+
+**The freeze (console log of 36z2, renut_003 and banjo_profiler stall #15).** Loading the next area at 17:56:41, the
+render thread built a pipeline (DrawStateLocked -> GetPipelineLocked -> GetPipelineSlow, twice: Renut's generic pipeline
+of a bool-specialised key) whose variant was not in the DKSH cache and waited in plume's loadVariant for the uam thread,
+which spent the stall watch's whole 9 s (1,925 ms of CPU in each 2 s) and the two minutes after it in Mesa's GLSL
+optimisation loop (do_common_optimization -> do_tree_grafting). The game froze until it was closed. That session had 375
+run-time compiles (avg 376 ms each: a stutter each) in areas past the scripted route. The 983 variants the console's
+pipeline list adds all compiled on the PC in a minute (none hung): the one that hung never finished its pipeline, so no
+list has it. Cache 59 has the console's own cache (every variant it compiled) and its list's variants.
+
+**The change (plume deko3d, Deko3DOptions::asyncVariants).** A variant neither loaded nor in the cache is queued for the
+uam thread in the background (once per variant key; draws' synchronous compiles go ahead of those), and loadVariant
+returns the shader's generic variant: the request without the constants that only fold what the shader reads at run
+time when they keep their defaults (genericDrops: the game's bools 1000-1255, blend skip 900, output trim 901, alpha
+function 903, tessellation kind 904, vertex outputs 905, zero inputs 906, early depth 909). The configuration's
+constants stay (907, 908, 910-913: skin-once, 913, writes rows that other draws read). The same pixels: each dropped
+constant's default reads the value at run time or does work whose result the pipeline's state then discards. The
+pipeline records the stages that wait (provisional); when a background compile finishes (the uam thread writes it to the
+cache file, loads it and bumps the async epoch), the next draw that takes the pipeline (render/draw.cpp, one atomic load
+otherwise) gives it the stages whose own variants are done (Deko3DRefreshPipeline: each stage pointer stored at once; any
+mix of generic and own stages draws the same pixels) and binds it again. A variant that fails keeps the generic one.
+Renut's own generic pipelines for bool- and alpha-specialised keys (render/pipeline.cpp) stay as they were: this covers
+what they did not (the rest of the key's constants, and every key that is not bool-specialised).
+
+**The generic variants of every shader** are in the cache: tools/deko3d_variant_cache.py --generic adds each GLSL file's
+generic variant (no key-state constant) with the configuration's A/B variants of it (config_specs: 907, 908, 910, 911,
+913), as for the pipelines. With them, no draw anywhere in the game waits for uam. The report line counts it: "uam N
+compiles (... ; X stages given the generic variant meanwhile, Y compiled in the background, Z swapped in)".
+
+**Checks.** Emulator run 152 (cache 60, the scripted route): 0 compiles, 0 generic stages (the cache has every variant).
+The stress test runs with a cache of the generic variants only (deko3d_variant_cache.py --generic --merge 60 --prune:
+4,717), so every specialised variant takes the background path. Run 153 aborted in finishAsync: the job kept the
+Deko3DShader object it was made for, and Renut's prebuild workers destroy theirs when a batch is done (a freed mutex:
+std::system_error, terminate). The jobs and the pipelines now keep only the variant's key; the finished variant lives in
+the device's `variants` (never freed), where the refresh finds it.
+Run 154 (the stress test again with the fix): the whole route (7 minutes), 204 variants compiled in the background (avg
+1.6 s each under the emulator, 0 failed), 14,222 stage lookups given the generic variant meanwhile, 388 stages swapped
+to their own; every compile a background one (no draw waited on uam); the pictures right throughout. Its one long gap (a
+frame in 38.9 s) was a GPU fence: Ryujinx translating the hundreds of DKSH binaries it had not seen (the console runs
+them as they are). Run 155 (cache 60): 0 compiles, 0 generic stages.
+
+**36z4 (console run of 36z3 with the generic-only cache: a crash).** The heap ran out loading an area (2,980 of 3,098 MB
+in use, 83 MB free in 200,000 pieces; 36z2's sessions held 2.2-2.4 GB). The pipeline list's prebuild asked for nearly
+every specialised variant at the start (8,458 generic stage lookups in 41 s) while the console compiled about one a
+second (264 in 5.5 minutes), and each queued job held a copy of its variant's text (~50 KB): hundreds of MB. Also seen:
+the render thread at 50-70 ms a frame while the uam thread compiled without pause (newlib's one malloc lock: the 36z2
+freeze's stack had a thread waiting on it while uam ran). Now:
+- a shader's GLSL is shared (Deko3DShader::glsl, a shared_ptr): a job and a waiting pipeline stage hold a
+  Deko3DVariantRequest (the key, the shared text, the defines: a few hundred bytes); the uam thread makes the text when it
+  takes the job, one at a time; the text outlives a destroyed shader object while a request holds it;
+- a draw's request goes ahead of the background threads' ones (Deko3DSetBackgroundThread: Renut's prebuild workers), and
+  at most 256 background requests wait; one that found no room is queued by the first draw that refreshes its pipeline.
+With cache 60 none of this happens in play (it has every variant the lists name, and the generic ones of every shader).

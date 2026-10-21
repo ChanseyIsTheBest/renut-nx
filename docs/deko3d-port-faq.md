@@ -254,3 +254,19 @@ weight: 14.4 MB of banjo-nx's NRO (88.9 -> 74.4 MB). What it took:
   with `BANJO_SWITCH_NO_VULKAN` the boot choice is forced to Renut on deko3d with a warning in the log, and the
   packages leave those configs out.
 - Check with `nm` on the ELF: no `nvk_`, `nak_`, `vk_common_`, `nouveau_` or `XML_` symbols.
+
+## Taking sa2-nx's and banjo-nx's Renut CPU work into another port (SASRT's notes, 2026-10-20)
+
+- **Store cards:** banjo-nx's `StoreCards()` (render/draw.cpp) is the guest window's base: banjo-nx's codegen keeps its
+  card table in the window's first MB, and `CompleteMemExportsLocked` calls `rex::memory::MarkStoreCardsAt` for every
+  export it copies back, unconditionally. In a port without that card table the call writes into the game's own memory
+  at the window's base. Define the port's store-cards flag false (`g_banjo_store_cards`; sa2-nx's compat layer drops
+  it) and remove or guard that call.
+- **Snapshot deltas** (queued.cpp): a draw's captured device is a delta now, so per-draw captures that read the
+  device's state (SASRT: its surface-header capture) must read the live device at capture time, not `capture->state`.
+- **Symbols the newer files expect:** `RexSetGuestThreadCoreLayout` (sa2-nx's core layout; a stub is enough with
+  `banjo_renut_core_layout` off) and sa2-nx's `rex/input/read_hook.h`. Late input never runs unless the SDK's
+  controller read calls the delay: sa2-nx through that hook, banjo-nx's `sdk/src/input/input_system.cpp` directly
+  (`rex::latency::BeforeInputRead()` then `NoteInputRead()`).
+- Measured defaults on N&B, to re-measure on your game: chain reuse, replay hints and the inline line compare off;
+  core layout off (hung the first Swap in Ryujinx); the deltas' unread device range is per game (N&B 10880-11775).

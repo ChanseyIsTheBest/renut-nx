@@ -412,3 +412,24 @@ A/B (gpr32), and three exact select / skinning passes (bonesel, aw4, guardsel): 
 2026-10-20 (packages 36c-36g): the light-branch A/B (lightbranch, 911), the fur-only diagnostic (nullps, 912), 128-bit
 bone rows (uam flag 1024, 36d) and the fur skinned once a frame (skinonce, 913, an A/B: the shells' vertex shader about
 half as long, checked bit for bit by tools/difftest/difftest_vs_skin.py): deko3d-shader-optimisations.md 2.38-2.42.
+
+## Host shaders added 2026-10-21: SMAA (banjo_renut_smaa)
+
+`shaders/host/smaa_vs.hlsl`, `smaa_edge_ps.hlsl`, `smaa_weights_ps.hlsl` (medium preset), `smaa_weights_high_ps.hlsl`
+(high preset), `smaa_blend_ps.hlsl` and `smaa.hlsli` (the bindings for app/thirdparty/smaa/SMAA.hlsl, MIT). Built like
+the other host shaders (DXIL, SPIR-V, and DXC -> SPIRV-Cross -> uam for deko3d; tools/deko3d_host_shader.py); not
+game shaders, so the DKSH cache and the variant tools do not see them. deko3d blob sizes (GLSL + DKSH header): vs 7 KB,
+edges 28 KB, weights 66 KB (high 152 KB), blending 34 KB. docs/deko3d-renderer.md section 26.
+
+## The package for scaled targets (2026-10-21, package 36z: 648p / 900p)
+
+tools/deko3d_glsl_opt.py's default passes no longer include scale1 and fragscale (both made for 1x only) and start with
+scalecodes (codes 4 and 6 of the scale-code chain become 0.9 and 1.25, render_scale.h's deko3d table). 2271 of 4881
+shaders change: 2209 pixel shaders divide gl_FragCoord.xy by the render scale (shared word v[83].z) again instead of by
+1.0, and the 168 with scale-code reads keep them. Package out/deko3d_shaders/glsl_opt_scaled, DKSH cache 57; the 36y
+package is in out/deko3d_shaders/package_backup_36y. Host shaders added: `shaders/host/ui_upscale_ps.hlsl` (the 3D image
+to the display's resolution, bilinear: one sample, the default) and `ui_upscale_bicubic_ps.hlsl` (Catmull-Rom, five), and `ui_depth_upscale_ps.hlsl` (the scene's depth
+to the display's resolution for the menus' 3D icons drawn after the composite: nearest, SV_Depth). docs/deko3d-renderer.md section 27.
+36z2: scalecodes reads the heights instead of constants: codes 4 and 6 are `float(v[84].w & 65535) / 720` and
+`float(v[84].w >> 16) / 720` (SharedConstants pad_1352[1]: handheld | docked << 16), so any internal height needs no
+new package. Package out/deko3d_shaders/glsl_opt_any, DKSH cache 58 (the 168 chain shaders' variants; the rest merged).

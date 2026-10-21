@@ -105,6 +105,34 @@ struct HostSurface {
 RenderScale ResolutionScale();
 void LatchResolutionScaleLocked();
 
+// banjo-nx (2026-10-21, internal resolution, the user's request: banjo_renut_render_height_handheld / _docked): on
+// deko3d the 3D image is drawn at the internal resolution (ResolutionScale: 648p handheld, 900p docked with the tomls'
+// keys) and the HUD at the display's (UiScale: 720p, 1080p docked with banjo_renut_display_height_docked). Right after
+// the frame's final composite (and SMAA) render/ui_scale.cpp scales the composite's target into its UI target
+// (UiSurfaceLocked) and redirects the rest of the frame there: from then until the Swap, every lookup of the
+// composite's target (any surface over its EDRAM view) answers the UI target, so the HUD's draws, clears and the resolve
+// to the front buffer use it. Frames without that composite for a while (menus, loading screens) are drawn at the
+// display's resolution whole (ResolutionScale = UiScale).
+RenderScale UiScale();
+// The composite's target at the display's resolution: made (or made again) for 'scene', colour only, same format and
+// samples, not among the targets of the EDRAM views (it is no view's); nullptr when it cannot be made.
+HostSurface *UiSurfaceLocked(HostSurface *scene);
+// From now to the Swap, lookups of the target UiSurfaceLocked was last given answer its UI target.
+void RedirectToUiSurfaceLocked();
+// The same for the depth target bound with the composite's: a draw after the composite that tests depth (the menus' 3D
+// icons on their item bars) gets a depth target at the display's resolution, filled from the scene's
+// (render/ui_scale.cpp, UiDepthAfterCompositeLocked) the first time in the frame.
+HostSurface *UiDepthSurfaceLocked(HostSurface *scene_depth);
+void RedirectDepthToUiLocked();
+bool UiRedirectedLocked();
+// The frame's final composite was drawn (gameplay: the 3D image is at the internal resolution next frame).
+void NoteCompositeLocked();
+// The console's mode on the Switch (Reverse-NX obeyed); false elsewhere.
+bool ConsoleDocked();
+// banjo-nx (2026-10-21): the internal heights of handheld and docked mode as the shaders read them (SharedConstants
+// pad_1352[1], v[84].w: handheld | docked << 16; render_scale.h codes 4 and 6).
+uint32_t InternalHeightsWord();
+
 // The host target for the D3DSurface at 'surface_va', created or rebuilt as
 // needed. nullptr for 0 or when the target cannot be created.
 HostSurface *GetHostSurfaceLocked(u32 surface_va);

@@ -206,6 +206,13 @@ void InputSystem::RefreshDevices() {
   if (changed && assignment_) {
     assignment_->OnDevicesChanged(devices_);
   }
+  // sa2-nx (banjo-nx 2026-10-21): drivers with per-player settings (the Switch's per-player button maps) learn each
+  // device's player.
+  if (changed) {
+    for (auto& driver : drivers_) {
+      driver->OnDevicesAssigned(devices_);
+    }
+  }
 }
 
 InputDriver* InputSystem::DriverForDevice(DeviceId id) {

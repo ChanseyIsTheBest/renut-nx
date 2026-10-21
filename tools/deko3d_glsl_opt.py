@@ -264,6 +264,25 @@ def pass_scale1(text):
     return text
 
 
+# banjo-nx (2026-10-21, the internal resolutions): render_scale.h's codes 4 and 6 are the 3D image's scale in handheld and
+# docked mode (3x and 6x were PC-only: the 4K resolution, ambient occlusion at twice the scene's), any height / 720 since
+# package 36z2: the shaders read the heights from SharedConstants pad_1352[1] (v[84].w: handheld | docked << 16, set by
+# render/draw.cpp for every draw). The shaders' factor chain (shader_common.h renutTextureScale, as SPIRV-Cross writes
+# it) is rewritten to match; scale1 and fragscale are left out of a package for scaled targets.
+SCALE_FACTOR_4 = '(float(g_UboShared.v[84u].w & 65535u) / 720.0)'
+SCALE_FACTOR_6 = '(float(g_UboShared.v[84u].w >> 16u) / 720.0)'
+
+
+def pass_scalecodes(text):
+    """Codes 4 and 6 of every scale chain: the handheld and docked heights / 720 (render_scale.h)."""
+    def chain(m):
+        s = m.group(0)
+        s = s.replace(f'(({m.group(1)} == 4u) ? 3.0 :', f'(({m.group(1)} == 4u) ? {SCALE_FACTOR_4} :')
+        s = s.replace(f'(({m.group(1)} == 6u) ? 6.0 :', f'(({m.group(1)} == 6u) ? {SCALE_FACTOR_6} :')
+        return s
+    return SCALE_CHAIN_RE.sub(chain, text)
+
+
 def pass_fragscale(text):
     """SharedConstants.resolution_scale is 1 on deko3d (1280x720 targets only): the gl_FragCoord / resolution_scale
     of every shader that reads the pixel position (the Xenos VPOS input: the depth of field, the screen-space
@@ -2147,6 +2166,7 @@ def pass_skinonce(text, name=None):
 
 
 PASSES = [
+    ('scalecodes', pass_scalecodes),
     ('scale1', pass_scale1),
     ('fragscale', pass_fragscale),
     ('alpha', pass_alpha),
@@ -2176,7 +2196,8 @@ PASSES = [
     ('aw4', pass_aw4),
     ('skinonce', pass_skinonce),
 ]
-DEFAULT = ','.join(name for name, _ in PASSES)
+# banjo-nx (2026-10-21): scaled targets (648p / 900p): scale1 and fragscale (1x only) are not in the default.
+DEFAULT = ','.join(name for name, _ in PASSES if name not in ('scale1', 'fragscale'))
 
 
 # The passes for one stage only.

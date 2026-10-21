@@ -19,6 +19,10 @@
 
 REXCVAR_DEFINE_BOOL(banjo_show_profiler, false, "Nuts&Bolts/Profiler",
     "Show the CPU/GPU profiler window (Unleashed's F1 profiler; F5 toggles it on PC).");
+// banjo-nx (2026-10-21, the user's request: off in every config): reNut's FPS counter in the top-left corner (F1 on PC).
+REXCVAR_DEFINE_BOOL(banjo_show_fps, true, "Nuts&Bolts/Profiler",
+    "Show reNut's FPS counter (frames per second, CPU and GPU ms) in the top-left corner (F1 toggles it on PC). Read "
+    "at start.");
 REXCVAR_DEFINE_BOOL(banjo_cpu_profiler, false, "Nuts&Bolts/Profiler",
     "[Switch] Sampling CPU profiler: pauses each thread every 2 ms to read where it is; every 30 s writes the "
     "hottest code of each thread to logs/rex/banjo_profiler.log (name it with tools/switch-cpu-profile.py).")

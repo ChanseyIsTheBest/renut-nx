@@ -272,6 +272,8 @@ function(renut_gpu_setup TARGET)
         ${RENUT_GPU_DIR}/render/graphics_options.cpp
         ${RENUT_GPU_DIR}/render/pipeline.cpp
         ${RENUT_GPU_DIR}/render/shader_library.cpp
+        ${RENUT_GPU_DIR}/render/smaa.cpp  # banjo-nx (2026-10-21)
+        ${RENUT_GPU_DIR}/render/ui_scale.cpp  # banjo-nx (2026-10-21, internal resolution)
         ${RENUT_GPU_DIR}/render/surfaces.cpp
         ${RENUT_GPU_DIR}/render/texture_layout.cpp
         ${RENUT_GPU_DIR}/render/textures.cpp
@@ -286,6 +288,17 @@ function(renut_gpu_setup TARGET)
     renut_host_shader(${TARGET} depth_resolve_ms_ps ps_6_0)
     renut_host_shader(${TARGET} texture_mip_ps ps_6_0)
     renut_host_shader(${TARGET} resolve_copy_ps ps_6_0)  # banjo-nx (2026-10-18)
+    # banjo-nx (2026-10-21, banjo_renut_smaa): SMAA 1x (render/smaa.cpp; app/thirdparty/smaa, MIT).
+    renut_host_shader(${TARGET} smaa_vs vs_6_0)
+    renut_host_shader(${TARGET} smaa_edge_ps ps_6_0)
+    renut_host_shader(${TARGET} smaa_weights_ps ps_6_0)
+    renut_host_shader(${TARGET} smaa_weights_high_ps ps_6_0)
+    renut_host_shader(${TARGET} smaa_blend_ps ps_6_0)
+    renut_host_shader(${TARGET} smaa_edge_ref_ps ps_6_0)
+    # banjo-nx (2026-10-21, internal resolution): the 3D image scaled to the display's resolution (render/ui_scale.cpp).
+    renut_host_shader(${TARGET} ui_upscale_ps ps_6_0)
+    renut_host_shader(${TARGET} ui_upscale_bicubic_ps ps_6_0)
+    renut_host_shader(${TARGET} ui_depth_upscale_ps ps_6_0)
     renut_host_shader(${TARGET} rectangle_list_gs gs_6_0)
     renut_host_shader(${TARGET} point_sprite_gs gs_6_0)
     renut_host_shader(${TARGET} stream_convert_cs cs_6_0)

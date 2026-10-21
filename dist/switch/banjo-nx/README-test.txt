@@ -16,10 +16,195 @@ SD card layout:
 Launch with a title takeover (hold R while starting a game, then open the Homebrew Menu), or a forwarder
 with a 39-bit address space. From the Album it will not have enough memory.
 
-Latest changes (this build, 2026-10-20 evening, package 36s: the late input's GPU queue part removed)
------------------------------------------------------------------------------------------------
-  COPY: banjo-nx.nro (NRO_SIZE bytes, md5 NRO_MD5...), renut.toml, renut_auto.toml and the configs folder
-  (delete the old configs folder first: five configs are gone). deko3d_shaders.bin is 36q's/36r's (cache 56).
+Latest changes (this build, 2026-10-21, package 36z5: controls from SA2, two players, the Switch keyboard)
+-------------------------------------------------------------------------------------------------------
+  COPY: banjo-nx.nro (NRO_SIZE bytes, md5 NRO_MD5...), renut.toml, renut_auto.toml and the configs folder (replace it).
+  deko3d_shaders.bin is unchanged (36z3's cache 60). Your renut.toml must be the new one: the controls are in it.
+  1. Controls (sa2-nx's controller code, as you asked):
+     - Xbox layout: the face buttons go by position, as on the 360 pad (input_xbox_layout = true): the bottom button
+       (B on Switch controllers) is the Xbox A, the right one (A) is B, the left one (Y) is X, the top one (X) is Y.
+       The settings menus follow it. false = by letter.
+     - Two players (up to four): the handheld and every connected controller are separate players, in the order they
+       connect (before, the handheld and the first controller were both player 1). L+R+ZR opens the system's
+       controller screen: connect a second controller, change the order, or split a Joy-Con pair into two players.
+       Single Joy-Cons are held sideways (input_joycon_sideways = true). The log says "controller: Pro Controller
+       (No1) is player 1" and so on whenever this changes.
+     - Button maps for player 1 and player 2: the [input_p1] and [input_p2] sections at the END of renut.toml. Each
+       line names the Switch buttons for one Xbox button, "" = the default, e.g. a = "B, ZR". The log lists the ones
+       set ("input_p1_a = B, ZR") and warns about a name it does not know (that button keeps its default). Keep the
+       sections last: every line after [input_p1] belongs to it.
+  2. The game's keyboard (naming things, e.g. a vehicle) is now the Switch's own software keyboard: type with the
+     touch screen or the controller, + or OK accepts, its Cancel leaves the name as it was. It shows the game's
+     title and description above the field when the name is 32 characters or less, otherwise the title inside the
+     empty field. switch_software_keyboard = false puts back the old box (which cannot be typed into on the console).
+     Checked in the emulator: the game's own call path, an accepted name (with accented letters, cut to the game's
+     15 characters) and a cancel, the game running on afterwards. Not yet seen on the console: please try one name
+     and send the log (lines "XamShowKeyboardUI: Switch keyboard ..." and "Switch keyboard: accepted/cancelled").
+
+Package 36z4 (2026-10-21: the background shader compiles fixed for memory)
+--------------------------------------------------------------------------
+  (36z4 files: banjo-nx.nro, md5 6cfbf4b125a4...; cache 60.)
+  deko3d_shaders.bin is 36z3's (cache 60: put it back if you are still on the generic-only test cache).
+  Your call: the profiler window and the FPS counter are off in renut.toml, renut_auto.toml and every config
+  (banjo_show_profiler = false, banjo_show_fps = false: the window cost ~7 % of a core). The logs are written as before.
+  Your 36z3 crash (with the generic-only cache): the memory ran out while loading an area (2,980 of 3,098 MB). The
+  pipeline list's prebuild asked for nearly every shader variant at once and each waiting compile kept its own copy of
+  the shader's text (~50 KB): thousands of them. Now:
+  1. a waiting compile keeps a few hundred bytes (the shader's text is shared, made into the variant only when it is
+     compiled);
+  2. the variants your draws need are compiled first; the prebuild's own requests wait behind them, at most 256 at a time
+     (the rest when a draw needs them).
+  Emulator, with the generic-only cache: the whole route, no crash, the memory as with the full cache (2.3-2.5 GB), and
+  more variants swapped in than before (712 against 390). With cache 60 nothing compiles in play.
+  The normal footprint (your 36z2 log): about 2.4 GB of the 3.1 GB heap: the 360's 512 MB, the GPU copies of textures and
+  targets (~870 MB), buffers (160 MB), code and shaders (~120 MB), and the heap's free pieces.
+
+Package 36z3 (2026-10-21: no draw waits for a shader compile)
+-------------------------------------------------------------
+  (36z3 files: banjo-nx.nro 80,521,413 bytes, md5 99055a30ea72...; cache 60, 21,961 variants, 158 MB.)
+  Your 36z2 freeze: loading the next area, a draw waited for a shader the cache did not have, and the console's shader
+  compiler never finished it (two minutes in its optimiser, 100 % of a core): the frame never came. Your session also
+  compiled 375 shaders while playing (a stutter each), in the areas past the test route.
+  1. A draw never waits for a compile now (banjo_deko3d_async_variants = true): a shader variant missing from the cache
+     is compiled in the background while its draws use that shader's generic variant (the same picture, a little
+     slower for those draws), and they switch to their own variant once it is ready. A compile that never ends only
+     leaves its draws on the generic variant.
+  2. deko3d_shaders.bin has the generic variant of every shader of the game (4,881 shaders, all areas) plus every
+     variant your console compiled and every one of your pipeline list: new areas run without a single wait.
+  3. configs/banjo_deko3d_async_variants_off.toml: the old way (draws wait), for comparison.
+  The [renut] "deko3d:" line every 10 s counts it: "N stages given the generic variant meanwhile, M compiled in the
+  background, K swapped in".
+
+Package 36z2 (2026-10-21: 864p docked, any height in the config, docked white line fixed)
+------------------------------------------------------------------------------------------
+  (36z2 files: banjo-nx.nro 80,509,125 bytes, md5 d761a2f30408...; cache 58, then 59.)
+  Your 36z run: docked 24 fps, GPU 41.3 ms a frame where handheld held 30 (33.0 ms). Docked the GPU clock is 768 MHz
+  but the memory stays at 1600 MHz, so the memory-heavy passes (resolves, SMAA, upscale, present) grow with the pixels;
+  and Renut's extra mip level for every texture drawn above 1x cost 4 ms a docked frame (handheld never has it).
+  1. Docked 3D image at 1536x864 (banjo_renut_render_height_docked = 864), as you asked.
+  2. Any height for either mode in renut.toml: banjo_renut_render_height_handheld / _docked, 360 to 1080 (rounded to
+     a multiple of 9: 648, 702, 756, 810, 864, 900, ...). Read at start.
+  3. The white line at the top (and left) of the docked picture: fixed (the game's full-screen draws missed the first
+     row and column above 1x; emulator check: the edge rows match their neighbours now).
+  4. A small 128x128 render target (ten draws a frame in your log) was cut to 115x115 in handheld: fixed.
+  5. Your call: no extra mip levels above 1x in renut.toml, renut_auto.toml and every config
+     (banjo_renut_host_mips = false; about -4 ms a docked frame; NOT exact docked: the blur passes read the full-size
+     image only, as at 1x and in handheld; no effect in handheld). configs/banjo_renut_host_mips_on.toml puts Renut's
+     mip levels back.
+
+Package 36z (2026-10-21: the 3D image at 648p handheld / 900p docked, the HUD at full res)
+------------------------------------------------------------------------------------------
+  (36z files: banjo-nx.nro 80,582,853 bytes, md5 415e94c201f8...; cache 57.)
+  Not in this package: deko3d_shaders_f447.bin (it was made from the old shaders; only
+  configs/banjo_deko3d_uam_wide_rows_off.toml used it: with 36z that config compiles its shaders while playing).
+  Your request, NOT exact (renut.toml, renut_auto.toml and every config but one):
+  1. The game's 3D image is drawn at 1152x648 in handheld mode (0.81 of the pixels) and 1600x900 docked
+     (banjo_renut_render_height_handheld = 648, banjo_renut_render_height_docked = 900).
+  2. The HUD, menus and text stay at the display's resolution: 1280x720 handheld, 1920x1080 docked (the swapchain is
+     made at 1920x1080 when docked, as sa2-nx does: banjo_renut_display_height_docked = 1080). Right after the game's
+     final composite and SMAA the image is scaled up once, bilinear as you asked (banjo_renut_upscale_filter = 0 in
+     every config: one sample a pixel, the cheapest form; 1 = bicubic, sharper), and the HUD is drawn over the
+     full-size copy. Menus and loading screens (no
+     3D composite) are drawn at the display's resolution whole. Shadow maps and the blur buffers keep the console's
+     sizes. Docking and undocking switch at the next frame.
+  3. The menus' 3D icons (the item bar of the single-player menu, drawn after the composite with a depth test) get a
+     depth buffer at full resolution too, filled from the scene's in those frames only ("UI depth upscale" in the GPU
+     profile); gameplay frames never need it.
+  4. configs/banjo_renut_native_720p.toml is the game's own 1280x720 everywhere (as 36y), to compare. The GPU
+     profile has a line "UI upscale"; the [renut] line "internal resolution" every 10 s counts the frames.
+  Emulator checks: handheld (1152x648 under a 1280x720 HUD) and docked (1600x900 under 1920x1080, the swapchain made
+  1920x1080) through the menus, the intro and the first dialogues; HUD text sharp, nothing cut at the edges.
+  Runs: renut_auto.toml on the scripted route, handheld (fps and GPU ms against your 36y run), and a look docked.
+
+Package 36y (2026-10-21: SMAA back to 36v's form; the dialogue portrait lighter)
+--------------------------------------------------------------------------------
+  (36y files: banjo-nx.nro 80,451,781 bytes, md5 87ceedbfd9ba...; cache 56.)
+  Your 36w run: SMAA 3.12 ms a frame on average, more than 36v's 2.79. Its new per-pass lines: edges 1.46, weights
+  0.88, blend 0.36, copy 0.27. The edge pass costs the same whether it writes every pixel or a sixth of them (it is
+  bound by its five texture reads a pixel), so 36w's extra copy pass was a loss:
+  1. SMAA is 36v's three passes again, with 36w's mask direction and per-pass lines ("SMAA edges", "SMAA weights",
+     "SMAA blend"). The same pixels as SMAA itself (emulator check).
+  2. 75 % fur shells as 36x (your call).
+  3. Your call, NOT exact: the dialogue portrait (the 96 x 96 box) with half its fur shells (11 of 21) and 2x MSAA
+     instead of the game's 4x (banjo_renut_portrait_msaa_samples = 2; 1 = no MSAA). configs/banjo_renut_portrait_full
+     .toml puts both back; banjo_renut_fur_shells_all.toml draws every shell of the main fur again.
+  Runs: renut_auto.toml on the scripted route: the heavy dialogue windows' fps and GPU ms against your 36w run.
+
+Package 36x (2026-10-21: 75 % fur shells; SMAA checked against SMAA itself)
+----------------------------------------------------------------------------
+  (36x files: banjo-nx.nro 80,447,685 bytes, md5 1c5f227dd9a1...; cache 56.)
+  1. Your call, NOT exact: banjo_renut_fur_shells_percent = 75 in renut.toml, renut_auto.toml and every config: three
+     of every four fur shells are drawn (Banjo: 16 of 21, his outermost shell drawn, so the fur keeps its length;
+     the dialogue portrait's too). The fur family was about 18 ms of the heaviest frames. The [renut] line "fur
+     shells ... N drawn, M not drawn" every 10 s counts it. configs/banjo_renut_fur_shells_all.toml draws every
+     shell again (with SMAA, as 36w).
+  2. SMAA is 36w's. The comparison frames (configs/banjo_renut_smaa_compare.toml) now run SMAA's own unmodified
+     shaders in the same frame and count the pixels that differ: emulator, 24 frames, 0. A further idea, sharing
+     lumas in each 2x2 pixel quad (3 texture reads a pixel instead of 5), was tried and dropped: it differed.
+  Runs: renut_auto.toml on the scripted route (fps, GPU, the four "SMAA ..." lines and the fur family's lines
+  against your 36v run).
+
+Package 36w (2026-10-21: SMAA cheaper again, the same pixels)
+-------------------------------------------------------------
+  (36w files: banjo-nx.nro 80,435,397 bytes, md5 9bf79bf2107c...; the rest as 36u.)
+  Your 36v run: SMAA 2.47 ms a frame on average (36u 3.77). The edge pass still wrote three things for every pixel;
+  now only the pixels SMAA can change write anything (about a sixth of the screen in gameplay):
+  1. the edge pass writes edges and the mask only there (the rest cleared, which is cheap on the Switch's GPU);
+  2. no full copy of the picture any more: the blending reads the game's image and a small masked pass copies the
+     changed pixels back;
+  3. the mask set up so the GPU's coarse depth culling can skip whole untouched tiles in the later passes.
+  The same pixels as 36u/36v (emulator check: the full passes run in the same frames, 0 pixels differ).
+  The GPU profile now has a line per pass: "SMAA edges", "SMAA weights", "SMAA blend", "SMAA copy".
+  Runs: renut_auto.toml on the scripted route; compare the four SMAA lines' sum with 36v's "SMAA".
+
+Package 36v (2026-10-21: SMAA cheaper, the same pixels)
+-------------------------------------------------------
+  (36v files: banjo-nx.nro 80,427,205 bytes, md5 5d4257c9f511...; the rest as 36u.)
+  Your 36u run: SMAA cost 3.3-5.3 ms of GPU a frame (the t220 scene 30.0 -> 25.9 fps). Now:
+  1. the expensive passes only where they matter: the edge pass writes a mask, the blending-weights pass runs only
+     on pixels with an edge and the blending pass only on pixels it can change (about 12 % of the screen in
+     gameplay); the rest are skipped by the GPU before their shader runs;
+  2. one pass and one GPU barrier less: the copy of the picture is written by the edge pass itself;
+  3. the edge detection without its clamping arithmetic (the GPU sampler clamps).
+  The same pixels as 36u: emulator run with configs/banjo_renut_smaa_compare.toml (it now also runs 36u's full
+  passes in its frames and compares): 23 frames, 0 pixels differ.
+  Runs: renut_auto.toml on the scripted route (the GPU profile's "SMAA" line and the fps of the heavy windows
+  against your 36u run), then configs/banjo_renut_smaa_ab.toml for SMAA's exact cost.
+
+Package 36u (2026-10-21: SMAA anti-aliasing before the HUD)
+-----------------------------------------------------------
+  (36u files: banjo-nx.nro 80,423,109 bytes, md5 93ff1515c5d0...; cache 56.)
+  Your request: SMAA 1x (Jimenez et al.'s SMAA, MIT) instead of MSAA. It runs on the 3D image right after the
+  game's final composite (bloom and depth of field done) and before the HUD is drawn, so the HUD and its text stay
+  sharp. Every cutscene and gameplay frame; the title and menus have no such composite and stay as they are.
+  banjo_renut_smaa = true in renut.toml, renut_auto.toml and every config (SMAA's medium preset; set it to false in
+  the toml for 36t's picture). Configs:
+    banjo_renut_smaa_high.toml     SMAA's high preset (smoother diagonals, more GPU time)
+    banjo_renut_smaa_ab.toml       SMAA off and on every 4 s: its GPU ms a frame in the "[renut A/B]" lines
+    banjo_renut_smaa_compare.toml  every 15 s the same frame before and after SMAA as capturas/smaa_NNN_off.tga
+                                   and _on.tga (full size, no HUD)
+  Emulator comparisons: builds/smaa_comparison_2026-10-21. The [renut] line "SMAA ... N frames" every 10 s says
+  how many frames had it. Runs: renut_auto.toml, then configs/banjo_renut_smaa_ab.toml on the scripted route.
+
+Package 36t (2026-10-21: the NRO built with PGO and LTO)
+--------------------------------------------------------
+  (36t files: banjo-nx.nro 80,087,237 bytes, md5 39b4c08ff8f8...; the rest as 36s.)
+  Your request: the same sources as 36s, compiled with profile-guided optimisation (PGO) and link-time
+  optimisation (LTO), sa2-nx's method and settings (docs/pgo-lto.md):
+  - The profile: an instrumented build counted every branch of the game code, the app, Renut's renderer and plume
+    during a 30-minute Ryujinx run of the scripted route (boot, menus, the pizza cutscene and its dialogue, then
+    15 minutes of play in Spiral Mountain with A pressed every 6 s). The optimised build lays out and inlines by
+    those counts; code the run never reached (other levels, vehicles) is optimised as before.
+  - LTO: the game code, the app, the renderer and plume optimised as one program at the link.
+  - The NRO is about 5.5 MB larger (inlining). The pictures are meant to be the same as 36s (same float rules:
+    -ffp-contract=off, no fast-math); the emulator check showed them right.
+  Runs: renut_auto.toml on the scripted route, as 36r/36s: compare the render thread's and the game thread's
+  ms a frame and the fps of the heavy windows with your 36r run. If anything looks or plays differently from
+  36s, use 36s's NRO and tell me.
+
+Package 36s (2026-10-20 evening: the late input's GPU queue part removed)
+-------------------------------------------------------------------------
+  (36s files: banjo-nx.nro 74,541,253 bytes, md5 38b023548875...; deko3d_shaders.bin cache 56.)
   Your call: banjo_late_input_gpu and banjo_late_input_gpu_margin_us are removed from the code, the tomls and the
   configs (banjo_late_input_gpu_on/_ab/_margin_4/_8/_10). It was off by default in 36r already, so 36s runs like
   36r. What your runs showed (controller read -> GPU done, 36k/36r without it, 36m/36q with it): nothing at the
