@@ -40,6 +40,14 @@ its statements; hand.txt's exact= names those the native leaves as the original 
 written as kSkip into every header whose copy contains the native: the guard does not compare them.
 
   python tools/localize_native.py --list app/src/cpu/hot/localized.txt      every function of the list (post_codegen.py)
+  python tools/localize_native.py --list --bulk                             and the bulk list (post_codegen.py)
+
+BULK (2026-10-22, bejeweled3-nx's method, docs/enhancements.md "Bulk localized copies"): app/src/cpu/hot/
+localized_bulk.txt (written by tools/switch_hot_bulk.py from console profiles) lists hundreds more functions. Each is
+made the same way; one the tool refuses is left out and named in the output. Their hooks are BANJO_HOT_HOOK_BULK lines
+spread over app/generated/hot/banjo_hot_bulk_<k>.inc by the size of their headers, each compiled by its own
+app/src/cpu/banjo_hot_shard_<k>.cpp, so the copies compile in parallel. One master key, banjo_cpu_native_bulk,
+switches them all (each also has its own key).
   python tools/localize_native.py --survey sub_82949790 [more ...]         what a copy of each would look like
 """
 import argparse
@@ -56,9 +64,12 @@ OUT = os.path.join(GEN, 'hot')
 IMAGE = os.path.join(ROOT, 'out', 'renut_image.bin')
 INDEX = os.path.join(ROOT, 'out', 'localize_index.json')
 LIST = os.path.join(APP, 'src', 'cpu', 'hot', 'localized.txt')
+BULK = os.path.join(APP, 'src', 'cpu', 'hot', 'localized_bulk.txt')
+SHARDS = 12  # app/src/cpu/banjo_hot_shard_<k>.cpp (app/CMakeLists.txt lists them)
+BULK_SLOT = 9999  # past PPCContext::host_counters: the guard's countdown is the hook's own (banjo_hot_guest.h)
 HAND = os.path.join(APP, 'src', 'cpu', 'hot', 'hand.txt')
 IMAGE_BASE = 0x82000000
-INDEX_FORMAT = 4  # raise when summarise() changes: the cached index is rebuilt
+INDEX_FORMAT = 8  # raise when summarise() changes: the cached index is rebuilt (5: carded vector stores; 6, 7: inline leaves; 8: r1 mirror, 2026-10-23)
 
 REG = re.compile(r'\bctx\.(r\d+|f\d+|v\d+|cr\d|ctr|xer|reserved)\b')
 DEF = re.compile(r'^DEFINE_REX_FUNC\((\w+)\) \{$')
@@ -81,7 +92,9 @@ SPECIAL = re.compile(r'\b(REX_GUEST_CAS|reserved|REX_MM_(?:STORE|LOAD)_\w+|ppc_s
                      r'REX_LEAVE_GLOBAL_LOCK|REX_CHECK_GLOBAL_LOCK|REX_QUERY_TIMEBASE|REX_UNIMPLEMENTED|'
                      r'std::atomic_thread_fence|storeFromGuest|loadFromHost|log2f)\b')
 # Guest memory through a raw host address. Loads (the vector loads) and the two store forms the tool logs.
-RAW_VECTOR_STORE = re.compile(r'^\tsimde_mm_store_si128\(\(simde__m128i\*\)REX_RAW_ADDR\(')
+# banjo-nx (2026-10-23): the store-card form of a vector store too (package 34: REX_CARD(ea), then the store, one comma
+# expression); the guard's Note goes in front of the whole expression, so the card and the store run together.
+RAW_VECTOR_STORE = re.compile(r'^\t(?:REX_CARD\([^()]*\), )?simde_mm_store_si128\(\(simde__m128i\*\)REX_RAW_ADDR\(')
 RAW_MEMSET = re.compile(r'^\tmemset\(\(void\*\)REX_RAW_ADDR\((.*)\), (\w+), (\d+)\);$')
 RAW_LOAD = re.compile(r'^\tsimde_mm_store_si128\(\(simde__m128i\*\)\w+(?:\.\w+)+, .*REX_RAW_ADDR\(')
 ALL = None  # "reach unknown": every register
@@ -107,8 +120,36 @@ def type_of(reg):
 MEMCALL_WRAP = re.compile(r'\bREX_MEM(?:CPY|SET)_CONST\(\d+, ((?:__imp__)?sub_[0-9A-F]{8}\(ctx, base\))\);')
 
 
+# banjo-nx (2026-10-23): tools/inline_leaves.py gives each generated file static copies of tiny leaves of other files
+# (inl_sub_X, defined in that file only); a copy made from the text calls the leaf by its own name instead, which this
+# tool reaches as any callee (the copies' shard files cannot see another file's statics).
+INLINE_LEAF = re.compile(r'\b(?:REX_INL\((sub_[0-9A-F]{8})\)|inl_(sub_[0-9A-F]{8}))\(ctx, base\)')
+
+
+# banjo-nx (2026-10-23): tools/r1_local.py (cpu_aggressive) keeps r1 in a local mirror, r1l, synced to ctx.r1 by
+# REX_R1_SYNC / KEEP / RELOAD / ASSUMED. This tool's register model knows ctx.r1 only: copies made from the mirror form
+# left r1 out of their hand-overs and of the guard's register set, and three bulk copies wrote a wrong back chain in the
+# emulator's guarded run. The text is read as before that pass (the copies keep their own local of r1).
+R1_LOCAL_DECL = re.compile(r'^\s*REX_R1_LOCAL\(\);\s*$')
+R1_SYNC = re.compile(r'\s*REX_R1_(?:SYNC|KEEP|RELOAD|ASSUMED)\(\);')
+R1_MIRROR = re.compile(r'\br1l\b')
+
+
+def plain_r1(line):
+    if 'REX_R1_' not in line and 'r1l' not in line:
+        return line
+    if R1_LOCAL_DECL.match(line):
+        return ''
+    return R1_MIRROR.sub('ctx.r1', R1_SYNC.sub('', line))
+
+
 def plain_calls(line):
-    return MEMCALL_WRAP.sub(r'\1;', line) if 'REX_MEM' in line else line
+    line = plain_r1(line)
+    if 'REX_MEM' in line:
+        line = MEMCALL_WRAP.sub(r'\1;', line)
+    if 'REX_INL(' in line or 'inl_sub_' in line:  # the macro form (REX_INL(sub_X)) as the generated text has it
+        line = INLINE_LEAF.sub(lambda m: (m.group(1) or m.group(2)) + '(ctx, base)', line)
+    return line
 
 
 def unleaf(lines):
@@ -671,12 +712,31 @@ def identifier(name):
     return name[4:] if re.fullmatch(r'sub_[0-9A-F]{8}', name) else name
 
 
+# tools/vec_unaligned_stores.py writes stvlx / stvrx as REX_STVLX / REX_STVRX (one helper call each, not a REX_STORE_
+# form). banjo-nx (2026-10-22): the logged forms record the bytes they cover (stvlx: ea up to the next 16-byte
+# boundary; stvrx: from the boundary below ea up to ea, nothing when ea is aligned). Before, the guard neither rolled
+# them back nor compared them: a guarded call made those stores four times, and sub_82226330's guard (bulk copies,
+# emulator) reported a difference that repeated (its first callee writes a matrix with them). The Fast form keeps the
+# helper: its Note is a constant true.
+# banjo-nx (2026-10-23): with the store-card form too (REX_STVLX_C / REX_STVRX_C): without it the logged forms missed
+# them again and sub_82226330's guard reported its old difference (batch 5's emulator run).
+VEC_LR = re.compile(r'^(\t+)REX_STV([LR])X(_C)?\(ea, ([\w.\[\]]+)\);$')
+
+
 def store_line(l):
     """A line with its guest stores recorded first (the Fast policy's Note is a constant true)."""
     stores = False
     if 'REX_STORE_' in l:
         l = l.replace('REX_STORE_', 'BANJO_HOT_STORE_')
         stores = True
+    m = VEC_LR.match(l)
+    if m:
+        span = ('(u32)(ea), 16u - ((u32)(ea) & 0xFu)' if m.group(2) == 'L'
+                else '(u32)(ea) & ~0xFu, (u32)(ea) & 0xFu')
+        l = '%sif (s.Note(%s)) REX_STV%sX%s(ea, %s);' % (m.group(1), span, m.group(2), m.group(3) or '', m.group(4))
+        stores = True
+    elif any(f in l for f in ('REX_STVLX(', 'REX_STVRX(', 'REX_STVLX_C(', 'REX_STVRX_C(')):
+        sys.exit('localize_native: an unaligned vector store in a form this tool does not record: ' + l.strip()[:120])
     if RAW_VECTOR_STORE.match(l):
         at = l.index('REX_RAW_ADDR(') + len('REX_RAW_ADDR(')
         depth, k = 1, at
@@ -968,8 +1028,9 @@ def key_of(root, opts):
     return 'banjo_cpu_native_' + (root if root.startswith('sub_') else re.sub(r'^rex_', '', root).lower())[:56]
 
 
-def write_list(entries, out_dir):
-    """banjo_hot_all.h (the copies) and banjo_hot_list.inc (one BANJO_HOT_HOOK line each) for banjo_hot_guest.cpp."""
+def write_list(entries, out_dir, bulk=()):
+    """banjo_hot_all.h (the copies) and banjo_hot_list.inc (one BANJO_HOT_HOOK line each) for banjo_hot_guest.cpp;
+    banjo_hot_bulk_<k>.inc (the bulk list's headers and BANJO_HOT_HOOK_BULK lines) for banjo_hot_shard_<k>.cpp."""
     inc = ['// GENERATED by tools/localize_native.py from app/src/cpu/hot/localized.txt (do not edit).']
     allh = ['// GENERATED by tools/localize_native.py from app/src/cpu/hot/localized.txt (do not edit).', '#pragma once']
     for slot, (root, opts, what) in enumerate(entries):
@@ -978,8 +1039,29 @@ def write_list(entries, out_dir):
         desc = ('Native localized copy of %s: %s' % (root, what)).replace('\\', '/').replace('"', "'")
         inc.append(f'BANJO_HOT_HOOK({root}, {rid}, {key_of(root, opts)}, {"false" if opts.get("off") else "true"}, '
                    f'{slot}, "{desc}")')
-    # Headers of functions no longer in the list (this tool's own output) go.
-    keep = {f'n_{identifier(root)}' for root, _, _ in entries}
+    # The bulk list over the shards: the largest headers first, each to the shard with the fewest bytes so far.
+    shards = [[0, []] for _ in range(SHARDS)]
+    for root, opts, what in sorted(bulk, key=lambda e: -os.path.getsize(os.path.join(out_dir, f'n_{identifier(e[0])}.h'))):
+        rid = identifier(root)
+        shard = min(shards, key=lambda s: s[0])
+        shard[0] += os.path.getsize(os.path.join(out_dir, f'n_{rid}.h'))
+        desc = ('Bulk localized copy of %s: %s' % (root, what)).replace('\\', '/').replace('"', "'")
+        shard[1] += [f'#include "n_{rid}.h"',
+                     f'BANJO_HOT_HOOK_BULK({root}, {rid}, {key_of(root, opts)}, {"false" if opts.get("off") else "true"}, '
+                     f'{BULK_SLOT}, "{desc}")']
+    for k, (size, lines) in enumerate(shards):
+        text = '\n'.join([f'// GENERATED by tools/localize_native.py --bulk from app/src/cpu/hot/localized_bulk.txt (do not '
+                          f'edit): shard {k} of {SHARDS},', f'// {size // 1024} KB of copies, compiled by '
+                          f'app/src/cpu/banjo_hot_shard_{k}.cpp.'] + lines) + '\n'
+        path = os.path.join(out_dir, f'banjo_hot_bulk_{k}.inc')
+        try:
+            same = open(path, encoding='utf-8').read() == text
+        except OSError:
+            same = False
+        if not same:
+            open(path, 'w', encoding='utf-8', newline='\n').write(text)
+    # Headers of functions no longer in the lists (this tool's own output) go.
+    keep = {f'n_{identifier(root)}' for root, _, _ in list(entries) + list(bulk)}
     if os.path.isdir(out_dir):
         for fn in os.listdir(out_dir):
             stem = fn[:-len('.blocks.json')] if fn.endswith('.blocks.json') else fn[:-2] if fn.endswith('.h') else None
@@ -1023,14 +1105,18 @@ def main():
     ap.add_argument('--gen', default=GEN)
     ap.add_argument('--out', default=OUT, help='folder for the headers (default app/generated/hot)')
     ap.add_argument('--list', nargs='?', const=LIST, help='localize every function of the list file')
+    ap.add_argument('--bulk', nargs='?', const=BULK, help='with --list: the bulk list too (its hooks in shard files)')
     ap.add_argument('--survey', action='store_true', help='only say what a copy of each name would contain')
     ap.add_argument('--what', default='')
     a = ap.parse_args()
     entries = list_entries(a.list or LIST)
     index = Index(a.gen)
-    hooks = Hooks([e[0] for e in entries])
-    reach = Reach(index, hooks)
     hand = hand_entries()
+    listed = {e[0] for e in entries}
+    bulk = [e for e in list_entries(a.bulk) if e[0] not in listed and e[0] not in hand] if a.bulk else []
+    # A bulk function is a native too: its copy touches no more than its original (and it is not an app hook).
+    hooks = Hooks([e[0] for e in entries] + [e[0] for e in bulk])
+    reach = Reach(index, hooks)
     for name in hand:
         if name not in index.funcs:
             sys.exit(f'localize_native: hand.txt: {name} is not a generated function')
@@ -1040,8 +1126,18 @@ def main():
     if a.list:
         for root, opts, what in entries:
             localize(index, hooks, reach, root, what, opts, a.out, hand=hand)
-        write_list(entries, a.out)
-        print(f'localize_native: {len(entries)} copies in {shown(a.out)}')
+        made, skipped = [], []
+        for root, opts, what in bulk:
+            try:
+                localize(index, hooks, reach, root, what, opts, a.out, quiet=True, hand=hand)
+                made.append((root, opts, what))
+            except SystemExit as e:  # a form the tool refuses: that function stays generated code
+                skipped.append(f'{root} ({str(e).replace("localize_native: ", "")[:90]})')
+        write_list(entries, a.out, made)
+        print(f'localize_native: {len(entries)} copies in {shown(a.out)}'
+              + (f'; bulk: {len(made)} copies in {SHARDS} shards' if a.bulk else ''))
+        if skipped:
+            print(f'localize_native: bulk: {len(skipped)} left out:\n    ' + '\n    '.join(skipped))
         return
     if not a.names:
         ap.error('names, --list or --survey')

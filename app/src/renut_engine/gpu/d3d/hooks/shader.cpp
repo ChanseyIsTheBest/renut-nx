@@ -12,18 +12,21 @@
  * guest objects; the host side is kept per object address, keyed by the same
  * container hash.
  */
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include <rex/cvar.h>
 #include <rex/hook.h>
 
 #include "renut_engine/gpu/banjo_renut_select.h"
 #include <rex/types.h>
 
 #include "renut_engine/gpu/render/draw.h"
+#include "renut_engine/gpu/guest/command_buffers.h"  // banjo-nx (2026-10-27): NoteShaderSortKey
 #include "renut_engine/gpu/guest/guest_memory.h"
 #include "renut_engine/gpu/log.h"
 #include "renut_engine/gpu/backend/render_thread.h"
@@ -34,7 +37,67 @@
 
 using namespace renut::gpu;
 
+REXCVAR_DEFINE_INT32(banjo_renut_shader_reuse, 128, "Banjo/Enhancements",
+                     "Renut's renderer (2026-10-23, batch 6): the host shaders of this many shader objects the game "
+                     "destroyed are kept, and given to the next object of the same shader instead of a new one (on "
+                     "deko3d each new one unpacked and parsed its GLSL on the render thread: N&B destroys and makes "
+                     "shader objects all the time while it streams the level). 0: none kept")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 namespace {
+
+// banjo-nx (2026-10-23, batch 6, banjo_renut_shader_reuse): host shaders of destroyed shader records, by their cache
+// entry (one host shader is made from the entry alone: CreateCachedShader), the least recently kept going first. A host
+// shader is immutable once made but for the variants it compiles; the pipelines keep their own compiled code and the
+// compile jobs their own GLSL, so handing one to a new record is what making it again would give. State().mutex.
+struct KeptShader {
+  const ShaderCacheEntry *entry = nullptr;
+  std::unique_ptr<plume::RenderShader> host;
+  uint64_t stamp = 0;
+};
+// Never destroyed (left at exit, after the device is gone).
+std::vector<KeptShader> &g_kept_shaders = *new std::vector<KeptShader>();
+uint64_t g_kept_stamp = 0;
+
+u32 KeptShaderCap() {
+  static const u32 cap = u32(std::max(0, REXCVAR_GET(banjo_renut_shader_reuse)));
+  return cap;
+}
+
+void KeepShader(const ShaderCacheEntry *entry, std::unique_ptr<plume::RenderShader> host) {
+  const u32 cap = KeptShaderCap();
+  if (!entry || !host || !cap)
+    return;
+  KeptShader *slot = nullptr;
+  for (KeptShader &k : g_kept_shaders) {
+    if (k.entry == entry) {  // one of each is enough
+      slot = &k;
+      break;
+    }
+  }
+  if (!slot && g_kept_shaders.size() < cap)
+    slot = &g_kept_shaders.emplace_back();
+  if (!slot) {
+    slot = &g_kept_shaders.front();
+    for (KeptShader &k : g_kept_shaders)
+      if (k.stamp < slot->stamp)
+        slot = &k;
+  }
+  slot->entry = entry;
+  slot->host = std::move(host);
+  slot->stamp = ++g_kept_stamp;
+}
+
+std::unique_ptr<plume::RenderShader> TakeKeptShader(const ShaderCacheEntry *entry) {
+  for (KeptShader &k : g_kept_shaders) {
+    if (k.entry == entry && k.host) {
+      k.entry = nullptr;
+      k.stamp = 0;
+      return std::move(k.host);
+    }
+  }
+  return nullptr;
+}
 
 // Where D3DDevice_CreateVertexShader / CreatePixelShader (0x8264E8B0 /
 // 0x8264E6A8) lay out a shader object: the container's virtual part copied
@@ -102,6 +165,25 @@ void ForgetShader(u32 shader_va) {
 
 namespace renut::gpu {
 
+// banjo-nx (2026-10-23, render-thread round): the lines FindShaderLocked will read for the next draw's shader, fetched
+// a draw ahead (command_buffers.cpp Replay): the memo set, or with the shader the last one, its record and entry.
+// Prefetches only: the memo is not reordered.
+void PrefetchShaderLocked(u32 shader_va, RecordKind kind) {
+  if (!shader_va)
+    return;
+  const u32 kind_index = KindIndex(kind);
+  const ShaderMemo &last = g_last_shader[kind_index];
+  if (last.va == shader_va) {
+    if (last.record) {
+      __builtin_prefetch(last.record);
+      __builtin_prefetch(reinterpret_cast<const char *>(last.record) + 64);  // the draw summary
+      __builtin_prefetch(last.record->entry);
+    }
+    return;
+  }
+  __builtin_prefetch(&ShaderMemoSetFor(kind_index, shader_va));
+}
+
 ShaderRecord *FindShaderLocked(u32 shader_va, RecordKind kind) {
   if (!shader_va)
     return nullptr;
@@ -133,8 +215,15 @@ ShaderRecord *FindShaderLocked(u32 shader_va, RecordKind kind) {
 }
 
 void ReleaseGuestShaderLocked(u32 shader_va) {
-  if (g_guest_shaders.erase(shader_va))
-    ForgetShader(shader_va);
+  auto it = g_guest_shaders.find(shader_va);
+  if (it == g_guest_shaders.end())
+    return;
+  if (ShaderRecord *record = it->second.get()) {  // banjo-nx (2026-10-23, batch 6): its host shader kept
+    std::lock_guard shader_lock(record->host_mutex);
+    KeepShader(record->entry, std::move(record->host));
+  }
+  g_guest_shaders.erase(it);
+  ForgetShader(shader_va);
 }
 
 void BuildDeclarationLayout(VertexDeclarationRecord &declaration) {
@@ -152,6 +241,16 @@ void BuildDeclarationLayout(VertexDeclarationRecord &declaration) {
   for (u32 s = 0; s < kMaxVertexStreams; ++s)
     mix(declaration.layout.streams[s].host_stride);
   declaration.layout_hash = hash;
+  // banjo-nx (2026-10-23, batch 6): VertexDeclarationRecord::stream_order.
+  u32 seen = 0;
+  declaration.stream_count = 0;
+  for (const GuestVertexElement &e : declaration.elements) {
+    const u32 stream = u16(e.Stream);
+    if (stream >= kMaxVertexStreams || (seen & (1u << stream)))
+      continue;
+    seen |= 1u << stream;
+    declaration.stream_order[declaration.stream_count++] = u8(stream);
+  }
 }
 
 const VertexDeclarationRecord *ShaderFetchDeclarationLocked(ShaderRecord &vs) {
@@ -161,7 +260,7 @@ const VertexDeclarationRecord *ShaderFetchDeclarationLocked(ShaderRecord &vs) {
   if (!vs.entry || !vs.entry->vertexInputCount)
     return nullptr;
   auto declaration = std::make_unique<VertexDeclarationRecord>();
-  const ShaderVertexInput *inputs = g_shaderVertexInputs + vs.entry->vertexInputOffset;
+  const ShaderVertexInput *inputs = g_activeShaderVertexInputs + vs.entry->vertexInputOffset;
   for (u32 i = 0; i < vs.entry->vertexInputCount; ++i) {
     const ShaderVertexInput &input = inputs[i];
     // Stream n's fetch constant is Xenos index 95 - n (d3d::StreamFetchIndex).
@@ -199,7 +298,9 @@ plume::RenderShader *GetHostShader(ShaderRecord *shader) {
     return host;
   std::lock_guard lock(shader->host_mutex);
   if (!shader->host) {
-    shader->host = CreateCachedShader(Video::Device(), *shader->entry);
+    shader->host = TakeKeptShader(shader->entry);  // banjo-nx (2026-10-23, batch 6)
+    if (!shader->host)
+      shader->host = CreateCachedShader(Video::Device(), *shader->entry);
     if (!shader->host) {
       RGPU_ERROR("Creating shader {:016X} failed", shader->hash);
       shader->entry = nullptr;  // don't retry every draw
@@ -213,6 +314,7 @@ void DestroyVertexDeclarationRecord(VertexDeclarationRecord *declaration) {
   if (!declaration)
     return;
   std::lock_guard lock(State().mutex);
+  InvalidateFastDrawLocked();  // banjo-nx (2026-10-26): it may hold this record
   ForgetVertexDeclarationLocked(declaration->self_va);
   DestroyRecord(declaration);
 }
@@ -224,8 +326,10 @@ void DestroyShaderRecord(ShaderRecord *shader) {
   {
     auto &s = State();
     std::lock_guard lock(s.mutex);
+    InvalidateFastDrawLocked();  // banjo-nx (2026-10-26): it may hold this record
     ForgetShader(shader->self_va);
     std::lock_guard shader_lock(shader->host_mutex);
+    KeepShader(shader->entry, std::move(shader->host));  // banjo-nx (2026-10-23, batch 6)
     shader->host.reset();
   }
   DestroyRecord(shader);
@@ -258,6 +362,7 @@ u32 CreateShaderRecord(const be_u32 *function, bool pixel) {
   shader->entry = FindShaderEntry(shader->hash);
   if (!shader->entry)
     CaptureMissingShader(container, pixel, shader->hash);
+  NoteShaderSortKey(shader->self_va, shader->hash, ShaderSortableByHash(shader->hash, shader->entry, pixel));  // 2026-10-27
   PipelineShaderLoaded(shader->entry);
   // Draws before it may have found no shader at the address (FindShaderLocked).
   render_thread::Queue([va = shader->self_va] { ForgetShader(va); });
@@ -289,8 +394,10 @@ void RegisterGuestShader(u32 shader_va, u32 physical_va, bool pixel) {
   const uint64_t hash = HashShaderContainer(container.data());
   const RecordKind kind = pixel ? RecordKind::PixelShader : RecordKind::VertexShader;
   // Captured here, where its container is at hand, only when the cache lacks it.
-  if (!FindShaderEntry(hash))
+  const ShaderCacheEntry *const sort_entry = FindShaderEntry(hash);
+  if (!sort_entry)
     CaptureMissingShader(container.data(), pixel, hash);
+  NoteShaderSortKey(shader_va, hash, ShaderSortableByHash(hash, sort_entry, pixel));  // banjo-nx (2026-10-27)
 
   // In order with the draws that use it (render thread).
   render_thread::Queue([shader_va, pixel, hash, kind] {
@@ -301,6 +408,10 @@ void RegisterGuestShader(u32 shader_va, u32 physical_va, bool pixel) {
     // copy of the old one, so its module can go now. Draws before it may also
     // have found none there (FindShaderLocked).
     ForgetShader(shader_va);
+    if (shader) {  // banjo-nx (2026-10-23, batch 6): the old one's host shader kept
+      std::lock_guard shader_lock(shader->host_mutex);
+      KeepShader(shader->entry, std::move(shader->host));
+    }
     shader = std::make_unique<ShaderRecord>();
     shader->kind = kind;
     shader->self_va = shader_va;
@@ -421,6 +532,9 @@ void D3DVertexShader_Bind_hook(u32 shader_va, u32 /*flags*/, u32 declaration_va,
     auto *shader = FindShaderLocked(shader_va, RecordKind::VertexShader);
     if (!shader)
       return;
+    // banjo-nx (2026-10-27, render thread night): the fast path and its stream memo may hold the declaration this
+    // replaces (freed here) and read these strides: dropped (a bind after the first draws; N&B binds at creation).
+    InvalidateFastDrawLocked();
     shader->bound_declaration = std::make_unique<VertexDeclarationRecord>(*bound);
     for (const auto &[stream, stride] : strides)
       shader->bound_strides[stream] = stride;

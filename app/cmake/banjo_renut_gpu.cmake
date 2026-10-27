@@ -102,6 +102,16 @@ if(COMMAND rexglue_apply_target_settings)
     rexglue_apply_target_settings(banjo_renut_gpu)
 endif()
 renut_gpu_setup(banjo_renut_gpu)
+# banjo-nx (2026-10-23, render-thread round): the draw path's function-local statics (cvars read once: about 15 a draw,
+# StoreCards / PhysicalOf at every page check) without the thread-safe guard, whose fast path is a load-acquire (LDARB)
+# that holds back every later load on the A57. Sound here: these files run on the render thread; the one other caller
+# (the content verifier thread's hashes) reaches only statics that every thread initialises to the same pointer.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set_property(SOURCE
+        "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/render/draw.cpp"
+        "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/guest/command_buffers.cpp"
+        TARGET_DIRECTORY banjo_renut_gpu APPEND PROPERTY COMPILE_OPTIONS "-fno-threadsafe-statics")
+endif()
 # banjo-nx (2026-10-20): a Switch build without the Vulkan driver (REXGLUE_SWITCH_NVK OFF) always boots Renut on
 # deko3d, the one renderer that does not need it (banjo_renut_select.cpp, backend.cpp ResolveBackend).
 if(REXGLUE_PLATFORM_SWITCH AND NOT REXGLUE_SWITCH_NVK)

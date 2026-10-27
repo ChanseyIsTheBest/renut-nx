@@ -15,6 +15,8 @@
 #include <cstring>
 
 namespace plume {
+    // banjo-nx (2026-10-26): setVertexBuffers' filter of unchanged slots (banjo_deko3d_vtx_dedupe).
+    bool g_vtxDedupe = true;
     DkImageFormat toDkFormat(RenderFormat format);
 
     void deko3dLog(const char *fmt, ...); // plume_deko3d.cpp
@@ -120,11 +122,15 @@ namespace plume {
         computePushSize = 0;
         memset(uboBoundStages, 0, sizeof(uboBoundStages));
         memset(ssboBoundStages, 0, sizeof(ssboBoundStages));
+        graphicsBuffersDirty = true;
+        boundVtxValid = 0;  // banjo-nx (2026-10-26)
         framebuffer = nullptr;
         viewportCount = scissorCount = 0;
         indexAddress = 0;
         boundIndexFormat = DkIdxFormat_Uint16;
         boundTexCount[0] = boundTexCount[1] = boundTexCount[2] = 0;
+        texPipeline = nullptr;  // banjo-nx (2026-10-27)
+        texLinesWritten = ~0u;
         sharedBase = 0;
         sharedSize = 0;
         sharedCpu = nullptr;
@@ -150,7 +156,10 @@ namespace plume {
 
     // Descriptors written and shader code loaded so far, as one number (flushDescriptorInvalidate).
     uint64_t Deko3DCommandList::currentEpoch() const {
-        return device->descriptorEpoch.load(std::memory_order_acquire) ^ (device->codeEpoch.load(std::memory_order_acquire) << 40);
+        // banjo-nx (2026-10-27, render thread night): relaxed loads (two LDARs at every draw before). A code load bumps
+        // codeEpoch before the variant is handed over under a lock, and descriptors are written before their texture is
+        // published (or by this thread): the thread that draws with them has acquired that, so it reads the new epoch.
+        return device->descriptorEpoch.load(std::memory_order_relaxed) ^ (device->codeEpoch.load(std::memory_order_relaxed) << 40);
     }
 
     void Deko3DCommandList::end() {
@@ -161,7 +170,10 @@ namespace plume {
         Deko3DStats &st = GetDeko3DStats();
         st.draws.store(st.draws.load(std::memory_order_relaxed) + statDraws, std::memory_order_relaxed);
         st.windowDraws.store(st.windowDraws.load(std::memory_order_relaxed) + statWindowDraws, std::memory_order_relaxed);
+        st.textureRuns.store(st.textureRuns.load(std::memory_order_relaxed) + statTexRuns, std::memory_order_relaxed);
+        st.textureSkips.store(st.textureSkips.load(std::memory_order_relaxed) + statTexSkips, std::memory_order_relaxed);
         statDraws = statWindowDraws = 0;
+        statTexRuns = statTexSkips = 0;
     }
 
     void Deko3DCommandList::flushDescriptorInvalidate() {
@@ -289,6 +301,9 @@ namespace plume {
         const Deko3DGraphicsPipeline *p = graphicsPipeline;
         if ((p->ssboMask[0] | p->ssboMask[1] | p->ssboMask[2]) & (1u << AddressWindowSlot))
             ++statWindowDraws;
+        if (!graphicsBuffersDirty)  // banjo-nx (2026-10-23, batch 6)
+            return;
+        graphicsBuffersDirty = false;
         for (int st = 0; st < 3; st++) {
             const uint32_t stageBit = 1u << GraphicsStages[st];
             uint32_t ubo = p->uboMask[st] & graphicsUboValid;
@@ -316,11 +331,30 @@ namespace plume {
     // where the CPU wrote them, bound when they differ from the last ones.
     static constexpr uint32_t SharedUboSlot = 2;
 
+    static bool g_texSkip = true;  // banjo-nx (2026-10-27): Deko3DSetTextureSkip
+
+    void Deko3DSetTextureSkip(bool on) {
+        g_texSkip = on;
+    }
+
+    void Deko3DSharedLinesWritten(RenderCommandList *commandList, uint32_t lines) {
+        if (commandList)
+            static_cast<Deko3DCommandList *>(commandList)->texLinesWritten |= lines;
+    }
+
     void Deko3DCommandList::bindTextures() {
         const Deko3DGraphicsPipeline *p = graphicsPipeline;
         if (!(graphicsUboValid & (1u << SharedUboSlot)))
             return;
         const DkGpuAddr addr = graphicsUbo[SharedUboSlot].addr;
+        // banjo-nx (2026-10-27, render thread night): the words read from the renderer's copy, nothing they come from
+        // changed since the last whole run (see texPipeline): the handles and sizes are those bound and pushed then.
+        if (g_texSkip && sharedWords && p == texPipeline && !(texLinesWritten & p->texLines) &&
+            texEpoch == descriptorEpoch && texImageSet == boundImageSetObj && texSharedAddr == addr) {
+            ++statTexSkips;
+            return;
+        }
+        ++statTexRuns;
         // banjo-nx (2026-10-19, render-thread proposal 5): pushed shared constants: the renderer's copy.
         if (sharedWords) {
             sharedCpu = sharedWords;
@@ -386,6 +420,16 @@ namespace plume {
             memcpy(boundTex[st], handles, n * sizeof(DkResHandle));
             boundTexCount[st] = n;
         }
+        // banjo-nx (2026-10-27): what this run read (only from the renderer's copy: a ring upload's words are elsewhere).
+        if (sharedWords) {
+            texPipeline = p;
+            texEpoch = descriptorEpoch;
+            texImageSet = boundImageSetObj;
+            texSharedAddr = addr;
+            texLinesWritten = 0;
+        } else {
+            texPipeline = nullptr;
+        }
     }
 
     void Deko3DCommandList::drawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) {
@@ -433,6 +477,7 @@ namespace plume {
                                                     p->stageShaders[2] == boundShaders[2])))
             return;
         graphicsPipeline = p;
+        graphicsBuffersDirty = true;  // banjo-nx (2026-10-23, batch 6): its masks
         if (!p->valid)
             return;
         // banjo-nx (2026-10-19): a load and a store (a lost count is possible between two recording threads), not
@@ -621,6 +666,7 @@ namespace plume {
             return;
         bindSetTables(*this, set);
         bindSetBuffers(graphicsLayout, setIndex, set, nullptr, 0, graphicsUbo, graphicsUboValid, uboBoundStages, graphicsSsbo, graphicsSsboValid, ssboBoundStages);
+        graphicsBuffersDirty = true;  // banjo-nx (2026-10-23, batch 6)
     }
 
     void Deko3DCommandList::setGraphicsDescriptorSetDynamic(RenderDescriptorSet *descriptorSet, uint32_t setIndex, const uint32_t *dynamicOffsets, uint32_t dynamicOffsetsCount) {
@@ -629,6 +675,7 @@ namespace plume {
             return;
         bindSetTables(*this, set);
         bindSetBuffers(graphicsLayout, setIndex, set, dynamicOffsets, dynamicOffsetsCount, graphicsUbo, graphicsUboValid, uboBoundStages, graphicsSsbo, graphicsSsboValid, ssboBoundStages);
+        graphicsBuffersDirty = true;  // banjo-nx (2026-10-23, batch 6)
     }
 
     void Deko3DCommandList::setGraphicsRootDescriptor(RenderBufferReference, uint32_t) {}
@@ -662,8 +709,31 @@ namespace plume {
             extents[i] = (b && b->block) ? DkBufExtents{b->gpu + views[i].buffer.offset, std::max<uint32_t>(views[i].size, 4)}
                                          : DkBufExtents{device->zeroAddr, Deko3DDevice::ZeroSize};
         }
-        if (count)
-            dkCmdBufBindVtxBuffers(cmd, startSlot, extents, count);
+        // banjo-nx (2026-10-26, Unleashed-style step 2): only the slots whose range differs from the one this list bound
+        // there last (runs of consecutive ones in one call).
+        if (!g_vtxDedupe) {
+            if (count)
+                dkCmdBufBindVtxBuffers(cmd, startSlot, extents, count);
+            return;
+        }
+        for (uint32_t i = 0; i < count;) {
+            const uint32_t slot = startSlot + i;
+            if (((boundVtxValid >> slot) & 1) && boundVtx[slot].addr == extents[i].addr && boundVtx[slot].size == extents[i].size) {
+                ++i;
+                continue;
+            }
+            uint32_t n = 0;
+            while (i + n < count) {
+                const uint32_t s = startSlot + i + n;
+                if (((boundVtxValid >> s) & 1) && boundVtx[s].addr == extents[i + n].addr && boundVtx[s].size == extents[i + n].size)
+                    break;
+                boundVtx[s] = extents[i + n];
+                boundVtxValid |= 1u << s;
+                ++n;
+            }
+            dkCmdBufBindVtxBuffers(cmd, slot, extents + i, n);
+            i += n;
+        }
     }
 
     // ViewportTransform registers (method 0x280 + 8 * viewport): ScaleY at +1, TranslateY at +4.
@@ -1049,6 +1119,7 @@ namespace plume {
             cl->graphicsSsbo[slot] = e;
             cl->graphicsSsboValid |= 1u << slot;
             cl->ssboBoundStages[slot] = 0;
+            cl->graphicsBuffersDirty = true;
         }
         return true;
     }
@@ -1063,6 +1134,7 @@ namespace plume {
             cl->graphicsSsbo[AddressWindowSlot] = e;
             cl->graphicsSsboValid |= 1u << AddressWindowSlot;
             cl->ssboBoundStages[AddressWindowSlot] = 0;
+            cl->graphicsBuffersDirty = true;
         }
         return true;
     }
@@ -1076,8 +1148,13 @@ namespace plume {
             cl->graphicsSsbo[slot] = e;
             cl->graphicsSsboValid |= 1u << slot;
             cl->ssboBoundStages[slot] = 0;
+            cl->graphicsBuffersDirty = true;
         }
         return true;
+    }
+
+    void Deko3DSetVertexBufferDedupe(bool on) {
+        g_vtxDedupe = on;
     }
 
     bool Deko3DBindUniform(RenderCommandList *commandList, uint32_t slot, uint64_t address, uint32_t size) {
@@ -1089,6 +1166,7 @@ namespace plume {
             cl->graphicsUbo[slot] = e;
             cl->graphicsUboValid |= 1u << slot;
             cl->uboBoundStages[slot] = 0;
+            cl->graphicsBuffersDirty = true;
         }
         return true;
     }
@@ -1118,6 +1196,7 @@ namespace plume {
             return false;
         cl->sharedWords = static_cast<const uint8_t *>(cpu);
         cl->sharedWordsSize = size;
+        cl->texLinesWritten = ~0u;  // banjo-nx (2026-10-27): another copy, or none
         if (!cpu)
             cl->sharedCpu = nullptr;  // looked up again where the bound buffer is
         return true;

@@ -247,6 +247,23 @@ banjo_cpu_native_sub_82252C10 = true
 banjo_cpu_native_sub_823A9D70 = true
 banjo_cpu_native_sub_8225B210 = true
 
+# Texture memory on the Switch (2026-10-22, the 36z6 crash in the town): the textures the renderer keeps for the GPU are
+# released when they have not been used for a while and the heap (one for everything on the Switch) has less than this
+# many MB of room left; under half of it, after only a few frames unused and checked every second. A released texture is
+# made again from the game's memory when it is drawn (a short upload, the same picture). Before, nothing was ever
+# released on the Switch and loading the town filled the heap.
+banjo_renut_textures_reserve_mb = 512
+
+# Bulk localized copies (2026-10-22, your request; the method of the Bejeweled 3 port): every game function your
+# console profiles found hot that still ran as generated code (363 functions, app/src/cpu/hot/localized_bulk.txt) runs
+# as a localized copy. configs/banjo_cpu_native_bulk_off.toml is the A/B (all of them back to the generated code).
+banjo_cpu_native_bulk = true
+# The copies' self-check (the guard) is off: every hook calls its copy directly, with no countdown to the next checked
+# call (bejeweled3-nx's direct dispatch). configs/banjo_hot_guard_on.toml puts the guard back (the first 64 calls of
+# each thread and then 1 in 4096 run both versions and compare; a difference switches that copy off and is logged).
+banjo_hot_guard_calls = 0
+banjo_hot_guard_period = 0
+
 # Hand-written natives (2026-10-14; CPU group; docs/enhancements.md): the game's C runtime memcpy and memset and four
 # Direct3D writers (the two shader-constant writers and the two writers of the state flush) as native code written by
 # hand, in front of the copies of those functions. The first four switch each native off everywhere at once (the

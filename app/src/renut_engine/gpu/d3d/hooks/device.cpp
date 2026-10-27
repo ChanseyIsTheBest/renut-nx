@@ -456,6 +456,8 @@ u32 Direct3D_CreateDevice_hook(u32 /*adapter*/, u32 device_type, u32 /*unused*/,
   // (KickFence). The no-hardware device only records command buffers.
   if (title_device)
     bytes[kDeviceOffsetFlags2] &= u8(~kDeviceFlagImmediateFences);
+  else
+    native::TrackDeviceTouches(device_va);  // banjo-nx (2026-10-26, banjo_renut_tags): a recording device
 
   if (out_device)
     *out_device = device_va;
@@ -501,6 +503,7 @@ void KickDevice(d3d::Device *device, u32 device_va) {
   // rewrite them).
   banjo::renut_gpu::checks::QueueKickFlush();
   KickFence(reinterpret_cast<u8 *>(device));
+  native::DeviceAt(device_va).Touch(d3d::kDeviceOffsetFenceTag);  // banjo-nx (2026-10-26, banjo_renut_tags)
 }
 
 // PRING CDevice::KickOff() [0x82210AB0]: hand the ring to the GPU. Nothing
@@ -800,6 +803,7 @@ u32 D3DDevice_BeginCommandBuffer_hook(u32 device_va, u32 command_buffer, u32 fla
   // The buffer starts with no fetch constants, and dirty in everything it does
   // not inherit.
   std::memset(d.bytes + native::off::TextureFetch, 0, 0x300);
+  d.TouchRange(native::off::TextureFetch, 0x300);  // banjo-nx (2026-10-26, banjo_renut_tags)
   for (u32 i = 0; i < 5; ++i)
     d.SetPending(i, ~u64(own[i]));
 
@@ -818,6 +822,7 @@ u32 D3DDevice_EndCommandBuffer_hook(u32 device_va) {
     return 0;
   auto *buffer = GuestPtr<be_u32>(d.W(native::off::CommandBuffer));
   if (buffer && (u32(buffer[kBufferFlags / 4]) & 0x8000)) {
+    d.TouchTags();  // banjo-nx (2026-10-26, banjo_renut_tags)
     for (u32 i = 0; i < 5; ++i)
       d.SetPending(i, 0);
   }
@@ -898,6 +903,7 @@ void D3DDevice_Swap_hook(u32 device_va, u32 front_buffer, u32 /*parameters*/) {
     const u32 fence_tag = word(d3d::kDeviceOffsetFenceTag);
     word(d3d::kDeviceOffsetSwapFenceTag) = fence_tag;
     word(d3d::kDeviceOffsetPresentFenceTag) = fence_tag;
+    native::DeviceAt(device_va).Touch(d3d::kDeviceOffsetSwapFenceTag);  // banjo-nx (2026-10-26, banjo_renut_tags)
     device[d3d::kDeviceOffsetSwapFlags] &= u8(~d3d::kSwapFlagPending);
     // banjo-nx (package 27c): the frame's last vertex and texture fills are read here, before the Swap's fence
     // completes. They were read at the present, after it: the game, told the frame was done, could rewrite a dynamic

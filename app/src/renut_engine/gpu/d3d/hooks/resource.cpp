@@ -31,6 +31,7 @@
 #include <rex/types.h>
 
 #include "renut_engine/gpu/guest/command_buffers.h"
+#include "renut_engine/gpu/render/draw.h"  // banjo-nx (2026-10-26): the Unleashed census
 #include "renut_engine/gpu/d3d/d3d.h"
 #include "renut_engine/gpu/d3d/d3d_native.h"
 #include "renut_engine/gpu/guest/guest_memory.h"
@@ -631,6 +632,8 @@ Subresource SubresourceLayout(u32 texture, u32 slice, u32 level) {
 // Returns the address the CPU writes at.
 u32 LockResource(u32 resource, u32 mip_lock, u32 base_address, u32 mip_address, u32 address,
                  u32 size, u32 flags) {
+  if (UnleashedCensusOn())
+    NoteResourceLock(resource, size);  // banjo-nx (2026-10-26)
   auto *r = GuestPtr<be_u32>(resource);
   if (!r)
     return address;
@@ -880,6 +883,8 @@ void DestroyGuestResource(u32 resource) {
 
 // void D3DResource_Destroy(D3DResource *pThis) [0x822084F0]
 void D3DResource_Destroy_hook(u32 resource) {
+  if (UnleashedCensusOn())
+    ForgetHookResource(resource);  // banjo-nx (2026-10-26)
   RecordKind kind;
   if (!records::Lookup(resource, &kind)) {
     // Resources N&B's D3D created: drop any host object attached to them
@@ -1274,6 +1279,8 @@ u32 D3DDevice_CreateVertexBuffer_hook(u32 length, u32 usage, u32 /*pool*/) {
   h[1] = 1u;
   h[5] = 0xFFFF0000u;
   h[7] = (length & 0x03FFFFFCu) | (u32(h[7]) & 0x08000000u) | 0x10000002u;
+  if (UnleashedCensusOn())
+    NoteHookResource(header, 1);  // banjo-nx (2026-10-26)
   return header;
 }
 
@@ -1299,6 +1306,8 @@ u32 D3DDevice_CreateIndexBuffer_hook(u32 length, u32 usage, u32 format) {
   h[1] = 1u;
   h[5] = 0xFFFF0000u;
   h[6] = data;
+  if (UnleashedCensusOn())
+    NoteHookResource(header, 2);  // banjo-nx (2026-10-26)
   return header;
 }
 
@@ -1518,6 +1527,8 @@ u32 D3DDevice_CreateTexture_hook(u32 width, u32 height, u32 depth, u32 levels, u
   auto *t = GuestPtr<be_u32>(header);
   t[8] = (u32(t[8]) & 0xFFFu) | (base & ~0xFFFu);
   t[12] = (mips & ~0xFFFu) | (u32(t[12]) & 0xFFFu);
+  if (UnleashedCensusOn())
+    NoteHookResource(header, 3);  // banjo-nx (2026-10-26)
   return header;
 }
 
@@ -1607,6 +1618,8 @@ u32 FindTextureSize_hook(u32 width, u32 height, u32 depth, u32 levels, u32 forma
 void SetTextureHeader_hook(u32 type, u32 width, u32 height, u32 depth, u32 levels, u32 usage,
                            u32 format, u32 packing, u32 border, u32 exp_adjust, u32 pitch,
                            u32 texture, mapped_u32 base_size, mapped_u32 mip_size) {  // 0x8228E990
+  if (UnleashedCensusOn())
+    NoteHookResource(texture, 4);  // banjo-nx (2026-10-26)
   u32 b = 0, m = 0;
   SetTextureHeader(type, width, height, depth, levels, usage, format, packing, border, exp_adjust,
                    pitch, texture, b, m);

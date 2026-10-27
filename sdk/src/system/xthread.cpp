@@ -479,6 +479,13 @@ X_STATUS XThread::Create() {
     rex::initialize_seh_thread();
 #if REX_PLATFORM_SWITCH
     RexSwitchSetCurrentThreadPriority(SwitchPriorityFor(guest_thread_, thread_name_));
+    // banjo-nx (2026-10-27): with four cores granted, the audio threads go to the system core (NetherSX2_nx's
+    // layout: threading_switch.h, banjo_system_core), at the same priority (0x2B; the output thread is above them).
+    // (The XMA Decoder only with banjo_system_core_xma: the first four-core console run had core 3 full.)
+    if (!guest_thread_ && (std::string_view(thread_name_).starts_with("Audio Worker") ||
+                           (std::string_view(thread_name_).starts_with("XMA Decoder") && RexSwitchSystemCoreXma()))) {
+      (void)RexSwitchMoveCurrentThreadToSystemCore(REX_SWITCH_PRIO_AUDIO);
+    }
     // banjo-nx (2026-10-20, from sa2-nx): known to the pthread layer by its kernel handle, so another thread can set its cores
     // (RexSetGuestThreadCoreLayout: the registry was empty, and setting another thread's mask failed quietly).
     RexSwitchRegisterCurrentThread();

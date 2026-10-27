@@ -63,6 +63,12 @@ void RexSwitchNeonProbe(void);
 #include <filesystem>
 #include <string_view>
 
+#if REX_PLATFORM_SWITCH
+// banjo-nx (2026-10-27): core/threading_switch.cpp (its header clashes with switch.h users).
+extern "C" int RexSwitchInitSystemCore(void);
+extern "C" int RexSwitchEnsureForwarderNpdm(void);
+#endif
+
 REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
                       "GPU emulation plugin to load at startup (e.g. 'xenos'); empty disables "
                       "GPU emulation")
@@ -176,6 +182,12 @@ bool ReXApp::SetupEnvironment() {
   // Load config FIRST so log cvars have final values
   if (std::filesystem::exists(config_path_))
     rex::cvar::LoadConfig(config_path_);
+#if REX_PLATFORM_SWITCH
+  // banjo-nx (2026-10-27): the four-core mode's keys as the toml sets them (main read them before the toml was loaded:
+  // the command line's and the defaults only), and the forwarder's NPDM for the toml's program id.
+  RexSwitchInitSystemCore();
+  RexSwitchEnsureForwarderNpdm();
+#endif
 
   // Late-phase logging
   std::string log_file_cvar = REXCVAR_GET(log_file);

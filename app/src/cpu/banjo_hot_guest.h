@@ -6,6 +6,10 @@
 // one counter in the calling thread's own context (PPCContext::host_counters: no thread_local, which on the Switch is
 // a call to __aarch64_read_tp, and no counter shared between threads), one test, the copy. The counter counts down to
 // the next guarded call: Check() refills it.
+//
+// banjo-nx (2026-10-22, bejeweled3-nx's method): with no guard at all (banjo_hot_guard_calls = 0 and
+// banjo_hot_guard_period = 0), verify and banjo_hot_count off, a hook's state is kDirect and the path is one byte and
+// the copy: no countdown (for the bulk hooks a counter shared by every thread, written at every call).
 #pragma once
 
 #include <atomic>
@@ -20,7 +24,7 @@
 
 namespace banjo::hot {
 
-enum : uint8_t { kUninit = 0, kOff = 1, kOn = 2, kCount = 3 };
+enum : uint8_t { kUninit = 0, kOff = 1, kOn = 2, kCount = 3, kDirect = 4 };
 
 // PPCContext::host_counters slots for the hooks (tools/localize_native.py numbers them in list order); a hook past
 // them shares one counter between threads.
@@ -47,6 +51,7 @@ struct Hook {
   bool (*own)();  // reads the key
   uint32_t slot;
   const RegSkip* skip;  // registers the guard does not compare (hand-written natives in the copy)
+  bool bulk;            // a hook of the bulk list (localized_bulk.txt): one master key, a summary in the reports
   Hook* next = nullptr;  // every hook, for the reports
 
   // Run time. Zero until the first call: kUninit sends that call to InitHook.
@@ -65,7 +70,7 @@ struct Hook {
        void (*native_logged_)(PPCContext&, uint8_t*, Logged&), void (*reference_logged_)(PPCContext&, uint8_t*, Logged&),
        void (*native_counted_)(PPCContext&, uint8_t*), std::atomic<uint64_t>* hits_, uint32_t hit_count_,
        const CodeRange* code_, uint32_t code_ranges_, uint64_t code_hash_, bool (*own_)(), uint32_t slot_,
-       const RegSkip* skip_);
+       const RegSkip* skip_, bool bulk_);
 };
 
 // First call of a hook (any thread): its key and the CPU master switch, the guest code check, the guard's settings.
@@ -86,22 +91,42 @@ void Report();
 
 }  // namespace banjo::hot
 
+// The counting form is a PC measurement (banjo_hot_count): the Switch build does not make it (nor its code).
+#if REX_PLATFORM_SWITCH
+#define BANJO_HOT_COUNTED(ID) nullptr
+#else
+#define BANJO_HOT_COUNTED(ID) &n_##ID::NativeCounted
+#endif
+
 // SYM: the generated function's name; ID: the namespace suffix of its header (n_<ID>); KEY: its cvar; SLOT: its
-// PPCContext::host_counters slot. Written by tools/localize_native.py (app/generated/hot/banjo_hot_list.inc).
-#define BANJO_HOT_HOOK(SYM, ID, KEY, DEFAULT, SLOT, DESC)                                                        \
-  REXCVAR_DEFINE_BOOL(KEY, DEFAULT, "Banjo/Enhancements", DESC).lifecycle(rex::cvar::Lifecycle::kInitOnly);      \
+// PPCContext::host_counters slot. Written by tools/localize_native.py (app/generated/hot/banjo_hot_list.inc, and
+// banjo_hot_bulk_<k>.inc for the bulk list: BANJO_HOT_HOOK_BULK, its keys in a category of their own).
+#define BANJO_HOT_HOOK(SYM, ID, KEY, DEFAULT, SLOT, DESC) \
+  BANJO_HOT_HOOK_EX(SYM, ID, KEY, DEFAULT, SLOT, DESC, false, "Banjo/Enhancements")
+#define BANJO_HOT_HOOK_BULK(SYM, ID, KEY, DEFAULT, SLOT, DESC) \
+  BANJO_HOT_HOOK_EX(SYM, ID, KEY, DEFAULT, SLOT, DESC, true, "Banjo/Bulk copies")
+#define BANJO_HOT_HOOK_EX(SYM, ID, KEY, DEFAULT, SLOT, DESC, BULK, CATEGORY)                                     \
+  REXCVAR_DEFINE_BOOL(KEY, DEFAULT, CATEGORY, DESC).lifecycle(rex::cvar::Lifecycle::kInitOnly);                  \
   REX_EXTERN(__imp__##SYM);                                                                                      \
   namespace banjo::hot {                                                                                         \
   Hook g_hook_##ID{#SYM, #KEY, &__imp__##SYM, &n_##ID::Native, &n_##ID::NativeLogged, &n_##ID::ReferenceLogged,  \
-                   &n_##ID::NativeCounted, n_##ID::g_hits, uint32_t(std::size(n_##ID::g_hits)), n_##ID::kCode,    \
+                   BANJO_HOT_COUNTED(ID), n_##ID::g_hits, uint32_t(std::size(n_##ID::g_hits)), n_##ID::kCode,    \
                    uint32_t(std::size(n_##ID::kCode)), n_##ID::kCodeHash, [] { return bool(REXCVAR_GET(KEY)); }, \
-                   SLOT, &n_##ID::kSkip};                                                                        \
+                   SLOT, &n_##ID::kSkip, BULK};                                                                  \
   }                                                                                                              \
   REX_HOOK_RAW(SYM) {                                                                                            \
     banjo::hot::Hook& h = banjo::hot::g_hook_##ID;                                                               \
     uint8_t st = h.state.load(std::memory_order_relaxed);                                                        \
+    if (st == banjo::hot::kDirect) [[likely]] {                                                                  \
+      banjo::hot::n_##ID::Native(ctx, base);                                                                     \
+      return;                                                                                                    \
+    }                                                                                                            \
     if (st != banjo::hot::kOn) [[unlikely]] {                                                                    \
       if (st == banjo::hot::kUninit) st = banjo::hot::InitHook(h, base);                                         \
+      if (st == banjo::hot::kDirect) {                                                                           \
+        banjo::hot::n_##ID::Native(ctx, base);                                                                   \
+        return;                                                                                                  \
+      }                                                                                                          \
       if (st == banjo::hot::kCount) {                                                                            \
         banjo::hot::Counted(h, ctx, base);                                                                       \
         return;                                                                                                  \

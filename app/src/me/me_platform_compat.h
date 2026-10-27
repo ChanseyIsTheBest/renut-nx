@@ -24,4 +24,7 @@ inline int RexSwitchCurrentCore() { return -1; }
 inline bool RexSwitchSetCurrentThreadCore(int) { return true; }
 inline bool RexSwitchPinCurrentThreadToCore(int) { return true; }
 inline bool RexSwitchUnpinCurrentThread(int) { return true; }
+// banjo-nx (2026-10-27): the system core (4-core mode): never there off the Switch.
+inline int RexSwitchSystemCore() { return -1; }
+inline bool RexSwitchMoveCurrentThreadToSystemCore(int) { return false; }
 #endif

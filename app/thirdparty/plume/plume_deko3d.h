@@ -43,6 +43,10 @@ namespace plume {
     // Called with every DKSH the device compiled (to keep in a cache).
     using Deko3DShaderCacheStore = std::function<void(uint64_t sourceHash, const std::vector<uint8_t> &dksh)>;
     void SetDeko3DShaderCache(Deko3DShaderCacheLookup lookup, Deko3DShaderCacheStore store);
+    // banjo-nx (2026-10-23): whether the cache holds a variant, without reading it (its index only): such a variant is
+    // read in the background (Deko3DOptions::asyncCacheReads) instead of on the drawing thread.
+    using Deko3DShaderCacheContains = std::function<bool(uint64_t sourceHash)>;
+    void SetDeko3DShaderCacheContains(Deko3DShaderCacheContains contains);
 
     // Counters for the renderer's reports.
     struct Deko3DStats {
@@ -50,9 +54,17 @@ namespace plume {
         // banjo-nx (2026-10-21, Deko3DOptions::asyncVariants): stages given their generic variant while their own was
         // compiled in the background, background compiles done, stages that took their own variant afterwards.
         std::atomic<uint64_t> variantFallbacks{0}, variantBackground{0}, variantUpgrades{0};
+        std::atomic<uint64_t> variantCacheReadsBackground{0};  // banjo-nx (2026-10-23): asyncCacheReads
+        // banjo-nx (2026-10-23): blocking compiles: those a drawing thread waited for (the game stopped) and the time
+        // waited, those a background thread (prebuild) waited for; boost mode during them (compileWaitBoost): times
+        // and time; the uam thread's rests between background compiles (backgroundCompileShare).
+        std::atomic<uint64_t> compileWaits{0}, compileWaitNs{0}, compileBackgroundWaits{0}, backgroundRestNs{0};
+        std::atomic<uint64_t> compileBoosts{0}, compileBoostNs{0};
         std::atomic<uint64_t> imageBytes{0}, bufferBytes{0}, codeBytes{0}, commandBytes{0};
         std::atomic<uint64_t> descriptorWrites{0}, pipelineBinds{0}, stateBinds{0}, draws{0};
         std::atomic<uint64_t> windowDraws{0}; // draws whose shaders read fetch data from memory (storage binding 15)
+        // banjo-nx (2026-10-27): bindTextures' whole runs and the draws it skipped (Deko3DSetTextureSkip).
+        std::atomic<uint64_t> textureRuns{0}, textureSkips{0};
         // banjo-nx (2026-10-19): the barriers recorded, by what they wait for (DkBarrier_Primitives, _Fragments, _Full:
         // the 3D pipe drained, the copy engine as well), and those that invalidate the texture cache.
         std::atomic<uint64_t> barriersPrimitives{0}, barriersFragments{0}, barriersFull{0}, barriersImageInvalidate{0};
@@ -134,6 +146,8 @@ namespace plume {
 
     // The bindings a shader uses (its banjo-dk line).
     struct Deko3DShaderUsage {
+        // banjo-nx (2026-10-27): a vertex shader whose GLSL names gl_VertexID (true for any other stage and when unknown).
+        bool readsVertexId = true;
         uint32_t uboMask = 0;
         uint32_t ssboMask = 0;
         bool textures = false;
@@ -272,6 +286,9 @@ namespace plume {
         uint32_t uboMask[3] = {}, ssboMask[3] = {};
         std::vector<Deko3DShaderUsage::TexBinding> texBindings[3];
         uint32_t txqMask[3] = {};  // banjo-nx (2026-10-19): Deko3DShaderUsage::txqMask of each stage
+        // banjo-nx (2026-10-27, render thread night): the 64-byte lines of the shared constants that hold its
+        // bindings' texture and sampler words (bindTextures reads only those).
+        uint32_t texLines = 0;
         bool boundTextures = false;
         bool textures = false;
         uint64_t stateHash = 0; // equal hashes: the same fixed-function state (binds skipped)
@@ -364,6 +381,14 @@ namespace plume {
         DkBufExtents graphicsUbo[16]{}, graphicsSsbo[16]{};
         uint32_t graphicsUboValid = 0, graphicsSsboValid = 0;
         uint32_t uboBoundStages[16] = {}, ssboBoundStages[16] = {}; // DkStage bits a slot was bound for
+        // banjo-nx (2026-10-26, Unleashed-style step 2): the vertex buffers bound in this list (a slot's address and
+        // size), so a slot bound again with the same range is not sent again (the renderer binds every stream and the
+        // zero stream at every draw).
+        DkBufExtents boundVtx[16]{};
+        uint32_t boundVtxValid = 0;
+        // banjo-nx (2026-10-23, batch 6): a slot or the graphics pipeline changed since bindGraphicsBuffers last ran
+        // (with neither, every slot its pipeline reads is bound for its stages already: the walk binds nothing).
+        bool graphicsBuffersDirty = true;
         DkBufExtents computeUbo[16]{}, computeSsbo[16]{};
         uint32_t computeUboValid = 0, computeSsboValid = 0;
         bool computeUboDirty = true, computeSsboDirty = true;
@@ -379,6 +404,14 @@ namespace plume {
         // found in (GPU range and CPU address).
         DkResHandle boundTex[3][32]{};
         uint32_t boundTexCount[3] = {};
+        // banjo-nx (2026-10-27, render thread night): bindTextures' last whole run (its pipeline, descriptor epoch, image
+        // set and shared uniform buffer) and the shared constant lines the renderer wrote since (Deko3DSharedLinesWritten);
+        // with the same of all four and none of the pipeline's lines written, its run would bind and push nothing.
+        const Deko3DGraphicsPipeline *texPipeline = nullptr;
+        uint64_t texEpoch = 0;
+        const void *texImageSet = nullptr;
+        DkGpuAddr texSharedAddr = 0;
+        uint32_t texLinesWritten = ~0u;
         DkGpuAddr sharedBase = 0;
         uint32_t sharedSize = 0;
         const uint8_t *sharedCpu = nullptr;
@@ -448,6 +481,7 @@ namespace plume {
         // banjo-nx (2026-10-19, render-thread proposal 13): per-draw counters of this list, added to the totals at end()
         // (no atomic read-modify-write per draw: the A57 has no LSE).
         uint64_t statDraws = 0, statWindowDraws = 0;
+        uint64_t statTexRuns = 0, statTexSkips = 0;  // banjo-nx (2026-10-27): into Deko3DStats at end()
         void emitBarrier(DkBarrier mode, uint32_t invalidate);
         void flushBarriers() {
             if (pendingBarrier)
@@ -536,6 +570,8 @@ namespace plume {
             // banjo-nx (2026-10-21, asyncVariants): nobody waits; the uam thread finishes it (finishAsync) and deletes
             // it. The text and the results are the job's own.
             bool async = false;
+            bool cached = false;  // banjo-nx (2026-10-23): read from the cache file, not compiled (asyncCacheReads)
+            bool drawWaits = false;  // banjo-nx (2026-10-23): blocking, and the waiting thread draws (the game stops)
             bool background = false;  // asked by a thread that does not draw (Deko3DSetBackgroundThread): queued last
             Deko3DVariantRequest request;  // the text is made from it on the uam thread, one at a time
             std::string ownSource;
@@ -548,6 +584,7 @@ namespace plume {
         uint32_t compileThreadHandle = 0;
         std::vector<int32_t> compileWaiters;
         int32_t compileAppliedPriority = -1;
+        int32_t compileBasePriority = 0;  // the uam thread's own, as the kernel took it (0: not started)
         bool compileStop = false;
         bool compilerReady = false;
         // banjo-nx (2026-10-21, asyncVariants): the variant keys queued or compiling in the background (compileMutex),
@@ -643,10 +680,11 @@ namespace plume {
         void noteSubmission(); // after a submission: a fence for its serial
         // banjo-nx (2026-10-21): 'pendingKey' set (asyncVariants): a variant neither loaded nor in the cache is queued
         // for the uam thread and the shader's generic one is returned, its key in *pendingKey (0 otherwise).
+        // banjo-nx (2026-10-23): 'noCompile': nullptr instead of compiling a variant neither loaded nor in the cache.
         const DkShader *loadVariant(const Deko3DShader *shader, const RenderSpecConstant *specConstants, uint32_t specConstantsCount,
-                                    Deko3DVariantRequest *pending = nullptr);
+                                    Deko3DVariantRequest *pending = nullptr, bool noCompile = false);
         // Queues the request once (false: a background thread's, and their cap reached). compileMutex not held.
-        bool queueAsync(const Deko3DVariantRequest &request, bool background);
+        bool queueAsync(const Deko3DVariantRequest &request, bool background, bool cached = false);
         bool compile(DkStage stage, const std::string &source, std::vector<uint8_t> &dksh, std::string &log);
         void finishAsync(CompileJob *job);
         // banjo-nx (2026-10-21): Deko3DRefreshPipeline's work; true while a stage still waits.
@@ -684,6 +722,13 @@ namespace plume {
     // buffer at 'address'; and the CPU's copy of the shared constants bound textures are read from (bindTextures), for
     // a shared uniform buffer the renderer pushes (nullptr: read where the bound buffer's memory is, as before).
     bool Deko3DBindUniform(RenderCommandList *commandList, uint32_t slot, uint64_t address, uint32_t size);
+    // banjo-nx (2026-10-26): whether setVertexBuffers sends only the slots whose range changed (default true).
+    void Deko3DSetVertexBufferDedupe(bool on);
+    // banjo-nx (2026-10-27, render thread night): whether bindTextures skips a draw whose pipeline, descriptors and
+    // texture words are those of its last run (default true); and the 64-byte lines of the CPU copy of the shared
+    // constants (Deko3DSetSharedWords) the renderer changed (bit i = line i).
+    void Deko3DSetTextureSkip(bool on);
+    void Deko3DSharedLinesWritten(RenderCommandList *commandList, uint32_t lines);
     bool Deko3DPushUniform(RenderCommandList *commandList, uint64_t address, uint32_t uboSize, uint32_t offset,
                            const void *data, uint32_t size);
     bool Deko3DSetSharedWords(RenderCommandList *commandList, const void *cpu, uint32_t size);
@@ -693,6 +738,8 @@ namespace plume {
     // the background draws with the generic ones; this gives it the stages whose own variants are done since (one atomic
     // load when there is nothing to do). True when a stage changed now: bind the pipeline again to use it.
     bool Deko3DRefreshPipelineSlow(RenderPipeline *pipeline);
+    // banjo-nx (2026-10-27): whether a shader may read gl_VertexID (Deko3DShaderUsage::readsVertexId); true for null.
+    bool Deko3DShaderReadsVertexId(const RenderShader *shader);
     // banjo-nx (2026-10-21, asyncVariants): this thread does not draw (Renut's pipeline prebuild workers): the variants it
     // asks for are compiled after the draws' ones, and only so many wait at a time (the rest when a draw needs them).
     void Deko3DSetBackgroundThread(bool background);
@@ -739,6 +786,14 @@ namespace plume {
         // A thread that waits for a compile lends its priority to the uam thread while it waits.
         int compileCore = -1;
         int compilePriority = 0;
+        // banjo-nx (2026-10-23): the share of its core (percent) background compiles may use: after each one the uam
+        // thread rests in proportion (a compile a thread waits for ends the rest). An application's lowest priority
+        // is the game threads' own (0x3B), so a lower one for the uam thread is refused and it shared the core half
+        // and half with them. 100: no rests.
+        int backgroundCompileShare = 100;
+        // banjo-nx (2026-10-23, the user's request): boost mode (CPU 1785 MHz, GPU 76.8 MHz) while a drawing thread
+        // waits for a compile, normal again as soon as it is done. Background compiles never boost.
+        bool compileWaitBoost = false;
         // banjo-nx (2026-10-19, GPU): barriers recorded one after another with no work between them are one barrier
         // (the strongest wait and every invalidation of them), emitted right before the next command that does GPU
         // work: the same ordering, one drain instead of several.
@@ -753,6 +808,11 @@ namespace plume {
         // the bools, blend skip, output trim, alpha function, tessellation kind, vertex outputs, zero inputs, early
         // depth), and takes its own at a later bind (Deko3DRefreshPipeline). Off: the draw waits for the compile.
         bool asyncVariants = false;
+        // banjo-nx (2026-10-23, the console's stutters on entering an area: hundreds of new pipelines, each variant read
+        // from the cache file on the card by the drawing thread): with asyncVariants, a variant the cache file holds is
+        // read on the uam thread (ahead of the compiles, with no rest after it) while the draw uses the generic
+        // variant, as for one that compiles. Same pixels.
+        bool asyncCacheReads = false;
     };
     void Deko3DSetOptions(const Deko3DOptions &options);
     // banjo-nx (2026-10-19, render-thread proposal 13): read inline (barriers() reads it per call).

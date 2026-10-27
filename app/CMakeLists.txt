@@ -107,9 +107,24 @@ set(RENUT_SOURCES
     src/cpu/banjo_forms_selfcheck.cpp
     # Native XAudio reverb (stereo_room_t<float>::process), bit-identical to the recompiled one (banjo_native_reverb).
     src/cpu/banjo_reverb_native.cpp
+    src/cpu/banjo_xaudio_native.cpp
     # Native copies of hot game functions (from sa2-nx): tools/localize_native.py writes them into generated/hot from
     # src/cpu/hot/localized.txt; each has its own key (banjo_cpu_native_*) and a guard that runs both versions.
     src/cpu/banjo_hot_guest.cpp
+    # 2026-10-22 (bejeweled3-nx's method): the bulk list's copies (src/cpu/hot/localized_bulk.txt), their hooks spread
+    # over these files so they compile in parallel.
+    src/cpu/banjo_hot_shard_0.cpp
+    src/cpu/banjo_hot_shard_1.cpp
+    src/cpu/banjo_hot_shard_2.cpp
+    src/cpu/banjo_hot_shard_3.cpp
+    src/cpu/banjo_hot_shard_4.cpp
+    src/cpu/banjo_hot_shard_5.cpp
+    src/cpu/banjo_hot_shard_6.cpp
+    src/cpu/banjo_hot_shard_7.cpp
+    src/cpu/banjo_hot_shard_8.cpp
+    src/cpu/banjo_hot_shard_9.cpp
+    src/cpu/banjo_hot_shard_10.cpp
+    src/cpu/banjo_hot_shard_11.cpp
     src/profiler/banjo_pc_profiler.cpp
     # Shader harvesting for the library (dev tool, banjo_volcar_shaders_en_sitio).
     src/native/banjo_shader_harvest.cpp
@@ -194,11 +209,26 @@ endif()
 # two functions that compute with floats and differ in it, and the guard compares a copy with code built that way.
 # -ffp-contract=off is already on the whole target (above). On the PC the same census definition as the game code, so
 # the any-mode helper counts stay complete.
+# 2026-10-22: the bulk shards are the same kind of code (BANJO_HOT_SOURCES: every file that compiles copies).
+set(BANJO_HOT_SOURCES src/cpu/banjo_hot_guest.cpp
+    src/cpu/banjo_hot_shard_0.cpp
+    src/cpu/banjo_hot_shard_1.cpp
+    src/cpu/banjo_hot_shard_2.cpp
+    src/cpu/banjo_hot_shard_3.cpp
+    src/cpu/banjo_hot_shard_4.cpp
+    src/cpu/banjo_hot_shard_5.cpp
+    src/cpu/banjo_hot_shard_6.cpp
+    src/cpu/banjo_hot_shard_7.cpp
+    src/cpu/banjo_hot_shard_8.cpp
+    src/cpu/banjo_hot_shard_9.cpp
+    src/cpu/banjo_hot_shard_10.cpp
+    src/cpu/banjo_hot_shard_11.cpp
+)
 if(BANJO_GENERATED_MATH_FLAGS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set_property(SOURCE src/cpu/banjo_hot_guest.cpp APPEND PROPERTY COMPILE_OPTIONS -fno-math-errno)
+    set_property(SOURCE ${BANJO_HOT_SOURCES} APPEND PROPERTY COMPILE_OPTIONS -fno-math-errno)
 endif()
 if(NOT REXGLUE_PLATFORM_SWITCH)
-    set_property(SOURCE src/cpu/banjo_hot_guest.cpp APPEND PROPERTY COMPILE_DEFINITIONS REX_DIET_CENSUS_ON)
+    set_property(SOURCE ${BANJO_HOT_SOURCES} APPEND PROPERTY COMPILE_DEFINITIONS REX_DIET_CENSUS_ON)
 endif()
 
 # sa2-nx's CPU rounds of 2026-10-12 (docs/enhancements.md, "sa2-nx's CPU rounds"): one switch back per post-codegen
@@ -393,7 +423,7 @@ if(REXGLUE_PLATFORM_SWITCH)
     if(BANJO_SWITCH_OMIT_FRAME_POINTER AND TARGET renut_recomp)
         target_compile_options(renut_recomp PRIVATE -fomit-frame-pointer)
         # The localized copies are game code too (sa2-nx: the same rule for that file).
-        set_property(SOURCE src/cpu/banjo_hot_guest.cpp APPEND PROPERTY COMPILE_OPTIONS -fomit-frame-pointer)
+        set_property(SOURCE ${BANJO_HOT_SOURCES} APPEND PROPERTY COMPILE_OPTIONS -fomit-frame-pointer)
     endif()
 endif()
 foreach(_banjo_target renut_recomp renut)
@@ -480,7 +510,7 @@ if(REXGLUE_PLATFORM_SWITCH)
         endif()
         if(_banjo_inline_options AND TARGET renut_recomp)
             target_compile_options(renut_recomp PRIVATE ${_banjo_inline_options})
-            set_property(SOURCE src/cpu/banjo_hot_guest.cpp APPEND PROPERTY COMPILE_OPTIONS ${_banjo_inline_options})
+            set_property(SOURCE ${BANJO_HOT_SOURCES} APPEND PROPERTY COMPILE_OPTIONS ${_banjo_inline_options})
         endif()
     elseif(BANJO_PGO)
         message(FATAL_ERROR "BANJO_PGO must be empty, generate or use (got ${BANJO_PGO})")

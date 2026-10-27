@@ -23,6 +23,10 @@
 
 #include <switch.h>
 
+// banjo-nx (2026-10-27): the system core (core/threading_switch.h; declared here, that header clashes with switch.h).
+extern "C" bool RexSwitchMoveCurrentThreadToSystemCore(int priority);
+extern "C" void RexSwitchSampleCoreIdle(void);
+
 // Passive counters: the audio thread neither writes reports nor pauses the game.
 extern "C" void RexSwitchPerfAdd(unsigned id, u64 value);
 extern "C" void RexSwitchPerfMax(unsigned id, u64 value);
@@ -363,12 +367,17 @@ void SwitchAudioSystem::PumpTick() {
 
 void SwitchAudioSystem::OutputThreadMain() {
   Output& output = *output_;
+  // banjo-nx (2026-10-27): on the system core when the process has it (threading_switch.h, banjo_system_core), above
+  // the Audio Worker and the XMA Decoder there (0x2B; Horizon does not preempt between equal priorities). It also
+  // samples that core's idle time for the report.
+  const bool on_system_core = RexSwitchMoveCurrentThreadToSystemCore(kOutputThreadPriority - 1);
   for (size_t i = 0; i < kBufferCount; ++i) {
     FillAndAppend(i);
   }
   const u64 interval = armNsToTicks(kPumpIntervalNs);
   u64 deadline = armGetSystemTick() + interval;
   while (output.running.load(std::memory_order_relaxed)) {
+    if (on_system_core) RexSwitchSampleCoreIdle();  // banjo-nx (2026-10-27): at most every 100 ms
     u64 timeout_ns = kWaitTimeoutNs;
     if (output.pump) {
       const u64 now = armGetSystemTick();

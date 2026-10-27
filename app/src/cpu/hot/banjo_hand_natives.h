@@ -35,17 +35,22 @@
 // read every other source's addresses as hooked functions; these four are hooked, by app/src/cpu/hot/localized.txt).
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
 #include <rex/ppc/context.h>
+
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 #include "cpu/banjo_hot_common.h"
 
 namespace banjo::hand {
 
 // The natives' own keys (banjo_hot_guest.cpp), each read once: 0 not read yet, 1 off, 2 on.
-enum : uint32_t { kMemcpy = 0, kMemset = 1, kConstants = 2, kFlush = 3, kNatives = 4 };
+enum : uint32_t { kMemcpy = 0, kMemset = 1, kConstants = 2, kFlush = 3, kAudioFilter = 4, kXAudioMix = 5, kNatives = 6 };
 extern uint8_t g_state[kNatives];
 uint8_t Init(uint32_t which);
 [[gnu::always_inline]] inline bool On(uint32_t which) {
@@ -459,5 +464,271 @@ template <class S>
   return flush::Runs<S, 64, 176>(ctx, base, s);
 }
 }  // namespace n_8222D0E8
+
+// XAudio's per-voice state-variable filter, sub_82B0DCB8 (banjo-nx 2026-10-23, the user's request: hand-optimise the
+// audio thread; the hottest guest function of that thread, a fifth of it in the console's city profile).
+//   r3 = the filter, r4 = the voice's frame buffer. It calls XAudioFrameBuffer::GetProcessingData (0x826662E0), which
+//   copies the buffer's words +12, +16, +20 to its stack frame (+80): byte +81 is the channel count, +88 the samples
+//   (256 floats a channel, a channel every 1024 bytes). With byte filter+24 set, the six channels' state (low at
+//   +32, band at +56, a float each) is zeroed first. Then for each channel and sample, with q at +28, frequency at
+//   +80 and the mode at +20 (> 0 high-pass, < 0 low-pass, 0 band-pass):
+//     d = x - low; high = -(fma(q, band, -d)); band += freq * high; low += freq * band; x = the mode's output
+//   each a float result of a double multiply-add (as the generated code computes fnmsubs / fmadds).
+// The original stores band, low and the sample at every sample and reloads q, the frequency, the mode and the buffer
+// pointer every time, each a byte-swapped guest access (nothing it writes can alias them: declined otherwise). Here
+// the state stays in registers and the channels run side by side, a scalar chain each (ChannelsN). Bit-identical: the
+// same double operations in the same order, rounded to float where the original rounds (-0.0 included: the negation
+// follows the multiply-add as there); flush to zero off as the original sets it.
+// Stores made as the original's (its frame: LR save, the save slot of r31, a local of the copy so 0, the back chain,
+// GetProcessingData's three words), so the guard compares everything. Declined: no buffer object, more than 6
+// channels, a buffer that overlaps the filter's words or the frame, a range that is not one stretch of memory.
+// Scratch not reproduced (hand.txt): r4-r12, f0, f10-f13. r1 ends as it came, r3 = 0.
+namespace audio_filter {
+
+[[gnu::always_inline]] inline uint32_t Load32(uint8_t* base, uint32_t a) {
+  uint32_t v;
+  std::memcpy(&v, ::banjo::hot::Raw(base, a), 4);
+  return __builtin_bswap32(v);
+}
+[[gnu::always_inline]] inline float LoadF(const uint8_t* p) {
+  uint32_t v;
+  std::memcpy(&v, p, 4);
+  v = __builtin_bswap32(v);
+  float f;
+  std::memcpy(&f, &v, 4);
+  return f;
+}
+[[gnu::always_inline]] inline void StoreF(uint8_t* p, float f) {
+  uint32_t v;
+  std::memcpy(&v, &f, 4);
+  v = __builtin_bswap32(v);
+  std::memcpy(p, &v, 4);
+}
+[[gnu::always_inline]] inline void Store32(uint8_t* p, uint32_t v) {
+  v = __builtin_bswap32(v);
+  std::memcpy(p, &v, 4);
+}
+[[gnu::always_inline]] inline bool Overlap(uint32_t a, uint32_t n, uint32_t b, uint32_t m) {
+  return uint64_t(a) < uint64_t(b) + m && uint64_t(b) < uint64_t(a) + n;
+}
+
+template <int kMode, uint32_t N>
+[[gnu::always_inline]] inline void ChannelsN(uint8_t* samples, float q, float freq, float* low, float* band) {
+  float l[N], b[N];
+  for (uint32_t c = 0; c < N; ++c) {
+    l[c] = low[c];
+    b[c] = band[c];
+  }
+  // banjo-nx (2026-10-23, batch 6): high = -h with h = float(fma(q, band, -d)) (rounding is symmetric: float(-x) is
+  // -float(x)), and freq * high = (-freq) * h exactly, so the band update takes h and -freq: the negation leaves the
+  // chain each sample waits on (one instruction of its latency). The same values, -0.0 included; a NaN's sign is the
+  // only bit that can differ, as with the reverb (real audio has none).
+  const double dq = double(q), dfreq = double(freq), ndfreq = -dfreq;
+  for (uint32_t i = 0; i < 256; ++i) {
+    for (uint32_t c = 0; c < N; ++c) {
+      uint8_t* at = samples + 1024u * c + 4u * i;
+      const double d = double(LoadF(at) - l[c]);                        // fsubs
+      const float h = float(std::fma(dq, double(b[c]), -d));            // fnmsubs before its negation
+      b[c] = float(std::fma(ndfreq, double(h), double(b[c])));          // fmadds: freq * high + band
+      l[c] = float(std::fma(dfreq, double(b[c]), double(l[c])));        // fmadds
+      StoreF(at, kMode > 0 ? -h : kMode < 0 ? l[c] : b[c]);
+    }
+  }
+  for (uint32_t c = 0; c < N; ++c) {
+    low[c] = l[c];
+    band[c] = b[c];
+  }
+}
+
+template <int kMode>
+[[gnu::always_inline]] inline void Channels(uint8_t* samples, uint32_t nch, float q, float freq, float* low,
+                                            float* band) {
+  switch (nch) {
+  case 1: ChannelsN<kMode, 1>(samples, q, freq, low, band); break;
+  case 2: ChannelsN<kMode, 2>(samples, q, freq, low, band); break;
+  case 3: ChannelsN<kMode, 3>(samples, q, freq, low, band); break;
+  case 4: ChannelsN<kMode, 4>(samples, q, freq, low, band); break;
+  case 5: ChannelsN<kMode, 5>(samples, q, freq, low, band); break;
+  default: ChannelsN<kMode, 6>(samples, q, freq, low, band); break;
+  }
+}
+
+template <class S>
+[[gnu::always_inline]] inline bool Run(PPCContext& __restrict ctx, uint8_t* base, [[maybe_unused]] S& s) {
+  if (!On(kAudioFilter)) [[unlikely]] return false;
+  const uint32_t self = ctx.r3.u32, fb = ctx.r4.u32, sp = ctx.r1.u32, frame = sp - 112u;
+  if (fb == 0 || self > 0xFFFFE000u || fb > 0xFFFFE000u || sp > 0xFFFFE000u || sp < 0x1000u) [[unlikely]]
+    return false;
+  // GetProcessingData's three words (+12, +16, +20 of the buffer object).
+  const uint32_t w0 = Load32(base, fb + 12), w1 = Load32(base, fb + 16), samples = Load32(base, fb + 20);
+  const uint32_t nch = (w0 >> 16) & 0xFFu;  // byte +81 of the frame: the word's second byte
+  if (nch > 6) [[unlikely]] return false;
+  if (::banjo::hot::PhysOff(self + 20) != ::banjo::hot::PhysOff(self + 83) ||
+      ::banjo::hot::PhysOff(frame) != ::banjo::hot::PhysOff(sp - 1))
+    [[unlikely]] return false;
+  const uint32_t bytes = 1024u * nch;
+  if (nch) {
+    if (samples > 0xFFFFFFFFu - bytes || ::banjo::hot::PhysOff(samples) != ::banjo::hot::PhysOff(samples + bytes - 1) ||
+        Overlap(samples, bytes, self + 20, 64) || Overlap(samples, bytes, frame, 112))
+      [[unlikely]] return false;
+  }
+  s.Hand(kAudioFilter, nch);
+  // The frame, as the original makes it (each store unless the build elides it).
+#if !defined(REX_LR_MOVES_ELIDE)
+  if (!s.Note(sp - 8, 4)) [[unlikely]] return true;
+  Store32(::banjo::hot::Raw(base, sp - 8), uint32_t(ctx.lr));
+#endif
+#if !defined(REX_NV_SAVES_ELIDE)
+  if (!s.Note(sp - 16, 8)) [[unlikely]] return true;
+  std::memset(::banjo::hot::Raw(base, sp - 16), 0, 8);  // r31 is a local of the copy: its save writes 0
+#endif
+#if !defined(REX_BACK_CHAIN_ELIDE)
+  if (!s.Note(frame, 4)) [[unlikely]] return true;
+  Store32(::banjo::hot::Raw(base, frame), sp);
+#endif
+  if (!s.Note(frame + 80, 12)) [[unlikely]] return true;
+  ::banjo::hot::Card(base, frame + 80, 12);
+  uint8_t* const out = ::banjo::hot::Raw(base, frame + 80);
+  Store32(out, w0);
+  Store32(out + 4, w1);
+  Store32(out + 8, samples);
+  uint8_t* const f = ::banjo::hot::Raw(base, self);
+  float low[6], band[6];
+  if (f[24] != 0) {
+    ctx.fpscr.disableFlushMode();
+    if (!s.Note(self + 32, 48)) [[unlikely]] return true;
+    ::banjo::hot::Card(base, self + 32, 48);
+    std::memset(f + 32, 0, 48);  // the constant at 0x8213AE04: 0.0f
+  }
+  if (nch) {
+    ctx.fpscr.disableFlushMode();
+    for (uint32_t c = 0; c < nch; ++c) {
+      low[c] = LoadF(f + 32 + 4 * c);
+      band[c] = LoadF(f + 56 + 4 * c);
+    }
+    const float q = LoadF(f + 28), freq = LoadF(f + 80);
+    const int32_t mode = int32_t(Load32(base, self + 20));
+    if (!s.Note(samples, bytes) || !s.Note(self + 32, 4 * nch) || !s.Note(self + 56, 4 * nch)) [[unlikely]]
+      return true;
+    ::banjo::hot::Card(base, samples, bytes);
+    ::banjo::hot::Card(base, self + 32, 4 * nch);
+    ::banjo::hot::Card(base, self + 56, 4 * nch);
+    uint8_t* const p = ::banjo::hot::Raw(base, samples);
+    if (mode > 0)
+      Channels<1>(p, nch, q, freq, low, band);
+    else if (mode < 0)
+      Channels<-1>(p, nch, q, freq, low, band);
+    else
+      Channels<0>(p, nch, q, freq, low, band);
+    for (uint32_t c = 0; c < nch; ++c) {
+      StoreF(f + 32 + 4 * c, low[c]);
+      StoreF(f + 56 + 4 * c, band[c]);
+    }
+  }
+  ctx.r3.u64 = 0;
+  return true;
+}
+
+}  // namespace audio_filter
+
+namespace n_82B0DCB8 {
+template <class S>
+[[gnu::always_inline]] inline bool Native(PPCContext& __restrict ctx, uint8_t* base, S& s) {
+  return audio_filter::Run(ctx, base, s);
+}
+}  // namespace n_82B0DCB8
+
+// XAudio's ramped channel mix, rex_XAudioMixFrameBufferChannel (banjo-nx 2026-10-23, batch 6, the user's request: the
+// audio mixer further): the loop of XAUDIO::CRouterEffect::Process, a sixth of the audio thread in the console's city
+// profile. r3 = the destination channel, r4 = the source channel (256 big-endian floats each), r5 = the gain at the
+// first sample (a vector, address rounded down to 16), r6 = the gain step per sample (likewise). The original (hand
+// written VMX): saves r31 at -8(r1) (a local of the copy, so 0: the save writes 0 unless the build elides it), sets the
+// flush-to-zero mode, makes the four lanes' gains g0 = gain, g1 = g0 + s, g2 = g0 + 2s, g3 = g0 + (2s + s) and the step
+// 4s = 2s + 2s, then for 16 blocks of 64 bytes loads the source's four vectors and the destination's four, computes
+// dst_k = src_k * g_k + dst_k (vmaddfp as the generated code makes it: a multiply, then an add) and stores the four, and
+// adds 4s to each gain. Here: the same operations on the same values, a block at a time in the same order (all of a
+// block's loads before its stores: the same result where the channels overlap), each guest float byte-reversed once,
+// the destination's store cards marked once for its 1024 bytes instead of at each vector store. Declined (the copy
+// runs): a channel not 16-byte aligned, a range that is not one stretch of memory.
+// Scratch not reproduced (hand.txt): r3-r10, v0-v13. r1 ends as it came.
+namespace n_rex_XAudioMixFrameBufferChannel {
+
+template <class S>
+[[gnu::always_inline]] inline bool Native(PPCContext& __restrict ctx, uint8_t* base, [[maybe_unused]] S& s) {
+  if (!On(kXAudioMix)) [[unlikely]] return false;
+  const uint32_t dst = ctx.r3.u32, src = ctx.r4.u32, gain = ctx.r5.u32 & ~15u, step = ctx.r6.u32 & ~15u;
+  if (((dst | src) & 15u) || !detail::Straight(dst, 1024) || !detail::Straight(src, 1024) ||
+      !detail::Straight(gain, 16) || !detail::Straight(step, 16)) [[unlikely]]
+    return false;
+  s.Hand(kXAudioMix, 256);
+#if !defined(REX_NV_SAVES_ELIDE)
+  {
+    const uint32_t slot = ctx.r1.u32 - 8u;  // std r31,-8(r1): the local r31, zero
+    if (!s.Note(slot, 8)) [[unlikely]] return true;
+    std::memset(::banjo::hot::Raw(base, slot), 0, 8);
+  }
+#endif
+  ctx.fpscr.enableFlushMode();
+  if (!s.Note(dst, 1024)) [[unlikely]] return true;
+  ::banjo::hot::Card(base, dst, 1024);
+  uint8_t* d = ::banjo::hot::Raw(base, dst);
+  const uint8_t* p = ::banjo::hot::Raw(base, src);
+#if defined(__aarch64__)
+  auto load = [](const uint8_t* at) { return vreinterpretq_f32_u8(vrev32q_u8(vld1q_u8(at))); };
+  auto store = [](uint8_t* at, float32x4_t v) { vst1q_u8(at, vrev32q_u8(vreinterpretq_u8_f32(v))); };
+  const float32x4_t sv = load(::banjo::hot::Raw(base, step));
+  const float32x4_t s2 = vaddq_f32(sv, sv);
+  float32x4_t g0 = load(::banjo::hot::Raw(base, gain));
+  float32x4_t g1 = vaddq_f32(g0, sv);
+  float32x4_t g2 = vaddq_f32(g0, s2);
+  float32x4_t g3 = vaddq_f32(g0, vaddq_f32(s2, sv));
+  const float32x4_t s4 = vaddq_f32(s2, s2);
+  for (uint32_t block = 0; block < 16; ++block, d += 64, p += 64) {
+    const float32x4_t a0 = load(p), a1 = load(p + 16), a2 = load(p + 32), a3 = load(p + 48);
+    const float32x4_t b0 = load(d), b1 = load(d + 16), b2 = load(d + 32), b3 = load(d + 48);
+    store(d, vaddq_f32(vmulq_f32(a0, g0), b0));
+    store(d + 16, vaddq_f32(vmulq_f32(a1, g1), b1));
+    store(d + 32, vaddq_f32(vmulq_f32(a2, g2), b2));
+    store(d + 48, vaddq_f32(vmulq_f32(a3, g3), b3));
+    g0 = vaddq_f32(g0, s4);
+    g1 = vaddq_f32(g1, s4);
+    g2 = vaddq_f32(g2, s4);
+    g3 = vaddq_f32(g3, s4);
+  }
+#else
+  // PC: lane by lane, each a float multiply then an add (the build does not contract them).
+  auto load = [](const uint8_t* at, float out[4]) {
+    for (uint32_t k = 0; k < 4; ++k)
+      out[k] = audio_filter::LoadF(at + 4 * k);
+  };
+  float sv[4], g[4][4], s4[4];
+  load(::banjo::hot::Raw(base, step), sv);
+  load(::banjo::hot::Raw(base, gain), g[0]);
+  for (uint32_t k = 0; k < 4; ++k) {
+    const float s2 = sv[k] + sv[k];
+    g[1][k] = g[0][k] + sv[k];
+    g[2][k] = g[0][k] + s2;
+    g[3][k] = g[0][k] + (s2 + sv[k]);
+    s4[k] = s2 + s2;
+  }
+  for (uint32_t block = 0; block < 16; ++block, d += 64, p += 64) {
+    float a[4][4], b[4][4];
+    for (uint32_t v = 0; v < 4; ++v) {
+      load(p + 16 * v, a[v]);
+      load(d + 16 * v, b[v]);
+    }
+    for (uint32_t v = 0; v < 4; ++v) {
+      for (uint32_t k = 0; k < 4; ++k) {
+        const float product = a[v][k] * g[v][k];
+        audio_filter::StoreF(d + 16 * v + 4 * k, product + b[v][k]);
+        g[v][k] = g[v][k] + s4[k];
+      }
+    }
+  }
+#endif
+  return true;
+}
+
+}  // namespace n_rex_XAudioMixFrameBufferChannel
 
 }  // namespace banjo::hand

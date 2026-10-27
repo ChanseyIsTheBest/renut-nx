@@ -31,6 +31,7 @@ struct HostSurface;
 
 struct HostTexture {
   u32 guest_va = 0;
+  u32 base_page = 0;  // banjo-nx (2026-10-27): its fetch constant's base page as made (BumpTextureBindings)
   u32 desc[6] = {};  // the header fetch constant bits that define the data
 
   TextureDimension dimension = TextureDimension::Tex2D;
@@ -203,10 +204,48 @@ struct BindEffects {
   // banjo-nx (2026-10-19, render-thread proposal 3): the bind went through a depth resolve's words (a view of them, or
   // a copy; EnsureDepthWordsLocked), which every depth resolve can change: such a memo entry also holds g_depth_epoch.
   bool depth_source = false;
+  // banjo-nx (2026-10-27, render thread night): transition[0] is the fetch's own texture (TextureSlot), not a resolve's
+  // alias or depth words: the one the frame's content check is for (RefreshBindingLocked).
+  bool slot_texture = false;
 };
+// banjo-nx (2026-10-27, render thread night): BindTextureLocked's work for a binding a memo kept from an earlier frame of
+// the same texture epoch, with the same header and fetch words: its texture used this frame and, filled from guest
+// memory, the frame's content check (an upload if it changed). False for bindings it does not cover (the caller binds).
+bool RefreshBindingLocked(u32 texture_va, const TextureFetch &device_fetch, const BindEffects &fx);
+// banjo-nx (2026-10-27, render thread night, A/B 35): what g_texture_epoch counts, by the fetch's base page and by the
+// header's address (hashed into 4,096 buckets each): a texture made or retired, a resolve destination or depth words
+// entry of a page, a depth hand-over's state. A memo entry of a binding that went through no depth words and no
+// hand-over is valid while its page's and address's counts are (TextureBindingEpoch), not only while nothing changed
+// anywhere: a hand-over or a new resolve destination each frame made every binding of the next frame bind again.
+constexpr u32 kTextureEpochBuckets = 4096;
+extern uint32_t g_texture_page_epochs[kTextureEpochBuckets];
+extern uint32_t g_texture_va_epochs[kTextureEpochBuckets];
+inline u32 TextureEpochBucket(u32 key) { return (key * 0x9E3779B1u) >> 20; }
+// banjo-nx (2026-10-27, Phase A: texture objects): raised with every bucket either count raises, so an answer whose
+// epoch was checked at this generation still holds without reading the buckets (render/draw.cpp TextureObject).
+extern uint64_t g_texture_bind_gen;
+inline void BumpTexturePage(u32 page) {
+  ++g_texture_page_epochs[TextureEpochBucket(page)];
+  ++g_texture_bind_gen;
+}
+inline void BumpTextureVa(u32 va) {
+  ++g_texture_va_epochs[TextureEpochBucket(va)];
+  ++g_texture_bind_gen;
+}
+inline void BumpTextureBindings(const HostTexture &t) {
+  BumpTexturePage(t.base_page);
+  BumpTextureVa(t.guest_va);
+}
+inline uint64_t TextureBindingEpoch(u32 page, u32 va) {
+  return uint64_t(g_texture_page_epochs[TextureEpochBucket(page)]) << 32 | g_texture_va_epochs[TextureEpochBucket(va)];
+}
 // Bumped by everything BindTextureLocked reads besides its arguments and the guest header: a texture created, retired
 // or uploaded, a resolve destination set (every resolve), depth words copied or a view of them made.
 extern uint64_t g_texture_epoch;
+// banjo-nx (2026-10-26, the record-time draw path's round 4): raised by every layout change TransitionTextureLocked,
+// TransitionSurfaceLocked and TransitionDepthImageLocked make (render/textures.cpp, render/surfaces.cpp): while it, the
+// texture frame and epochs and the surface epoch stay the same, a bound texture's or target's layout is the one it was.
+extern uint64_t g_layout_epoch;
 // banjo-nx (2026-10-19, render-thread proposal 3): bumped by every depth resolve (GetDepthResolveTextureLocked).
 // g_texture_epoch is now bumped only by what changes a binding: a texture made or retired, a view or slot made, a
 // resolve destination or depth words entry that changes, depth words copied, a depth hand-over's state; no longer by
@@ -224,6 +263,8 @@ void DepthHandOverForgetLocked(HostTexture &dest);
 // pages[1]/sizes[1] its mip chain (a page is 4 KiB of physical memory; a zero
 // page or size is absent).
 void TextureGuestExtent(const TextureFetch &fetch, uint32_t pages[2], uint32_t sizes[2]);
+// banjo-nx (2026-10-23, render-thread round): the memo line TextureGuestExtent will read for this fetch constant.
+void PrefetchTextureGuestExtent(const TextureFetch &fetch);
 
 // Host texture for a resolve into the guest texture, created as a color
 // target in 'format' when there is none yet (or the existing one does not

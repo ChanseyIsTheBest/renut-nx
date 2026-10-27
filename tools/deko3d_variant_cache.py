@@ -295,6 +295,10 @@ def main():
     ap.add_argument('--blend-skip', action='store_true',
                     help="keep the lists' blend skip (banjo_renut_blend_skip = true); by default it is left out")
     ap.add_argument('--jobs', type=int, default=max(1, (os.cpu_count() or 4) - 2))
+    ap.add_argument('--export-variants', default=None,
+                    help="write every variant as '<vs|ps>_<HASH> <id>=<value>,...' (the constants that differ from the "
+                         "shader's defaults, ids ascending): the banjo-nx installer's list. Metadata only (shader hashes "
+                         "and numbers); each line is checked to give its key again from the GLSL")
     ap.add_argument('--runtime-log', action='append', default=[],
                     help="a console's renut log: the run-time variants it names (base size and hash) are added")
     a = ap.parse_args()
@@ -467,6 +471,28 @@ def main():
     json.dump(dict(memo, **memo_new), open(memo_path + '.tmp', 'w', encoding='utf-8'))
     os.replace(memo_path + '.tmp', memo_path)
 
+    if a.export_variants:
+        # 2026-10-22 (the banjo-nx installer, which compiles the variants in the player's browser): names[key] is
+        # "<file> <the #define lines>"; written as ids and values, checked against the key.
+        define_re = re.compile(r'#define SPIRV_CROSS_CONSTANT_ID_(\d+) (\d+)u\n')
+        lines_out = []
+        for key in sorted(todo):
+            name = names.get(key)
+            if name is None:
+                sys.exit(f'deko3d_variant_cache: --export-variants: no name for {key:016X}')
+            stem, _, rest = name.partition('.glsl ')
+            rest = rest.replace(' (generic)', '')
+            pairs = define_re.findall(rest)
+            defines = ''.join(f'#define SPIRV_CROSS_CONSTANT_ID_{i} {v}u\n' for i, v in pairs)
+            if defines != rest:
+                sys.exit(f'deko3d_variant_cache: --export-variants: unexpected defines for {stem}: {rest!r}')
+            glsl = open(os.path.join(a.glsl, stem + '.glsl'), encoding='utf-8').read()
+            if fnv1a64(variant_text(glsl, defines).encode('utf-8')) != key:
+                sys.exit(f'deko3d_variant_cache: --export-variants: {stem} {pairs} does not give {key:016X}')
+            lines_out.append(f'{stem} ' + ','.join(f'{i}={v}' for i, v in pairs))
+        with open(a.export_variants, 'w', encoding='utf-8', newline='\n') as f:
+            f.write('\n'.join(lines_out) + '\n')
+        print(f'deko3d_variant_cache: {len(lines_out)} variants written to {a.export_variants} (every key checked)')
     entries = read_cache(a.merge)
     if a.dry_run:
         known = sum(1 for key in entries if key in todo)

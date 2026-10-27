@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cinttypes>
 #include <cstdarg>
 #include <cstdio>
@@ -87,6 +88,8 @@ namespace plume {
 
     static Deko3DShaderCacheLookup g_cacheLookup;
     static Deko3DShaderCacheStore g_cacheStore;
+    static Deko3DShaderCacheContains g_cacheContains;  // banjo-nx (2026-10-23)
+    void SetDeko3DShaderCacheContains(Deko3DShaderCacheContains contains) { g_cacheContains = std::move(contains); }
     void SetDeko3DShaderCache(Deko3DShaderCacheLookup lookup, Deko3DShaderCacheStore store) {
         g_cacheLookup = std::move(lookup);
         g_cacheStore = std::move(store);
@@ -422,13 +425,21 @@ namespace plume {
         uint32_t flags = DkMemBlockFlags_GpuCached;
         // Uploads written at cache speed and published by unmap(writtenRange) (HOST_CACHED, as the Vulkan back end);
         // everything else uncached for the CPU, so the GPU sees the CPU's writes and the CPU the GPU's after a fence.
-        cpuCached = (desc.heapType == RenderHeapType::UPLOAD) && (desc.flags & RenderBufferFlag::HOST_CACHED);
+        // banjo-nx (2026-10-23, batch 6): readback buffers that ask for HOST_CACHED too (the memexport readback): the CPU
+        // copied the GPU's results out of uncached memory a load at a time (2.8 % of the render thread in the city);
+        // cached, map(readRange) drops the range's lines first, so the reads see what the GPU wrote.
+        cpuCached = (desc.heapType == RenderHeapType::UPLOAD || desc.heapType == RenderHeapType::READBACK) &&
+                    (desc.flags & RenderBufferFlag::HOST_CACHED);
         flags |= cpuCached ? DkMemBlockFlags_CpuCached : DkMemBlockFlags_CpuUncached;
         block = device->makeBlock(uint32_t(size), flags, "buffer");
         if (!block)
             return;
         gpu = dkMemBlockGetGpuAddr(block);
         cpu = static_cast<uint8_t *>(dkMemBlockGetCpuAddr(block));
+        // No line of the memory (from whatever used it before) may be dirty in the CPU's caches: one written back over the
+        // GPU's results later would lose them. The CPU never writes a readback buffer after this.
+        if (cpuCached && desc.heapType == RenderHeapType::READBACK)
+            armDCacheFlush(cpu, size_t(size));
         g_deko3dStats.bufferBytes += size;
         {
             std::lock_guard<std::mutex> lock(device->bufferMutex);
@@ -447,10 +458,24 @@ namespace plume {
         }
     }
 
-    void *Deko3DBuffer::map(uint32_t, const RenderRange *) { return cpu; }
+    void *Deko3DBuffer::map(uint32_t, const RenderRange *readRange) {
+        // banjo-nx (2026-10-23, batch 6): a CPU-cached readback buffer: the lines to read dropped (dc civac; clean ones,
+        // nothing is written back), so they come from memory, where the GPU's writes are once its fence passed. A line
+        // the prefetcher brought in while the GPU was still writing goes with them.
+        if (cpuCached && cpu && desc.heapType == RenderHeapType::READBACK) {
+            uint64_t begin = 0, end = desc.size;
+            if (readRange != nullptr) {
+                begin = readRange->begin;
+                end = std::min<uint64_t>(readRange->end, desc.size);
+            }
+            if (end > begin)
+                armDCacheFlush(cpu + begin, size_t(end - begin));
+        }
+        return cpu;
+    }
 
     void Deko3DBuffer::unmap(uint32_t, const RenderRange *writtenRange) {
-        if (!cpuCached || !block)
+        if (!cpuCached || !block || desc.heapType == RenderHeapType::READBACK)
             return;
         uint64_t begin = 0, end = desc.size;
         if (writtenRange != nullptr) {
@@ -894,7 +919,19 @@ namespace plume {
         return true;
     }
 
+    // banjo-nx (2026-10-23): boost mode while a draw waits for a compile (boostBegin / boostEnd, by compile()).
+    static std::mutex g_boostMutex;
+    static int g_boostWaiters = 0;
+    static bool g_boostActive = false, g_boostRefused = false;
+    static uint64_t g_boostSince = 0;
+
     Deko3DDevice::~Deko3DDevice() {
+        {
+            std::lock_guard<std::mutex> lock(g_boostMutex);  // banjo-nx (2026-10-23): never left in boost mode
+            if (g_boostActive)
+                appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
+            g_boostActive = false;
+        }
         if (queue)
             dkQueueWaitIdle(queue);
         {
@@ -1215,6 +1252,10 @@ namespace plume {
             shader->defaultDksh.assign(reinterpret_cast<const uint8_t *>(glsl) + header.glslSize,
                                        reinterpret_cast<const uint8_t *>(glsl) + header.glslSize + header.dkshSize);
         shader->usage = parseUsage(*shader->glsl);
+        // banjo-nx (2026-10-27): a vertex shader whose text never names gl_VertexID cannot read it, in any variant (a
+        // variant's defines only remove code): its draws may give their base vertex to the draw (Renut's whole-buffer
+        // draws), the vertex index it does not read being the only thing that differs.
+        shader->usage.readsVertexId = shader->stage != DkStage_Vertex || shader->glsl->find("gl_VertexID") != std::string::npos;
         // banjo-nx (2026-10-18): the varying locations it declares ("layout(location = N) in / out" lines).
         {
             const char *key = "\nlayout(location = ";
@@ -1254,10 +1295,31 @@ namespace plume {
         }
         if (g_deko3dOptions.compileCore >= 0)
             svcSetThreadCoreMask(CUR_THREAD_HANDLE, g_deko3dOptions.compileCore, 1u << g_deko3dOptions.compileCore);
-        if (g_deko3dOptions.compilePriority > 0)
-            svcSetThreadPriority(CUR_THREAD_HANDLE, u32(g_deko3dOptions.compilePriority));
-        logf("uam thread: core %d, priority 0x%X (a waiting thread lends its own)", g_deko3dOptions.compileCore,
-             g_deko3dOptions.compilePriority);
+        // banjo-nx (2026-10-23): the priority the process may give (the console's profile showed this thread at 0x3B in
+        // every report: 0x3E is below an application's lowest, the game threads' 0x3B, and the kernel refused it while
+        // the log said 0x3E). The asked one, or the lowest allowed above it; what the kernel took is logged.
+        s32 asked = g_deko3dOptions.compilePriority, priority = -1;
+        u64 allowed = 0;
+        Result setResult = 0;
+        if (asked > 0) {
+            if (R_SUCCEEDED(svcGetInfo(&allowed, InfoType_PriorityMask, CUR_PROCESS_HANDLE, 0)) && allowed != 0) {
+                s32 p = std::min<s32>(asked, 63);
+                while (p > 0 && !(allowed & (1ull << p)))
+                    p--;
+                asked = p > 0 ? p : asked;
+            }
+            setResult = svcSetThreadPriority(CUR_THREAD_HANDLE, u32(asked));
+        }
+        svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+        {
+            std::lock_guard<std::mutex> lock(compileMutex);
+            compileBasePriority = priority;
+            compileAppliedPriority = priority;
+        }
+        logf("uam thread: core %d, priority 0x%X (0x%X asked, 0x%X given: result 0x%X, allowed mask 0x%016" PRIx64
+             "; a waiting thread lends its own); background compiles use at most %d%% of the core",
+             g_deko3dOptions.compileCore, uint32_t(priority), uint32_t(g_deko3dOptions.compilePriority), uint32_t(asked),
+             uint32_t(setResult), allowed, g_deko3dOptions.backgroundCompileShare);
         uam::init(true);
         // Self-test (SwitchWakerHD's): a small shader now, which also builds the resident frontend's tables before the
         // game's first variant.
@@ -1283,6 +1345,19 @@ namespace plume {
                     break;
                 job = compileQueue.front();
                 compileQueue.erase(compileQueue.begin());
+            }
+            // banjo-nx (2026-10-23, asyncCacheReads): a variant the cache file holds, read here (the drawing thread
+            // went on with the generic variant). No rest after it: it is a read, not a compile.
+            if (job->async && job->cached) {
+                if (g_cacheLookup && g_cacheLookup(job->request.key, job->ownDksh)) {
+                    g_deko3dStats.shaderCacheHits++;
+                    g_deko3dStats.variantCacheReadsBackground++;
+                    job->ok = true;
+                    finishAsync(job);
+                    delete job;
+                    continue;
+                }
+                job->ownDksh.clear();  // gone from the file (a failed write): compiled as any other
             }
             // banjo-nx (2026-10-21): a background job's text, made now from the shared one (one at a time).
             if (job->async) {
@@ -1312,9 +1387,12 @@ namespace plume {
                 }
                 // banjo-nx (2026-10-20): every run-time compile's specialization (its constants), so the variants
                 // a cache lacks can be found (tools/deko3d_variant_cache.py rebuilds their keys from these).
-                static uint32_t named = 0;
-                if (named < 64) {
-                    named++;
+                // 2026-10-23: its kind ahead of "run-time variant" (tools/deko3d_variant_cache.py --runtime-log
+                // searches from there); every compile a draw waits for is named (up to 512), the others the first 64.
+                static uint32_t named = 0, namedBlocking = 0;
+                const bool drawBlocked = !job->async && job->drawWaits;
+                if (drawBlocked ? namedBlocking < 512 : named < 64) {
+                    (drawBlocked ? namedBlocking : named)++;
                     // The variant's own defines: the lines plume inserted after the first one (2026-10-20: only those;
                     // the shader's defaults further down are not logged). And which shader: the text without them,
                     // its size and FNV-1a 64, which tools/deko3d_variant_cache.py --runtime-log matches to a GLSL file
@@ -1341,7 +1419,8 @@ namespace plume {
                     };
                     mix(0, body);
                     mix(rest, src.size());
-                    logf("uam: run-time variant (stage %u, %zu bytes, base %zu bytes %016" PRIx64 "): %s",
+                    logf("uam: %s run-time variant (stage %u, %zu bytes, base %zu bytes %016" PRIx64 "): %s",
+                         job->async ? "background" : job->drawWaits ? "BLOCKING (a draw waits)" : "blocking (prebuild waits)",
                          uint32_t(job->stage), src.size(), body + (src.size() - rest), base, defines.c_str());
                 }
             }
@@ -1356,6 +1435,20 @@ namespace plume {
                 job->ownLog = std::move(r.log);
                 finishAsync(job);
                 delete job;
+                // banjo-nx (2026-10-23): at most backgroundCompileShare % of the core for background compiles (the
+                // thread cannot go below the game's threads, see compileWorker): a rest in proportion to the compile,
+                // at most 8 s, ended by a compile a thread waits for (those go ahead of the background ones).
+                const int share = g_deko3dOptions.backgroundCompileShare;
+                if (share > 0 && share < 100) {
+                    const uint64_t t1 = armTicksToNs(armGetSystemTick());
+                    const uint64_t rest = std::min<uint64_t>((t1 - t0) * uint64_t(100 - share) / uint64_t(share),
+                                                             8000000000ull);
+                    std::unique_lock<std::mutex> lock(compileMutex);
+                    compileWake.wait_for(lock, std::chrono::nanoseconds(rest), [this] {
+                        return compileStop || (!compileQueue.empty() && !compileQueue.front()->async);
+                    });
+                    g_deko3dStats.backgroundRestNs += armTicksToNs(armGetSystemTick()) - t1;
+                }
                 continue;
             }
             {
@@ -1373,34 +1466,87 @@ namespace plume {
         compileDone.notify_all();
     }
 
+    // banjo-nx (2026-10-21): set on threads that do not draw (Deko3DSetBackgroundThread): the pipeline prebuild.
+    static thread_local bool t_backgroundThread = false;
+
+    // banjo-nx (2026-10-23, the user's request, Deko3DOptions::compileWaitBoost): while a drawing thread waits for a
+    // compile (the game is stopped), the console in boost mode: CPU 1785 MHz (the system drops the GPU to 76.8 MHz,
+    // which has no new work while the frame waits), back to normal the moment the last such compile is done. Compiles
+    // in the background, and those a background thread waits for, never boost. A refusal (an applet, not an
+    // application) is logged once and not tried again.
+    static void boostBegin() {
+        std::lock_guard<std::mutex> lock(g_boostMutex);
+        if (g_boostWaiters++ > 0 || g_boostRefused)
+            return;
+        const Result rc = appletSetCpuBoostMode(ApmCpuBoostMode_FastLoad);
+        static bool logged = false;
+        if (!logged || R_FAILED(rc)) {
+            logged = true;
+            logf("boost mode for a draw waiting on a compile: appletSetCpuBoostMode(FastLoad) -> 0x%X%s", uint32_t(rc),
+                 R_FAILED(rc) ? " (refused: not tried again)" : "");
+        }
+        if (R_FAILED(rc)) {
+            g_boostRefused = true;
+            return;
+        }
+        g_boostActive = true;
+        g_boostSince = armTicksToNs(armGetSystemTick());
+        g_deko3dStats.compileBoosts++;
+    }
+
+    static void boostEnd() {
+        std::lock_guard<std::mutex> lock(g_boostMutex);
+        if (--g_boostWaiters > 0 || !g_boostActive)
+            return;
+        appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
+        g_boostActive = false;
+        g_deko3dStats.compileBoostNs += armTicksToNs(armGetSystemTick()) - g_boostSince;
+    }
+
     bool Deko3DDevice::compile(DkStage stage, const std::string &source, std::vector<uint8_t> &dksh, std::string &log) {
         CompileJob job;
         job.stage = stage;
         job.source = &source;
         job.dksh = &dksh;
         job.log = &log;
+        // banjo-nx (2026-10-23): a blocking compile: a drawing thread (the game stops) or a background one (prebuild).
+        job.drawWaits = !t_backgroundThread;
         // banjo-nx (2026-10-18): the waiting thread's priority, lent to the uam thread while it waits (the render
         // thread must not wait behind the game's threads for a low-priority compile).
         s32 waiterPriority = 0;
-        bool lend = g_deko3dOptions.compilePriority > 0 && R_SUCCEEDED(svcGetThreadPriority(&waiterPriority, CUR_THREAD_HANDLE)) &&
-                    waiterPriority < g_deko3dOptions.compilePriority;
+        bool lend = g_deko3dOptions.compilePriority > 0 && R_SUCCEEDED(svcGetThreadPriority(&waiterPriority, CUR_THREAD_HANDLE));
+        const uint64_t waitStart = armTicksToNs(armGetSystemTick());
         {
             std::lock_guard<std::mutex> lock(compileMutex);
             // banjo-nx (2026-10-21): ahead of the background compiles (a draw waits for this one).
             auto at = std::find_if(compileQueue.begin(), compileQueue.end(), [](const CompileJob *j) { return j->async; });
             compileQueue.insert(at, &job);
-            lend = lend && compileThreadHandle != 0;
+            // 2026-10-23: against the priority the uam thread has (the one asked may have been refused).
+            lend = lend && compileThreadHandle != 0 && waiterPriority < compileBasePriority;
             if (lend) {
                 compileWaiters.push_back(waiterPriority);
                 applyCompilePriority();
             }
         }
         compileWake.notify_one();
+        const bool boost = job.drawWaits && g_deko3dOptions.compileWaitBoost;
+        if (boost)
+            boostBegin();
         std::unique_lock<std::mutex> lock(compileMutex);
         compileDone.wait(lock, [&] { return job.done; });
         if (lend) {
             compileWaiters.erase(std::find(compileWaiters.begin(), compileWaiters.end(), waiterPriority));
             applyCompilePriority();
+        }
+        lock.unlock();
+        if (boost)
+            boostEnd();
+        if (job.drawWaits) {
+            g_deko3dStats.compileWaits++;
+            g_deko3dStats.compileWaitNs += armTicksToNs(armGetSystemTick()) - waitStart;
+        }
+        else {
+            g_deko3dStats.compileBackgroundWaits++;
         }
         return job.ok;
     }
@@ -1432,7 +1578,7 @@ namespace plume {
         {
             std::lock_guard<std::mutex> lock(compileMutex);
             asyncQueued.erase(key);
-            if (job->background)
+            if (job->background && !job->cached)
                 asyncBackgroundQueued--;
         }
         g_deko3dStats.variantBackground++;
@@ -1475,7 +1621,10 @@ namespace plume {
                 }
             }
             if (!done) {
-                queueAsync(req, false);
+                // banjo-nx (2026-10-23, batch 5's console run): as a read when the cache file holds it. Queued as a
+                // compile (as before asyncCacheReads), thousands of the prebuild's variants waited behind compiles and
+                // their rests, and their pipelines drew with the generic variants all session (GPU +6 ms in the city).
+                queueAsync(req, false, g_deko3dOptions.asyncCacheReads && g_cacheContains && g_cacheContains(key));
                 waiting = true;
                 continue;
             }
@@ -1500,6 +1649,10 @@ namespace plume {
         return waiting;
     }
 
+    bool Deko3DShaderReadsVertexId(const RenderShader *shader) {
+        return shader == nullptr || static_cast<const Deko3DShader *>(shader)->usage.readsVertexId;
+    }
+
     bool Deko3DRefreshPipelineSlow(RenderPipeline *pipeline) {
         auto *p = static_cast<Deko3DGraphicsPipeline *>(pipeline);
         bool changed = false;
@@ -1510,7 +1663,7 @@ namespace plume {
 
     // compileMutex held: the uam thread at its own priority, or the highest a waiting thread has.
     void Deko3DDevice::applyCompilePriority() {
-        s32 priority = g_deko3dOptions.compilePriority;
+        s32 priority = compileBasePriority > 0 ? compileBasePriority : g_deko3dOptions.compilePriority;
         for (s32 p : compileWaiters)
             priority = std::min(priority, p);
         if (priority != compileAppliedPriority && compileThreadHandle != 0 &&
@@ -1577,30 +1730,39 @@ namespace plume {
                id == 909;
     }
 
-    static thread_local bool t_backgroundThread = false;
     void Deko3DSetBackgroundThread(bool background) { t_backgroundThread = background; }
 
     // At most this many background threads' requests wait at a time (each a few hundred bytes, but the uam thread does
     // about one a second on the console: a pipeline-list prebuild over a cache that lacks them would queue thousands).
     static constexpr uint32_t kAsyncBackgroundCap = 256;
 
-    bool Deko3DDevice::queueAsync(const Deko3DVariantRequest &request, bool background) {
+    bool Deko3DDevice::queueAsync(const Deko3DVariantRequest &request, bool background, bool cached) {
         {
             std::lock_guard<std::mutex> lock(compileMutex);
             if (asyncQueued.count(request.key))
                 return true;
-            if (background && asyncBackgroundQueued >= kAsyncBackgroundCap)
+            // The cap bounds the background compiles' text copies; a read carries no text (2026-10-23).
+            if (background && !cached && asyncBackgroundQueued >= kAsyncBackgroundCap)
                 return false;
             asyncQueued.insert(request.key);
             auto *job = new CompileJob();
             job->async = true;
+            job->cached = cached;
             job->background = background;
             job->stage = request.stage;
             job->request = request;
             job->source = &job->ownSource;
             job->dksh = &job->ownDksh;
             job->log = &job->ownLog;
-            if (background) {
+            if (cached) {
+                // banjo-nx (2026-10-23): a read, milliseconds: ahead of every compile (after the waited-for ones and
+                // the reads before it), so a compile of a second does not hold it back.
+                // Not counted against the background cap (that bounds the compiles' text copies).
+                auto at = std::find_if(compileQueue.begin(), compileQueue.end(),
+                                       [](const CompileJob *j) { return j->async && !j->cached; });
+                compileQueue.insert(at, job);
+            }
+            else if (background) {
                 asyncBackgroundQueued++;
                 compileQueue.push_back(job);
             }
@@ -1616,7 +1778,7 @@ namespace plume {
     }
 
     const DkShader *Deko3DDevice::loadVariant(const Deko3DShader *base, const RenderSpecConstant *specConstants, uint32_t specConstantsCount,
-                                              Deko3DVariantRequest *pending) {
+                                              Deko3DVariantRequest *pending, bool noCompile) {
         if (pending)
             pending->key = 0;
         uint64_t *pendingKey = pending ? &pending->key : nullptr;
@@ -1694,6 +1856,28 @@ namespace plume {
                 dksh = shader->defaultDksh;
                 have = true;
             }
+            // banjo-nx (2026-10-23, asyncCacheReads): in the cache file, read in the background; the generic variant
+            // until then, but only when that one is at hand (loaded, or in the cache file itself): one that had to
+            // compile here would stop the draw for the compile, where reading this variant now costs one card read
+            // (the first batch-5 emulator run: a missing generic variant compiled on the render thread for minutes).
+            if (!have && droppable && g_deko3dOptions.asyncVariants && g_deko3dOptions.asyncCacheReads && g_cacheContains &&
+                g_cacheContains(key)) {
+                std::vector<RenderSpecConstant> kept;
+                for (uint32_t i = 0; i < specConstantsCount; i++) {
+                    if (!genericDrops(specConstants[i].index))
+                        kept.push_back(specConstants[i]);
+                }
+                if (const DkShader *fallback = loadVariant(base, kept.data(), uint32_t(kept.size()), nullptr, true)) {
+                    pending->key = key;
+                    pending->glsl = shader->glsl;
+                    pending->defines = defines;
+                    pending->stage = shader->stage;
+                    pending->name = shader->name;
+                    queueAsync(*pending, t_backgroundThread, true);
+                    g_deko3dStats.variantFallbacks++;
+                    return fallback;
+                }
+            }
             if (!have && g_cacheLookup && g_cacheLookup(key, dksh)) {
                 g_deko3dStats.shaderCacheHits++;
                 have = true;
@@ -1709,6 +1893,8 @@ namespace plume {
                 queueAsync(*pending, t_backgroundThread);  // no room: the draw that needs it queues it (refresh)
                 return generic();
             }
+            if (!have && noCompile)
+                return nullptr;  // banjo-nx (2026-10-23): the caller does without it
             if (!have) {
                 std::string log;
                 if (!compile(shader->stage, source, dksh, log)) {
@@ -1918,6 +2104,11 @@ namespace plume {
             p->texBindings[i] = stages[i]->usage.texBindings;
             p->txqMask[i] = stages[i]->usage.txqMask;
             p->boundTextures = p->boundTextures || !p->texBindings[i].empty();
+            for (const Deko3DShaderUsage::TexBinding &b : p->texBindings[i]) {  // banjo-nx (2026-10-27)
+                p->texLines |= b.textureWord / 64u < 32u ? 1u << (b.textureWord / 64u) : ~0u;
+                if (b.samplerWord != Deko3DShaderUsage::SamplerNone)
+                    p->texLines |= b.samplerWord / 64u < 32u ? 1u << (b.samplerWord / 64u) : ~0u;
+            }
             p->textures = p->textures || stages[i]->usage.textures;
         }
         p->valid = ok;

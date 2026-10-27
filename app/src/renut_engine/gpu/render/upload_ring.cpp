@@ -18,6 +18,7 @@ bool UploadRing::Init(plume::RenderDevice *device, const char *name, bool consta
   name_ = name;
   constant_sets_ = constant_sets;
   host_cached_ = host_cached;
+  ++s_resets_;  // banjo-nx (2026-10-23, batch 6): its chunks go
   chunks_.clear();
   current_ = 0;
   offset_ = 0;
@@ -72,6 +73,7 @@ bool UploadRing::AddChunk(uint64_t min_size) {
 }
 
 void UploadRing::Reset() {
+  ++s_resets_;  // banjo-nx (2026-10-23, batch 6)
   window_chunks_ = std::max(window_chunks_, current_ + 1);
   // banjo-nx: banjo_renut_memory_policy's trim interval (kTrimResets without it).
   if (++window_resets_ >= banjo::renut_gpu::UploadTrimResets(kTrimResets, kFramesInFlight)) {

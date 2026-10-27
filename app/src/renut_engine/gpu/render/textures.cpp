@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -518,6 +519,8 @@ bool Create(HostTexture &t, const TextureFetch &fetch, bool render_target,
             plume::RenderFormat rt_format, bool swap_red_blue = false, RenderScale scale = {},
             bool host_levels = false) {
   ++g_texture_epoch;  // banjo-nx (CPU proposal 2)
+  t.base_page = fetch.BasePage();  // banjo-nx (2026-10-27)
+  BumpTextureBindings(t);
   u32 width, height, depth;
   fetch.Size(width, height, depth);
   t.dimension = HostDimension(fetch);
@@ -628,6 +631,7 @@ void MaskedDesc(const TextureFetch &fetch, u32 out[6]) {
 
 void Retire(HostTexture &t) {
   ++g_texture_epoch;  // banjo-nx (CPU proposal 2)
+  BumpTextureBindings(t);  // banjo-nx (2026-10-27)
   DepthHandOverForgetLocked(t);  // banjo-nx (2026-10-19, banjo_deko3d_depth_handover)
   if (t.slot != UINT32_MAX && t.slot != kInvalidDescriptor)
     Video::FreeTextureSlotLocked(t.slot);
@@ -800,6 +804,7 @@ HostTexture *ResolveTarget(u32 texture_va, plume::RenderFormat format, RenderSca
   if (entry != slot.get()) {
     entry = slot.get();
     ++g_texture_epoch;  // banjo-nx (2026-10-19, render-thread proposal 3): ResolvedAlias's answer changes
+    BumpTexturePage(fetch.BasePage());  // banjo-nx (2026-10-27)
   }
   return slot.get();
 }
@@ -944,6 +949,11 @@ void EvictIdleTexturesLocked() {
 // backstop above stays (85 % of the budget, 600 frames), sized for a PC's video memory.
 constexpr uint64_t kColdCheckFrames = 32;
 constexpr uint64_t kColdFrames = 120;
+// banjo-nx (2026-10-22): with less than half the reserve left the check comes every second of wall time whatever the
+// frame rate (the town's load ran at 0.5-4 fps on the console: 32 frames were 8-60 s, and the heap ran out first), and
+// a texture is cold after kColdFramesUrgent frames (still more than the 2 frames in flight).
+constexpr uint64_t kColdFramesUrgent = 8;
+bool g_memory_pressure = false;  // the last check found less than the reserve left
 
 void EvictColdTexturesLocked(uint64_t reserve) {
   const bool slots = Video::TextureSlotsInUseLocked() >= kEvictPressureSlots;
@@ -959,15 +969,17 @@ void EvictColdTexturesLocked(uint64_t reserve) {
     if (!budget)
       return;
     left = budget > used ? budget - used : 0;
+    g_memory_pressure = left < reserve;
     if (left >= reserve)
       return;
   }
+  const uint64_t cold_frames = !slots && left < reserve / 2 ? kColdFramesUrgent : kColdFrames;
   const bool keep_gpu_written = banjo::renut_gpu::KeepGpuWritten();
   std::vector<u32> cold;
   for (const auto &[va, t] : g_textures) {
     if (t && t->gpu_written && keep_gpu_written)
       continue;
-    const uint64_t limit = t && t->gpu_written ? kEvictIdleGpuFrames : kColdFrames;
+    const uint64_t limit = t && t->gpu_written ? kEvictIdleGpuFrames : cold_frames;
     if (!t || g_frame - t->used_frame >= limit)
       cold.push_back(va);
   }
@@ -993,6 +1005,7 @@ void EvictColdTexturesLocked(uint64_t reserve) {
 uint64_t g_texture_frame = 1;  // banjo-nx (2026-10-19): g_frame, read inline by TextureFrameLocked
 
 uint64_t g_texture_epoch = 1;  // banjo-nx (2026-10-19, CPU proposal 2)
+uint64_t g_layout_epoch = 1;   // banjo-nx (2026-10-26): see textures.h
 uint64_t g_depth_epoch = 1;    // banjo-nx (2026-10-19, render-thread proposal 3)
 
 void AdvanceTextureFrameLocked() {
@@ -1001,9 +1014,19 @@ void AdvanceTextureFrameLocked() {
   ApplyUnlocksLocked();
   if (g_frame % kEvictCheckFrames == 0)
     EvictIdleTexturesLocked();
-  // banjo-nx: banjo_renut_memory_policy.
-  if (const uint64_t reserve = banjo::renut_gpu::TextureReserveBytes(); reserve && g_frame % kColdCheckFrames == 0)
-    EvictColdTexturesLocked(reserve);
+  // banjo-nx: banjo_renut_memory_policy. Every kColdCheckFrames frames, and under pressure every second.
+  if (const uint64_t reserve = banjo::renut_gpu::TextureReserveBytes(); reserve) {
+    static std::chrono::steady_clock::time_point last;
+    bool due = g_frame % kColdCheckFrames == 0;
+    if (!due && g_memory_pressure) {
+      const auto now = std::chrono::steady_clock::now();
+      due = now - last >= std::chrono::seconds(1);
+    }
+    if (due) {
+      last = std::chrono::steady_clock::now();
+      EvictColdTexturesLocked(reserve);
+    }
+  }
 }
 
 void ReleaseHostTexturesInMemoryLocked(u32 physical, u32 size) {
@@ -1063,6 +1086,7 @@ bool ReadOnlyLayout(plume::RenderTextureLayout layout) {
 void TransitionTextureLocked(HostTexture *texture, plume::RenderTextureLayout layout) {
   if (!texture || !texture->texture || texture->layout == layout)
     return;
+  ++g_layout_epoch;  // banjo-nx (2026-10-26)
   if (IsDeko3D() && banjo::renut_gpu::Deko3DBarrierLeanOn() && ReadOnlyLayout(texture->layout) &&
       ReadOnlyLayout(layout)) {
     texture->layout = layout;
@@ -1304,6 +1328,7 @@ TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetc
   if (fx) {
     fx->transition[0] = &t;
     fx->float_sampled = t.words != nullptr;
+    fx->slot_texture = !depth_source;  // banjo-nx (2026-10-27): RefreshBindingLocked's
   }
   binding.dimension = t.dimension;
   binding.slot = SlotForSwizzle(t, swizzle);
@@ -1320,27 +1345,90 @@ TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetc
   return binding;
 }
 
+uint32_t g_texture_page_epochs[kTextureEpochBuckets] = {};  // banjo-nx (2026-10-27): textures.h
+uint64_t g_texture_bind_gen = 1;  // banjo-nx (2026-10-27, Phase A): textures.h
+uint32_t g_texture_va_epochs[kTextureEpochBuckets] = {};
+
+bool RefreshBindingLocked(u32 texture_va, const TextureFetch &device_fetch, const BindEffects &fx) {
+  HostTexture *t = fx.transition[0];
+  if (!t || fx.depth_source || fx.words_viewed || fx.handover_surface || fx.handover_image || fx.transition[1])
+    return false;
+  t->used_frame = g_frame;
+  // A resolve's alias, or a texture the GPU wrote: BindTextureLocked checks nothing for them.
+  if (!fx.slot_texture || t->gpu_written || t->checked_frame == g_frame)
+    return true;
+  // The fetch BindTextureLocked takes: the header's, or the device's where the header no longer describes the same
+  // data or (banjo_renut_device_swizzle) differs in dwords 0, 3 or 5 (its logs and counters left out).
+  const auto *header = GuestPtr<const d3d::BaseTexture>(texture_va);
+  if (!header)
+    return false;
+  TextureFetch fetch = TextureFetch::FromHeader(header->Format);
+  if (!fetch.IsTexture() || fetch.BasePage() != device_fetch.BasePage())
+    fetch = device_fetch;
+  if (!fetch.IsTexture())
+    return false;
+  if (device_fetch.IsTexture() && std::memcmp(fetch.dword, device_fetch.dword, sizeof(fetch.dword)) != 0) {
+    u32 desc[6], device_desc[6];
+    MaskedDesc(fetch, desc);
+    MaskedDesc(device_fetch, device_desc);
+    if (!SameData(desc, device_desc)) {
+      fetch = device_fetch;
+    } else {
+      u32 differ = 0;
+      for (int i = 0; i < 6; ++i)
+        differ |= desc[i] != device_desc[i] ? 1u << i : 0u;
+      if ((differ & 0x29u) && banjo::renut_gpu::DeviceSwizzleOn())
+        fetch = device_fetch;
+    }
+  }
+  t->checked_frame = g_frame;
+  if (!fetch.Tiled()) {
+    RefreshLinearLocked(*t, fetch);
+  } else {
+    const uint64_t hash = CheckedHash(fetch, *t, true);
+    if (!t->uploaded || hash != t->content_hash) {
+      t->content_hash = hash;
+      t->uploaded = Upload(*t, fetch, false);
+    }
+  }
+  return true;
+}
+
+namespace {
+// Memo over the fetch constant: while memexport results are pending, every
+// draw asks for its textures' extents (DrawNeedsExportFlush), and the layout
+// math cost more than the rest of the check.
+struct ExtentEntry {
+  uint32_t key[6];
+  uint32_t pages[2];
+  uint32_t sizes[2];
+  bool valid;
+};
+// banjo-nx (2026-10-23, render-thread round): 2,048 entries (96 KB): the city binds 400-odd textures a frame, which
+// the 256 of before missed often enough to do the layout math again for most of them.
+ExtentEntry g_extent_memo[2048];
+
+ExtentEntry &ExtentSlot(const uint32_t key[6]) {
+  uint32_t hash = 0;
+  for (int i = 0; i < 6; ++i)
+    hash = (hash ^ key[i]) * 0x9E3779B1u;
+  return g_extent_memo[hash >> 21];
+}
+}  // namespace
+
+void PrefetchTextureGuestExtent(const TextureFetch &fetch) {
+  __builtin_prefetch(&ExtentSlot(fetch.dword));
+}
+
 void TextureGuestExtent(const TextureFetch &fetch, uint32_t pages[2], uint32_t sizes[2]) {
-  // Memo over the fetch constant: while memexport results are pending, every
-  // draw asks for its textures' extents (DrawNeedsExportFlush), and the layout
-  // math cost more than the rest of the check.
-  struct Entry {
-    uint32_t key[6];
-    uint32_t pages[2];
-    uint32_t sizes[2];
-    bool valid;
-  };
+  using Entry = ExtentEntry;
   static_assert(sizeof(fetch.dword) == sizeof(Entry::key));
   // banjo-nx (2026-10-19, render-thread proposal 4): a plain static table of 256 (12 KB): both callers run on the render
   // thread (the draw's export check, KnowGuestExtent), and the thread-local one (48 KB, more than the A57's L1) cost a
   // call to read the thread pointer at every access (-mtp=soft).
-  static Entry memo[256] = {};
   uint32_t key[6];
   std::memcpy(key, fetch.dword, sizeof(key));
-  uint32_t hash = 0;
-  for (uint32_t word : key)
-    hash = (hash ^ word) * 0x9E3779B1u;
-  Entry &entry = memo[hash >> 24];
+  Entry &entry = ExtentSlot(key);
   if (entry.valid && std::memcmp(entry.key, key, sizeof(key)) == 0) {
     std::memcpy(pages, entry.pages, sizeof(entry.pages));
     std::memcpy(sizes, entry.sizes, sizeof(entry.sizes));
@@ -1406,6 +1494,7 @@ HostTexture *GetDepthResolveTextureLocked(u32 texture_va, RenderScale scale,
   if (words_entry != t) {
     words_entry = t;
     ++g_texture_epoch;  // banjo-nx (2026-10-19, render-thread proposal 3): DepthWordsSource's answer changes
+    BumpTexturePage(fetch.BasePage());  // banjo-nx (2026-10-27)
   }
   ++g_depth_epoch;  // banjo-nx (2026-10-19): the words of this destination may change with this resolve
   ++t->resolves;

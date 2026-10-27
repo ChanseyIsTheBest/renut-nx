@@ -30,6 +30,10 @@ struct VertexDeclarationRecord {
   std::vector<GuestVertexElement> elements;  // without D3DDECL_END
   HostVertexLayout layout;
   uint64_t layout_hash = 0;  // identifies the host input layout for pipeline keys
+  // banjo-nx (2026-10-23, batch 6): the streams its elements read (below kMaxVertexStreams), each once, in the order of
+  // their first element (render/draw.cpp DrawNeedsExportFlush walked the elements at every draw). BuildDeclarationLayout.
+  u8 stream_order[kMaxVertexStreams] = {};
+  u8 stream_count = 0;
 };
 
 struct ShaderRecord {
@@ -40,6 +44,32 @@ struct ShaderRecord {
 
   uint64_t hash = 0;
   const ShaderCacheEntry *entry = nullptr;  // nullptr: not in the cache (captured)
+  // banjo-nx (2026-10-23, render-thread round): what every draw reads, together in the record's first lines (the host
+  // shader, the summary and the specialised bools were in its fourth to sixth lines, past the stride arrays). The
+  // host shader is built on first use by a pipeline, under host_mutex (below).
+  std::unique_ptr<plume::RenderShader> host;
+  // banjo-nx (2026-10-23, render-thread round): what every draw used to look up in memos keyed by the cache entry
+  // (render/draw.cpp DrawSummaryOf): the float constant groups the shader reads (GroupSummary), whether it exports
+  // (GatherMemExportStreams), whether an input is fetched by another index (DescribeBoundFetches). Made at the shader's
+  // first draw, on the render thread; the city's few hundred shaders missed those memos' slots.
+  struct DrawSummary {
+    const u32 *used = nullptr;
+    uint64_t groups = 0;
+    u32 valid[8] = {};
+    uint32_t bytes = 0;
+    bool exports = false;
+    bool bound_fetches = false;
+    bool composite = false;  // banjo-nx (2026-10-23, batch 6): a pixel shader of the frame's final composite (CompositePs)
+    bool skin_once = false;  // banjo-nx (2026-10-27): a vertex shader of banjo_deko3d_skin_once's (IsSkinOnceVs)
+    // banjo-nx (2026-10-23, batch 6): its literal registers as pushed (render/draw.cpp LiteralRuns), or null.
+    const void *literal_runs = nullptr;
+    bool known = false;
+  };
+  mutable DrawSummary draw_summary;
+  // banjo-nx (banjo_gpu_bool_spec): the bools the shader's SPIR-V specialises (ShaderBoolSpecMask), read on the
+  // render thread at the first draw.
+  mutable u32 bool_spec_mask[8] = {};
+  mutable bool bool_spec_read = false;
 
   // Vertex shaders: what D3DVertexShader_Bind bound the shader to. The bind
   // bakes the declaration into the microcode, so a draw with no declaration
@@ -55,14 +85,7 @@ struct ShaderRecord {
   u32 fetch_strides[d3d::kMaxStreams] = {};
   bool fetch_declaration_built = false;
 
-  // Built on first use by a pipeline.
-  std::mutex host_mutex;
-  std::unique_ptr<plume::RenderShader> host;
-
-  // banjo-nx (banjo_gpu_bool_spec): the bools the shader's SPIR-V specialises (ShaderBoolSpecMask), read on the
-  // render thread at the first draw.
-  mutable u32 bool_spec_mask[8] = {};
-  mutable bool bool_spec_read = false;
+  std::mutex host_mutex;  // building host
 
   bool pixel() const { return kind == RecordKind::PixelShader; }
 };
@@ -71,6 +94,8 @@ struct ShaderRecord {
 // side of a guest object set up in place (XGRegisterVertexShader/PixelShader).
 // nullptr if it is neither. Requires State().mutex.
 ShaderRecord *FindShaderLocked(u32 shader_va, RecordKind kind);
+// banjo-nx (2026-10-23): prefetches what FindShaderLocked will read for this shader (no other effect).
+void PrefetchShaderLocked(u32 shader_va, RecordKind kind);
 
 // Drops the host side of an in-place guest shader object, if it has one.
 // Requires State().mutex.
@@ -86,6 +111,14 @@ const VertexDeclarationRecord *ShaderFetchDeclarationLocked(ShaderRecord &vs);
 // The shader's host object, building it on first call. nullptr if the shader
 // is missing from the cache or creation failed. Requires State().mutex.
 plume::RenderShader *GetHostShader(ShaderRecord *shader);
+// banjo-nx (2026-10-27, render thread night): the built host shader read inline (GetHostShader's first answer, under the
+// same rule: only GetHostShader sets 'host', and the draws that read it hold State().mutex); the call otherwise.
+[[gnu::always_inline]] inline plume::RenderShader *HostShaderOf(ShaderRecord *shader) {
+  if (shader && shader->entry)
+    if (plume::RenderShader *host = shader->host.get())
+      return host;
+  return GetHostShader(shader);
+}
 
 // Free a record's GPU objects (deferred past in-flight frames) and the record.
 void DestroyShaderRecord(ShaderRecord *shader);

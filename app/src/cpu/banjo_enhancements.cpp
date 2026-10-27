@@ -37,6 +37,8 @@ REXCVAR_DECLARE(int32_t, masseffect_native_fast_copy_verify);
 REXCVAR_DECLARE(bool, banjo_wait_blocking_ring);
 REXCVAR_DECLARE(bool, banjo_native_reverb);         // src/cpu/banjo_reverb_native.cpp
 REXCVAR_DECLARE(bool, banjo_native_reverb_verify);
+REXCVAR_DECLARE(bool, banjo_native_xaudio_src);         // src/cpu/banjo_xaudio_native.cpp
+REXCVAR_DECLARE(bool, banjo_native_xaudio_src_verify);
 REXCVAR_DECLARE(bool, banjo_repack_cached);         // src/me/masseffect/masseffect_native_draws.cpp
 REXCVAR_DECLARE(bool, banjo_ring_registers_in_place);  // src/me/me_native_system.cpp
 REXCVAR_DECLARE(bool, banjo_direct_state);             // src/me/me_native_system.cpp (+ banjo_me_hooks.cpp)
@@ -266,6 +268,7 @@ void ApplyMasterSwitches() {
     REXCVAR_SET(masseffect_native_verify_n, 2147483647);
     REXCVAR_SET(masseffect_native_fast_copy_verify, 2147483647);
     REXCVAR_SET(banjo_native_reverb_verify, true);  // run both reverbs on every call and compare
+    REXCVAR_SET(banjo_native_xaudio_src_verify, true);  // and both sample-rate converters (2026-10-23)
   }
 #if defined(__aarch64__)
   // banjo_cpu_guest_cas_no_barrier: off puts the legacy `dmb ish` back after every compare-and-swap.
@@ -306,6 +309,7 @@ void LogEnhancements() {
   const Row rows[] = {
       {"banjo_wait_blocking_ring", EnhancementGroup::kCpu, REXCVAR_GET(banjo_wait_blocking_ring)},
       {"banjo_native_reverb", EnhancementGroup::kCpu, REXCVAR_GET(banjo_native_reverb)},
+      {"banjo_native_xaudio_src", EnhancementGroup::kCpu, REXCVAR_GET(banjo_native_xaudio_src)},
       {"banjo_repack_cached", EnhancementGroup::kCpu, REXCVAR_GET(banjo_repack_cached)},
       {"banjo_ring_registers_in_place", EnhancementGroup::kCpu, REXCVAR_GET(banjo_ring_registers_in_place)},
       {"banjo_direct_state", EnhancementGroup::kCpu, REXCVAR_GET(banjo_direct_state)},

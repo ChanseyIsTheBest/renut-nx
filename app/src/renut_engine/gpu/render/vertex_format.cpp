@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <span>
 
 #include "renut_engine/gpu/log.h"
 #include "renut_engine/gpu/banjo_renut_tuning.h"
@@ -234,6 +235,50 @@ float DecodeComponent(u32 word, u32 shift, u32 bits, const DeclType &type) {
   return float(raw) / (bits == 32 ? 4294967295.0f : float((1u << bits) - 1u));
 }
 
+// banjo-nx (2026-10-23, batch 6): DecodeComponent's result for every raw value of a 2, 8, 10 or 11-bit component, made
+// with DecodeComponent itself (the same floats), for each of signed / integer: the packed formats' decodes read them
+// instead of a float division (or a conversion and compare) per component.
+struct ComponentTables {
+  float b2[4][1u << 2];
+  float b8[4][1u << 8];
+  float b10[4][1u << 10];
+  float b11[4][1u << 11];
+};
+
+const ComponentTables &PackedComponentTables() {
+  static const ComponentTables *const tables = [] {
+    auto *t = new ComponentTables;
+    for (u32 which = 0; which < 4; ++which) {
+      DeclType type{};
+      type.is_signed = (which & 1) != 0;
+      type.is_integer = (which & 2) != 0;
+      for (u32 raw = 0; raw < (1u << 2); ++raw)
+        t->b2[which][raw] = DecodeComponent(raw, 0, 2, type);
+      for (u32 raw = 0; raw < (1u << 8); ++raw)
+        t->b8[which][raw] = DecodeComponent(raw, 0, 8, type);
+      for (u32 raw = 0; raw < (1u << 10); ++raw)
+        t->b10[which][raw] = DecodeComponent(raw, 0, 10, type);
+      for (u32 raw = 0; raw < (1u << 11); ++raw)
+        t->b11[which][raw] = DecodeComponent(raw, 0, 11, type);
+    }
+    return t;
+  }();
+  return *tables;
+}
+
+inline u32 TableIndex(const DeclType &type) { return (type.is_signed ? 1u : 0u) | (type.is_integer ? 2u : 0u); }
+
+#if defined(__aarch64__)
+// banjo-nx (2026-10-23, batch 6): two or four halves (as HalfToFloat takes them from the words: the low half first) to
+// floats with the NEON conversion: the same values (exact, subnormals included); a word holding an infinity or NaN half
+// goes through HalfToFloat (the conversion would quiet a signalling NaN's payload).
+inline bool HalvesFinite(u32 w) { return (w & 0x7C00u) != 0x7C00u && (w & 0x7C000000u) != 0x7C000000u; }
+inline void HalvesToFloats(u32 w0, u32 w1, float out[4]) {
+  const uint32x2_t words = vset_lane_u32(w1, vdup_n_u32(w0), 1);
+  vst1q_f32(out, vcvt_f32_f16(vreinterpret_f16_u32(words)));
+}
+#endif
+
 // Expands one element of 'count' vertices to four floats: 'decode' fills the
 // format's components (before swizzle) of the first slots of c[6], which start
 // as 0, 0, 0, 1 followed by the swizzle constants 0 and 1.
@@ -243,6 +288,17 @@ void ExpandLoop(const u8 *src, u32 src_stride, u8 *dst, u32 dst_stride, u32 coun
   u8 pick[4];
   for (u32 i = 0; i < 4; ++i)
     pick[i] = swizzle[i] < 6 ? swizzle[i] : 4;  // 4: 0, 5: 1; the rest read 0
+  // banjo-nx (2026-10-23, batch 5): the identity swizzle (most elements) stores the four decoded slots as they are:
+  // the indexed picks of the general loop were its hottest line (vertex_format.cpp:250, 4 % of the render thread at
+  // high clocks). The same bytes.
+  if (pick[0] == 0 && pick[1] == 1 && pick[2] == 2 && pick[3] == 3) {
+    for (u32 v = 0; v < count; ++v, src += src_stride, dst += dst_stride) {
+      float c[6] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f};
+      decode(src, c);
+      std::memcpy(dst, c, 16);
+    }
+    return;
+  }
   for (u32 v = 0; v < count; ++v, src += src_stride, dst += dst_stride) {
     float c[6] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f};
     decode(src, c);
@@ -265,38 +321,50 @@ void ExpandElement(const HostVertexElement &e, const u8 *src, u32 src_stride, u8
     ExpandLoop(src, src_stride, dst, dst_stride, count, type.swizzle, decode);
   };
   switch (type.format) {
-  case k8_8_8_8:
+  // banjo-nx (2026-10-23, batch 6): the packed formats from PackedComponentTables (DecodeComponent's own results).
+  case k8_8_8_8: {
+    const float *t8 = PackedComponentTables().b8[TableIndex(type)];
     expand([&](const u8 *p, float c[6]) {
       const u32 w = word(p, 0);
       for (u32 i = 0; i < 4; ++i)
-        c[i] = DecodeComponent(w, i * 8, 8, type);
+        c[i] = t8[(w >> (i * 8)) & 0xFFu];
     });
     break;
-  case k2_10_10_10:
+  }
+  case k2_10_10_10: {
+    const ComponentTables &t = PackedComponentTables();
+    const float *t10 = t.b10[TableIndex(type)], *t2 = t.b2[TableIndex(type)];
     expand([&](const u8 *p, float c[6]) {
       const u32 w = word(p, 0);
-      c[0] = DecodeComponent(w, 0, 10, type);
-      c[1] = DecodeComponent(w, 10, 10, type);
-      c[2] = DecodeComponent(w, 20, 10, type);
-      c[3] = DecodeComponent(w, 30, 2, type);
+      c[0] = t10[w & 0x3FFu];
+      c[1] = t10[(w >> 10) & 0x3FFu];
+      c[2] = t10[(w >> 20) & 0x3FFu];
+      c[3] = t2[w >> 30];
     });
     break;
-  case k10_11_11:
+  }
+  case k10_11_11: {
+    const ComponentTables &t = PackedComponentTables();
+    const float *t11 = t.b11[TableIndex(type)], *t10 = t.b10[TableIndex(type)];
     expand([&](const u8 *p, float c[6]) {
       const u32 w = word(p, 0);
-      c[0] = DecodeComponent(w, 0, 11, type);
-      c[1] = DecodeComponent(w, 11, 11, type);
-      c[2] = DecodeComponent(w, 22, 10, type);
+      c[0] = t11[w & 0x7FFu];
+      c[1] = t11[(w >> 11) & 0x7FFu];
+      c[2] = t10[w >> 22];
     });
     break;
-  case k11_11_10:
+  }
+  case k11_11_10: {
+    const ComponentTables &t = PackedComponentTables();
+    const float *t11 = t.b11[TableIndex(type)], *t10 = t.b10[TableIndex(type)];
     expand([&](const u8 *p, float c[6]) {
       const u32 w = word(p, 0);
-      c[0] = DecodeComponent(w, 0, 10, type);
-      c[1] = DecodeComponent(w, 10, 11, type);
-      c[2] = DecodeComponent(w, 21, 11, type);
+      c[0] = t10[w & 0x3FFu];
+      c[1] = t11[(w >> 10) & 0x7FFu];
+      c[2] = t11[w >> 21];
     });
     break;
+  }
   case k16_16:
     expand([&](const u8 *p, float c[6]) {
       const u32 w = word(p, 0);
@@ -316,6 +384,15 @@ void ExpandElement(const HostVertexElement &e, const u8 *src, u32 src_stride, u8
   case k16_16_Float:
     expand([&](const u8 *p, float c[6]) {
       const u32 w = word(p, 0);
+#if defined(__aarch64__)
+      if (HalvesFinite(w)) {  // banjo-nx (2026-10-23, batch 6)
+        float f[4];
+        HalvesToFloats(w, w, f);
+        c[0] = f[0];
+        c[1] = f[1];
+        return;
+      }
+#endif
       c[0] = HalfToFloat(u16(w));
       c[1] = HalfToFloat(u16(w >> 16));
     });
@@ -323,6 +400,12 @@ void ExpandElement(const HostVertexElement &e, const u8 *src, u32 src_stride, u8
   case k16_16_16_16_Float:
     expand([&](const u8 *p, float c[6]) {
       const u32 w0 = word(p, 0), w1 = word(p, 1);
+#if defined(__aarch64__)
+      if (HalvesFinite(w0) && HalvesFinite(w1)) {  // banjo-nx (2026-10-23, batch 6)
+        HalvesToFloats(w0, w1, c);
+        return;
+      }
+#endif
       c[0] = HalfToFloat(u16(w0));
       c[1] = HalfToFloat(u16(w0 >> 16));
       c[2] = HalfToFloat(u16(w1));
@@ -623,8 +706,15 @@ void CopyElementWords(const u8 *src, u32 src_stride, u8 *dst, u32 dst_stride, u3
 
 void ConvertVertices(const HostVertexStream &stream, const u8 *guest, u32 guest_stride,
                      u32 vertex_count, u32 endian, u8 *host) {
-  bool copy_only = true, same_layout = stream.host_stride == guest_stride && guest_stride % 4 == 0;
-  for (const HostVertexElement &element : stream.elements) {
+  ConvertVertices(stream.elements.data(), u32(stream.elements.size()), stream.host_stride, guest, guest_stride,
+                  vertex_count, endian, host);
+}
+
+void ConvertVertices(const HostVertexElement *elements, u32 element_count, u32 host_stride_in, const u8 *guest,
+                     u32 guest_stride, u32 vertex_count, u32 endian, u8 *host) {
+  const std::span<const HostVertexElement> stream_elements(elements, element_count);
+  bool copy_only = true, same_layout = host_stride_in == guest_stride && guest_stride % 4 == 0;
+  for (const HostVertexElement &element : stream_elements) {
     copy_only &= element.conversion == ElementConversion::Copy32 && !element.swap_halves;
     same_layout &= element.host_offset == element.guest_offset;
   }
@@ -645,14 +735,14 @@ void ConvertVertices(const HostVertexStream &stream, const u8 *guest, u32 guest_
   // of one element would be slow.
   constexpr u32 kChunkBytes = 16 * 1024;
   alignas(64) u8 chunk[kChunkBytes];
-  const u32 host_stride = stream.host_stride;
+  const u32 host_stride = host_stride_in;
   if (!host_stride)
     return;
   const u32 per_chunk = std::max(1u, kChunkBytes / host_stride);
   for (u32 first = 0; first < vertex_count; first += per_chunk) {
     const u32 count = std::min(per_chunk, vertex_count - first);
     const u8 *chunk_src = guest + size_t(first) * guest_stride;
-    for (const HostVertexElement &element : stream.elements) {
+    for (const HostVertexElement &element : stream_elements) {
       const u8 *src = chunk_src + element.guest_offset;
       u8 *dst = chunk + element.host_offset;
       if (element.conversion == ElementConversion::ExpandFloat) {

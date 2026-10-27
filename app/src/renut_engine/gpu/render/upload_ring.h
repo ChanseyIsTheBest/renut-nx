@@ -62,6 +62,9 @@ public:
   void HandOff(std::vector<Range> &out);
   // The slot's fence has been waited: nothing uses the ring's memory.
   void Reset();
+  // banjo-nx (2026-10-23, batch 6): the Reset() calls of every ring so far: an allocation made while this is unchanged
+  // still holds what was written into it (render/draw.cpp keeps fetch copies and converted streams across kicks).
+  static uint64_t Resets() { return s_resets_; }
   UploadAllocation Allocate(uint64_t size, uint64_t alignment = 256);
   // banjo-nx (2026-10-19, render-thread proposal 10): 'size' bytes, with 'room' bytes (>= size) left in the chunk from
   // the allocation's start (a uniform buffer bound at a fixed size over a smaller allocation stays inside the chunk);
@@ -96,6 +99,7 @@ private:
   // The most chunks a frame used since the last trim, and the resets since.
   size_t window_chunks_ = 1;
   uint32_t window_resets_ = 0;
+  static inline uint64_t s_resets_ = 1;
 };
 
 } // namespace renut::gpu

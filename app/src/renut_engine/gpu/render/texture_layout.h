@@ -80,7 +80,13 @@ enum class TextureSign : u32 {
 struct TextureFetch {
   u32 dword[6] = {};
 
-  static TextureFetch FromGuest(const d3d::TextureFetchConstant &guest);
+  // banjo-nx (2026-10-27, render thread night): inline (it was a call at each slot's conversion on the draw paths).
+  static TextureFetch FromGuest(const d3d::TextureFetchConstant &guest) {
+    TextureFetch fetch;
+    for (u32 i = 0; i < 6; ++i)
+      fetch.dword[i] = guest.dword[i];
+    return fetch;
+  }
   // The constant D3DDevice_SetTexture builds from a texture header: its CPU
   // base and mip addresses become GPU addresses.
   static TextureFetch FromHeader(const d3d::TextureFetchConstant &header);

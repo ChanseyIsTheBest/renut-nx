@@ -17,6 +17,10 @@
 #if defined(_WIN32)
 #include <plume_d3d12.h>
 #endif
+#if defined(__SWITCH__)
+#include <unistd.h>  // sbrk (QueryGpuMemory: the heap's room)
+extern "C" char *fake_heap_end;  // libnx: the end of the malloc heap (the SDK's __libnx_initheap sets it)
+#endif
 #if defined(PLUME_DEKO3D)
 #include <plume_deko3d.h>  // banjo-nx (2026-10-17): the deko3d back end
 #include "renut_engine/gpu/banjo_renut_deko3d.h"
@@ -399,6 +403,20 @@ GpuMemoryUsage QueryGpuMemory(plume::RenderDevice *device) {
     const plume::Deko3DStats &st = plume::GetDeko3DStats();
     usage.local_used = st.imageBytes + st.bufferBytes + st.codeBytes + st.commandBytes;
     usage.local_budget = 0;
+#if defined(__SWITCH__)
+    // banjo-nx (2026-10-22): plume takes deko3d's memory from the malloc heap (memalign), which also holds the guest's
+    // memory and everything of the CPU's: the budget is what deko3d holds plus the heap's room left, so "budget left"
+    // is that room and the texture rules work here too (render/textures.cpp: banjo_renut_textures_reserve_mb, Renut's
+    // backstop at 85 %). With a budget of 0 they never released a host texture on the Switch: loading the town filled
+    // the heap (consoles runs of 36z3 and 36z6: std::bad_alloc, 2,903 of 3,090 MB in use, 744 MB of textures).
+    // The room is what sbrk has not handed out yet (O(1)); the free pieces inside what it has (mallinfo walks them
+    // all) are left out: many are too small for an image, so this errs on the side of releasing earlier.
+    {
+      const char *top = static_cast<const char *>(sbrk(0));
+      const uint64_t room = (top && fake_heap_end > top) ? uint64_t(fake_heap_end - top) : 0;
+      usage.local_budget = usage.local_used + room;
+    }
+#endif
     usage.valid = true;
     return usage;
   }

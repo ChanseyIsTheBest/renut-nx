@@ -39,4 +39,34 @@ inline bool Line64Differs(const uint8_t *a, const uint8_t *b, bool neon) {
   return Line64DiffersPlain(a, b);
 }
 
+// banjo-nx (2026-10-23, render-thread round): which of 'count' (at most 32) 64-byte lines differ, bit i = line i, with
+// no branch per line: four lines' XORs folded by pairwise maxima into one vector of the four lines' maxima, and that
+// into four bits. A branch per line (Line64Differs in a loop) mispredicted on the pushed shared constants, whose
+// changed lines vary from draw to draw: 7 % of the console's render thread in the city (2026-10-23 profile).
+inline uint32_t Lines64DifferMask(const uint8_t *a, const uint8_t *b, uint32_t count) {
+  uint32_t mask = 0;
+  uint32_t i = 0;
+#if defined(__aarch64__)
+  const uint32x4_t bits = {1u, 2u, 4u, 8u};
+  auto line = [](const uint8_t *x, const uint8_t *y) {
+    const uint8x16x4_t p = vld1q_u8_x4(x);
+    const uint8x16x4_t q = vld1q_u8_x4(y);
+    return vreinterpretq_u32_u8(vorrq_u8(vorrq_u8(veorq_u8(p.val[0], q.val[0]), veorq_u8(p.val[1], q.val[1])),
+                                         vorrq_u8(veorq_u8(p.val[2], q.val[2]), veorq_u8(p.val[3], q.val[3]))));
+  };
+  for (; i + 4 <= count; i += 4) {
+    const uint32x4_t l0 = line(a + i * 64, b + i * 64), l1 = line(a + i * 64 + 64, b + i * 64 + 64);
+    const uint32x4_t l2 = line(a + i * 64 + 128, b + i * 64 + 128), l3 = line(a + i * 64 + 192, b + i * 64 + 192);
+    const uint32x4_t m = vpmaxq_u32(vpmaxq_u32(l0, l1), vpmaxq_u32(l2, l3));  // lane k: line i + k's maximum
+    mask |= vaddvq_u32(vandq_u32(vtstq_u32(m, m), bits)) << i;
+  }
+  for (; i < count; ++i)
+    mask |= uint32_t(Line64Differs(a + i * 64, b + i * 64, true)) << i;
+#else
+  for (; i < count; ++i)
+    mask |= uint32_t(Line64DiffersPlain(a + i * 64, b + i * 64)) << i;
+#endif
+  return mask;
+}
+
 }  // namespace banjo::renut_gpu

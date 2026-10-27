@@ -728,6 +728,7 @@ uint32_t SurfaceStencilSlotLocked(HostSurface *surface) {
 void TransitionSurfaceLocked(HostSurface *surface, plume::RenderTextureLayout layout) {
   if (!surface || !surface->texture || surface->layout == layout)
     return;
+  ++g_layout_epoch;  // banjo-nx (2026-10-26, render/textures.h)
   // banjo-nx (2026-10-19, banjo_deko3d_barrier_lean): from one read layout to another: no barrier (textures.cpp).
   if (IsDeko3D() && banjo::renut_gpu::Deko3DBarrierLeanOn() && ReadOnlyLayout(surface->layout) &&
       ReadOnlyLayout(layout)) {
@@ -812,6 +813,7 @@ void RetireDepthImageLocked(DepthImage &image) {
 void TransitionDepthImageLocked(DepthImage &image, plume::RenderTextureLayout layout) {
   if (!image.texture || image.layout == layout)
     return;
+  ++g_layout_epoch;  // banjo-nx (2026-10-26, render/textures.h)
   if (IsDeko3D() && banjo::renut_gpu::Deko3DBarrierLeanOn() && ReadOnlyLayout(image.layout) && ReadOnlyLayout(layout)) {
     image.layout = layout;
     return;

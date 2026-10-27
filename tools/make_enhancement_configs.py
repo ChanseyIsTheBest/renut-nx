@@ -265,6 +265,11 @@ Each variant is the base config with a few keys changed, so two logs compare dir
   banjo_literals_cbuf_ab.toml      package 26: in-run A/B target 56 (literals from the constant registers)
   banjo_stencil_clear_partial_ab.toml  package 26: in-run A/B target 57 (partial stencil fetch before a Clear)
   banjo_import9_steps.toml         package 26 diagnostic: the 9-pass EDRAM import timed per step
+  banjo_cpu_native_bulk_off.toml   2026-10-22: the bulk localized copies (localized_bulk.txt) all off: the A/B of the
+                                   round (the hand-picked copies stay on)
+  banjo_hot_guard_on.toml          2026-10-22: the native copies' guard back on (64 first calls per thread, then 1 in
+                                   4096); renut.toml calls every copy directly
+
 To use one on the console, copy it over sdmc:/switch/banjo-nx/renut.toml.
 
 Usage: python tools/make_enhancement_configs.py <base renut.toml> <output folder>
@@ -306,6 +311,10 @@ VARIANTS = {
                                log_file_writer="false"),
     "banjo_profile.toml": dict(PROFILING, banjo_cpu_profiler="true"),
     "banjo_cpu_verify.toml": dict(NO_PROFILING, banjo_cpu_verify="true", banjo_direct_state="true"),
+    # 2026-10-22 (bejeweled3-nx's method): the bulk localized copies all off (the A/B of the round), and the copies'
+    # guard back on (renut.toml has none: direct dispatch).
+    "banjo_cpu_native_bulk_off.toml": dict(PROFILING, banjo_cpu_native_bulk="false"),
+    "banjo_hot_guard_on.toml": dict(PROFILING, banjo_hot_guard_calls="64", banjo_hot_guard_period="4096"),
     "banjo_direct_ab.toml": dict(PROFILING, banjo_direct_state="true", banjo_direct_state_ab_s="4", banjo_ab_target="1"),
     "banjo_memo_ab.toml": dict(PROFILING, banjo_direct_state_ab_s="4", banjo_ab_target="2"),
     "banjo_upload_uncached.toml": dict(PROFILING, masseffect_native_upload_memory="0"),

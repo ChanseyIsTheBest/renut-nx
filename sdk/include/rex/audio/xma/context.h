@@ -14,7 +14,9 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <mutex>
+#include <vector>
 
 #include <rex/kernel.h>
 #include <rex/memory.h>
@@ -313,6 +315,14 @@ class XmaContext {
   // Loop subframe precision state
   uint8_t loop_frame_output_limit_ = 0;
   bool loop_start_skip_pending_ = false;
+
+  // banjo-nx (2026-10-27, #4 of the CPU-gap table: banjo_xma_frame_cache, xma_context.cpp). The frames given to the codec
+  // since it was last opened, as a node of the shared cache (0: not known, nothing cached until the codec is opened
+  // again), and the cached frames answered since that the codec has not decoded yet (decoded before the next frame
+  // the cache cannot answer).
+  uint64_t cache_node_ = 0;
+  std::vector<uint64_t> cache_pending_;
+  bool DecodeFrame(int prepared, int sample_rate, bool stereo);
 
 };
 

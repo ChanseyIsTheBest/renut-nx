@@ -121,6 +121,7 @@ void D3DDevice_SetVertexFetchConstant_hook(u32 device, u32 reg, u32 vertex_buffe
   const u32 type = d.W(constant) & 3;
   if (type == 0 || type == 2)
     std::memset(d.bytes + constant, 0, 24);
+  d.TouchRange(constant, 24);  // banjo-nx (2026-10-26, banjo_renut_tags)
   d.SetW(constant, native::Insert(d.W(constant), 1, 0, 2));
   d.Dirty(3, u64(1) << (31 - slot));
   d.SetW(constant + part * 8, native::GpuAddress(u32(vb[6]) + offset));

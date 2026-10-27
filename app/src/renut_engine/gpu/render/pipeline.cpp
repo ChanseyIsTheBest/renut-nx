@@ -57,6 +57,9 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_variant_log, false, "Banjo/Renut",
 #include "renut_engine/gpu/banjo_renut_tuning.h"
 #if defined(PLUME_DEKO3D)
 #include <plume_deko3d.h>  // banjo-nx (2026-10-21): Deko3DSetBackgroundThread
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 #endif
 
 REXCVAR_DEFINE_STRING(renut_pipeline_list, "pipeline_list.bin", "Nuts&Bolts/Graphics",
@@ -94,7 +97,11 @@ struct PipelineMemo {
 constexpr uint32_t kPipelineMemoSets = 512;
 PipelineMemo g_pipeline_memo[kPipelineMemoSets][2];
 
-inline uint32_t PipelineMemoIndex(const PipelineKey &key) {
+// banjo-nx (2026-10-23, render-thread round): each way's key hash, apart from the ways: a lookup reads this line and
+// then only the way whose hash matches (the two keys were six lines read for a miss).
+uint64_t g_pipeline_memo_tags[kPipelineMemoSets][2];
+
+inline uint64_t PipelineMemoHash(const PipelineKey &key) {
   uint64_t w[8];
   std::memcpy(w, &key, sizeof(w));  // the shaders, the layout hash, topology, formats
   uint64_t h = w[0] * 0x9E3779B97F4A7C15ull ^ w[1] * 0xC2B2AE3D27D4EB4Full ^ w[2] ^ (w[3] << 17) ^ (w[4] >> 3) ^
@@ -103,8 +110,10 @@ inline uint32_t PipelineMemoIndex(const PipelineKey &key) {
   std::memcpy(&b, reinterpret_cast<const char *>(&key) + offsetof(PipelineKey, bool_values), sizeof(b));
   h ^= uint64_t(b) * 0xFF51AFD7ED558CCDull ^ uint64_t(key.alpha_func) << 40 ^ uint64_t(key.blend_control[0]) << 7 ^
        uint64_t(key.depth_control) << 23;
-  return uint32_t((h ^ (h >> 31) ^ (h >> 47)) & (kPipelineMemoSets - 1));
+  return h;
 }
+
+inline uint32_t PipelineMemoSet(uint64_t h) { return uint32_t((h ^ (h >> 31) ^ (h >> 47)) & (kPipelineMemoSets - 1)); }
 // banjo-nx (2026-10-18): bumped each time a prebuild job is done (any thread).
 std::atomic<uint64_t> g_prebuild_epoch{0};
 // banjo-nx (2026-10-18), render thread: specialised keys a worker is building, with the generic pipeline their draws
@@ -1011,31 +1020,67 @@ bool BuildDrawLayout(VideoState &s) {
 static plume::RenderPipeline *GetPipelineSlow(const PipelineKey &key, const PipelineInputs &inputs, uint8_t &kind,
                                               uint64_t &memo_epoch);
 
+// banjo-nx (2026-10-23, batch 5): two keys' bytes equal, inline (16 bytes at a time, one OR tree, one test), instead
+// of a C library memcmp call at every draw's lookup (the last key, the memo's ways). The same answer as memcmp == 0.
+static_assert(sizeof(PipelineKey) % 8 == 0, "PipelineKey compared in words");
+inline bool KeyEqual(const PipelineKey &a, const PipelineKey &b) {
+  const auto *x = reinterpret_cast<const uint8_t *>(&a);
+  const auto *y = reinterpret_cast<const uint8_t *>(&b);
+  constexpr size_t kSize = sizeof(PipelineKey);
+#if defined(__aarch64__)
+  uint8x16_t acc = vdupq_n_u8(0);
+  size_t i = 0;
+  for (; i + 16 <= kSize; i += 16)
+    acc = vorrq_u8(acc, veorq_u8(vld1q_u8(x + i), vld1q_u8(y + i)));
+  uint64_t rest = 0;
+  for (; i < kSize; i += 8) {
+    uint64_t u, v;
+    std::memcpy(&u, x + i, 8);
+    std::memcpy(&v, y + i, 8);
+    rest |= u ^ v;
+  }
+  const uint64x2_t o = vreinterpretq_u64_u8(acc);
+  return (vgetq_lane_u64(o, 0) | vgetq_lane_u64(o, 1) | rest) == 0;
+#else
+  return std::memcmp(x, y, kSize) == 0;
+#endif
+}
+
+
 // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_chain_reuse): GetPipelineLocked's calls counted, and the prebuild epoch: a draw whose key
 // is the previous draw's takes that draw's answer when no lookup was made since and no prebuilt pipeline came in
 // (DrawStateLocked). The answer depends on nothing else: the last key and the memo change only in the lookups, and a
 // memo entry of a generic pipeline is held only for its prebuild epoch.
 uint64_t g_pipeline_lookups = 0;
 uint64_t PipelineLookupsLocked() { return g_pipeline_lookups; }
-uint64_t PrebuildEpochLocked() { return g_prebuild_epoch.load(std::memory_order_acquire); }
+// banjo-nx (2026-10-27, render thread night): relaxed, not acquire: read at every fast draw (an LDAR each), and a late
+// view of a new epoch only keeps a draw on the pipeline it had (the generic one) a little longer; GetPipelineLocked's own
+// lock orders the cache it reads once the epoch is seen.
+uint64_t PrebuildEpochLocked() { return g_prebuild_epoch.load(std::memory_order_relaxed); }
 
 plume::RenderPipeline *GetPipelineLocked(const PipelineKey &key, const PipelineInputs &inputs) {
   ++g_pipeline_lookups;  // banjo-nx (from sa2-nx, banjo_renut_chain_reuse)
-  if (g_last_pipeline && std::memcmp(&g_last_key, &key, sizeof(key)) == 0)
+  if (g_last_pipeline && KeyEqual(g_last_key, key))
     return g_last_pipeline;
   const bool memo_on = banjo::renut_gpu::PipelineMemoOn();
-  const uint32_t set = PipelineMemoIndex(key);
+  const uint64_t key_hash = PipelineMemoHash(key);
+  const uint32_t set = PipelineMemoSet(key_hash);
   PipelineMemo *ways = g_pipeline_memo[set];
+  uint64_t *tags = g_pipeline_memo_tags[set];
   if (memo_on) {
     for (uint32_t w = 0; w < 2; ++w) {
+      if (tags[w] != key_hash)
+        continue;
       PipelineMemo &m = ways[w];
-      if (m.pipeline && std::memcmp(&m.key, &key, sizeof(key)) == 0 &&
+      if (m.pipeline && KeyEqual(m.key, key) &&
           (m.kind != 1 || m.epoch == g_prebuild_epoch.load(std::memory_order_acquire))) {
         if (m.kind)
           banjo::renut_gpu::CountBoolSpec(banjo::renut_gpu::BoolSpecEvent::kGeneric);
         plume::RenderPipeline *hit = m.pipeline;
-        if (w)
+        if (w) {
           std::swap(ways[0], ways[1]);  // the most recent in way 0
+          std::swap(tags[0], tags[1]);
+        }
         return hit;
       }
     }
@@ -1048,6 +1093,8 @@ plume::RenderPipeline *GetPipelineLocked(const PipelineKey &key, const PipelineI
     // key: both are kept.)
     ways = g_pipeline_memo[set];
     ways[1] = ways[0];
+    tags[1] = tags[0];
+    tags[0] = key_hash;
     ways[0].key = key;
     ways[0].pipeline = result;
     ways[0].kind = kind;
@@ -1061,7 +1108,7 @@ static plume::RenderPipeline *GetPipelineSlow(const PipelineKey &key, const Pipe
   const uint64_t hash = HashKey(key);
   auto &bucket = g_pipelines[hash];
   for (auto &cached : bucket) {
-    if (std::memcmp(&cached.key, &key, sizeof(key)) == 0) {
+    if (KeyEqual(cached.key, key)) {
       if (cached.pipeline) {
         g_last_key = key;
         g_last_pipeline = cached.pipeline.get();

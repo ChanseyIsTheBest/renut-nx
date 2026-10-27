@@ -305,7 +305,9 @@ bool DeltaChunkDiffers(const u8 *a, const u8 *b) {
 // The game threads' side of the chain.
 struct DeltaChain {
   std::mutex mutex;                     // the chain's draws are made and queued in one order
-  const d3d::Device *device = nullptr;  // the device it follows; none: the next draw rebases
+  // The device it follows; none: the next draw rebases. banjo-nx (2026-10-26): atomic so ForgetSnapshotDeltas can
+  // tell without the lock that a recorded op's device is not the chain's; written under the lock only.
+  std::atomic<const d3d::Device *> device{nullptr};
   uint64_t vs = 0, ps = 0;              // groups whole captures consumed since its last draw: they follow
   uint64_t deltas = 0, rebases = 0, bytes = 0, chunks = 0, groups = 0;  // the 10 s report's
   uint64_t whole = 0;  // banjo-nx (from sa2-nx): whole captures outside the chain (Begin*Vertices draws), under the lock too
@@ -362,7 +364,7 @@ bool DeltasVerifyOn() {
 void ClearPending(d3d::Device *device) {
   // banjo-nx (from sa2-nx) (banjo_renut_snapshot_deltas): the dirty constant groups a whole capture consumes go with the chain's next
   // delta (its callers hold g_delta.mutex when the deltas are on).
-  if (device == g_delta.device) {
+  if (device == g_delta.device.load(std::memory_order_relaxed)) {
     g_delta.vs |= uint64_t(device->m_Pending[0]);
     g_delta.ps |= uint64_t(device->m_Pending[1]);
   }
@@ -382,6 +384,7 @@ const u8 *DeviceForDraw(const DrawCapture &capture) {
     g_chain_vs_dirty = g_chain_ps_dirty = ~uint64_t(0);
     g_chain_hint.seq = g_chain_seq = NextChainSeq();
     g_chain_hint.changed[0] = g_chain_hint.changed[1] = ~uint64_t(0);  // a whole copy: every chunk
+    g_chain_hint.fields = kFieldsAll;
   } else {
     const u8 *from = capture.state.data();
     DeltaHeader h;
@@ -392,6 +395,7 @@ const u8 *DeviceForDraw(const DrawCapture &capture) {
     g_chain_hint.seq = g_chain_seq = seq;
     g_chain_hint.changed[0] = consecutive ? h.chunks[0] : ~uint64_t(0);
     g_chain_hint.changed[1] = consecutive ? h.chunks[1] : ~uint64_t(0);
+    g_chain_hint.fields = consecutive ? ChainFields(h.chunks) : kFieldsAll;  // banjo-nx (2026-10-26)
     g_chain_vs_dirty |= h.vs;
     g_chain_ps_dirty |= h.ps;
     for (u32 word = 0; word < 2; ++word) {
@@ -498,13 +502,13 @@ DrawCapture *CaptureDelta(u32 device_va, const DrawCall &call) {
   capture->call.up_vertices = nullptr;
   capture->call.up_indices = nullptr;
   const auto *bytes = reinterpret_cast<const u8 *>(device);
-  if (c.device != device) {
+  if (c.device.load(std::memory_order_relaxed) != device) {
     // The chain's first draw (or a frame's): the whole device, which the render thread takes as its own.
     for (auto &mask : device->m_Pending)
       mask = 0;
     capture->state.assign(bytes, bytes + d3d::kDeviceSnapshotSize);
     std::memcpy(c.shadow, bytes, d3d::kDeviceSnapshotSize);
-    c.device = device;
+    c.device.store(device, std::memory_order_relaxed);
     c.vs = c.ps = 0;
     capture->snapshot = SnapshotKind::Rebase;
     ++c.rebases;
@@ -566,14 +570,20 @@ void SnapshotDeltasNewFrame() {
   if (!DeltasOn())
     return;
   std::lock_guard lock(g_delta.mutex);
-  g_delta.device = nullptr;  // the frame's first draw rebases: whatever went wrong lasts a frame at most
+  g_delta.device.store(nullptr, std::memory_order_relaxed);  // the frame's first draw rebases: whatever went wrong lasts a frame at most
 }
 
-void ForgetSnapshotDeltas() {
+void ForgetSnapshotDeltas(const void *device) {
   if (!DeltasOn())
     return;
+  // banjo-nx (2026-10-26): only the chain's own device's masks matter to it; a recording device's ops (every recorded
+  // op came here) took the chain's lock each, and made its next draw a whole copy, for nothing. The chain's device is
+  // the title device, which the game does not record on while it draws on it elsewhere: an op of it is ordered with
+  // its draws by the game, and so is this load with the store that made it the chain's.
+  if (g_delta.device.load(std::memory_order_relaxed) != device)
+    return;
   std::lock_guard lock(g_delta.mutex);
-  g_delta.device = nullptr;
+  g_delta.device.store(nullptr, std::memory_order_relaxed);
 }
 
 std::string SnapshotDeltaReport() {
@@ -644,7 +654,7 @@ void QueueDeferredDraw(u32 device_va, const DrawCall &call, const u8 *scratch, u
         g_capture_pool.Give(it->second.capture);
         g_deferred.erase(it);
         g_deferred_count.store(g_deferred.size(), std::memory_order_release);
-        g_delta.device = nullptr;
+        g_delta.device.store(nullptr, std::memory_order_relaxed);
       }
     }
     DrawCapture *capture = CaptureDelta(device_va, call);

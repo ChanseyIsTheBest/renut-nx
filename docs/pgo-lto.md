@@ -61,3 +61,14 @@ incremental builds of daily work.
   target 'D:\Banjo'", 511 times, the last partition's job run up to three times at once). That NRO turned out
   byte-identical to a relink with TMP in a folder without spaces (the link alone: 7.5 minutes), but keep the
   temporary folder free of spaces.
+
+## The second profile (package 36z6, 2026-10-22)
+
+The bulk localized copies (docs/enhancements.md, "Bulk localized copies") changed about 600 generated files and added
+twelve source files, so the profile of package 36t no longer matched most of the code (a changed function keeps no
+profile). Taken again: instrumented build from scratch (app/out/switch-pgo-gen, `-j 9`, 37 minutes, NRO 110 MB), then
+a 5-minute Ryujinx session (the user's choice) of the scripted route with every profiler off (the user's request:
+`switch_profile_stacks`, `banjo_cpu_profiler`, `banjo_show_profiler`, `banjo_show_fps`, `banjo_stall_watch_seconds = 0`,
+`renut_gpu_profile = 0`, `banjo_renut_diag_gpu_shaders`, `banjo_renut_diag_resolve_trace`), the copies called directly
+(`banjo_hot_guard_calls = banjo_hot_guard_period = 0`). One 4.5 MB stream, 310 `.gcda` files (the shards included),
+largest arc count 1.4e9. The old profile is kept outside the repository (D:/Banjo kazooie port/pgo_profile_36t).

@@ -51,6 +51,12 @@
 #include <switch.h>
 
 #include "rex/ui/switch_apm.h"
+
+// banjo-nx (2026-10-27): the system core (core/threading_switch.cpp; its header clashes with switch.h).
+extern "C" int RexSwitchSystemCore(void);
+extern "C" int RexSwitchSystemCoreMode(void);
+extern "C" unsigned RexSwitchAppCoreMask(void);
+extern "C" bool RexSwitchCoreIdleSample(int core, unsigned long long* idle_ticks, unsigned long long* at_ticks);
 #include "rex/ui/switch_saltynx.h"
 #include "rex/ui/switch_sysclk.h"
 
@@ -576,6 +582,22 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
                  has_clkrst ? "" : " (clkrst not available)", cores,
                  (unsigned long long)cores_mask, double(degrees_soc), double(degrees_board),
                  has_ts ? "" : " (ts not available)");
+    // banjo-nx (2026-10-27): the system core (4-core mode, threading_switch.h): how much of it nobody used over the
+    // interval (sampled by the audio output thread, which runs there), and the mode.
+    const int system_core = RexSwitchSystemCore();
+    if (system_core >= 0) {
+      static unsigned long long last_idle = 0, last_at = 0;
+      unsigned long long idle = 0, at = 0;
+      if (RexSwitchCoreIdleSample(system_core, &idle, &at)) {
+        if (last_at != 0 && at > last_at) {
+          std::fprintf(f, "     system core %d: idle %.1f%% (banjo_system_core %d; game threads on 0x%X)\n",
+                       system_core, 100.0 * double(idle - last_idle) / double(at - last_at),
+                       RexSwitchSystemCoreMode(), RexSwitchAppCoreMask());
+        }
+        last_idle = idle;
+        last_at = at;
+      }
+    }
   }
   // libnx calls: per second, with the ms per second the calling threads spend inside.
   {

@@ -16,9 +16,50 @@ SD card layout:
 Launch with a title takeover (hold R while starting a game, then open the Homebrew Menu), or a forwarder
 with a 39-bit address space. From the Album it will not have enough memory.
 
-Latest changes (this build, 2026-10-21, package 36z5: controls from SA2, two players, the Switch keyboard)
--------------------------------------------------------------------------------------------------------
-  COPY: banjo-nx.nro (NRO_SIZE bytes, md5 NRO_MD5...), renut.toml, renut_auto.toml and the configs folder (replace it).
+Latest changes (this build, 2026-10-22, package 36z7: textures released when memory runs short)
+-----------------------------------------------------------------------------------------------
+  COPY: banjo-nx.nro (NRO_SIZE bytes, md5 NRO_MD5...), renut.toml and renut_auto.toml (the configs folder is unchanged
+  from 36z6 but has the new key too: replace it).
+  Your 36z6 crash in the town (std::bad_alloc): the memory ran out (2,903 of 3,090 MB in use, 744 MB of it textures the
+  renderer keeps for the GPU, climbing by ~870 MB in the last 90 s while the town loaded). The renderer is meant to
+  release textures that have not been used for a while when memory runs short, but on the Switch it never did: the
+  rule compared against a "GPU memory budget", and on deko3d that budget was reported as 0, so the rule never fired.
+  Now the budget is the heap's real room (on the Switch textures, buffers, the game's memory and everything else share
+  one heap), and:
+  - with less than banjo_renut_textures_reserve_mb = 512 MB of room left, textures unused for 120 frames are released
+    (checked every 32 frames);
+  - with less than half of that, textures unused for 8 frames go, checked every second whatever the frame rate (your
+    town load ran at 0.5-4 fps, where 32 frames were up to a minute).
+  A released texture is made again from the game's memory when it is drawn (a short upload, the same picture).
+  Emulator: forced to release all the time (reserve 16 GB), the route ran at 26-30 fps without a problem.
+  Your crashed run also had the CPU profile on: the main game thread was 41 % in the new copies and 33 % in plain
+  generated code (it was about 70 % generated code before 36z6).
+
+Package 36z6 (2026-10-22: the Bejeweled 3 port's CPU method)
+------------------------------------------------------------
+  (36z6 files: banjo-nx.nro 88,623,301 bytes, md5 401455fd050f...; cache 60.)
+  Your request: the four steps of the Bejeweled 3 port's method, from your console profiles (the seven runs of
+  2026-10-21, packages 36u to 36z3).
+  1. Write back only the registers a function changed: Banjo's copies already did this (nothing to add).
+  2. Bulk copies: 360 more game functions run as "localized copies" (the game's own code with its registers kept in
+     the processor instead of memory), every function your profiles found hot that still ran as plain generated code
+     (at least 8 samples over the seven runs; they hold 91 % of the samples a lower bar would take). Left out: tiny
+     functions (already inlined), forms the copy tool cannot make, the five script interpreters (already optimised a
+     different way).
+  3. Small functions copied into the functions that call them: Banjo's copies already did this; inside the new copies
+     2,273 calls go to such inlined copies.
+  4. No self-check on the copies in play: every copy is called directly (before, each call counted down to its next
+     check). configs/banjo_hot_guard_on.toml puts the self-check back.
+  Checked in the emulator, with the copies compared against the original code: 22,975,090 calls compared, no
+  difference (verify mode), and with the self-check on the whole route, none either. On the way the comparison found
+  a bug in the self-check itself (it did not record one kind of store, the copies were fine): fixed.
+  A/B: configs/banjo_cpu_native_bulk_off.toml (the 360 back to the generated code). The PGO profile was taken again
+  in the emulator for this code (5 minutes, every profiler off, as you asked). Please send the logs of a run through the busy town: rex_profile.log shows how much
+  of each thread is in the copies now.
+
+Package 36z5 (2026-10-21: controls from SA2, two players, the Switch keyboard)
+-------------------------------------------------------------------------------
+  (36z5 files: banjo-nx.nro 80,644,293 bytes, md5 b21aa97b71b4...; cache 60.)
   deko3d_shaders.bin is unchanged (36z3's cache 60). Your renut.toml must be the new one: the controls are in it.
   1. Controls (sa2-nx's controller code, as you asked):
      - Xbox layout: the face buttons go by position, as on the 360 pad (input_xbox_layout = true): the bottom button

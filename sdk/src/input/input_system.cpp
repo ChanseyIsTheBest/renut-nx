@@ -48,6 +48,11 @@ REXCVAR_DEFINE_STRING(input_script, "", "Input",
                       "poll (buttons A B X Y START BACK UP DOWN LEFT RIGHT LB RB), each held 0.2 s. While set, user 0 "
                       "always has a pad connected (works minimized, with no controller)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(input_script_sticks, 0, "Input",
+                     "Test automation with input_script (banjo-nx 2026-10-23): from this many seconds after the first "
+                     "input poll, both analog sticks of user 0 wander at random (a new direction every 1.5 s, eased "
+                     "between them): the left stick moves the player, the right turns the camera. 0: off")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(input_rumble, false, "Input",
                     "Controller vibration (off by default: controllers only get "
                     "zero vibration). true = the game's vibration");
@@ -265,10 +270,44 @@ const std::vector<ScriptedPress>& InputScript() {
   }();
   return presses;
 }
+// Seconds since the first input poll (the script's clock).
+double ScriptSeconds() {
+  static const auto start = std::chrono::steady_clock::now();
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+}
+// banjo-nx (2026-10-23, input_script_sticks): the sticks' random wander: segment k of 1.5 s eases from target k to
+// target k + 1, each target four values in [-28000, 28000] from a hash of k.
+void ScriptedSticks(X_INPUT_GAMEPAD& pad) {
+  static const int32_t from = REXCVAR_GET(input_script_sticks);
+  if (from <= 0) return;
+  const double t = ScriptSeconds() - double(from);
+  if (t < 0.0) return;
+  static double logged = -1.0;
+  if (logged < 0.0) {
+    logged = t;
+    REXLOG_INFO("input_script: random stick movement from {:.1f} s", ScriptSeconds());
+  }
+  const uint64_t k = uint64_t(t / 1.5);
+  const double f = t / 1.5 - double(k);
+  const double ease = f * f * (3.0 - 2.0 * f);
+  auto target = [](uint64_t segment, uint32_t axis) {
+    uint64_t h = (segment * 4 + axis + 1) * 0x9E3779B97F4A7C15ull;
+    h ^= h >> 31;
+    h *= 0xBF58476D1CE4E5B9ull;
+    h ^= h >> 27;
+    return double(int64_t(h % 56001) - 28000);
+  };
+  int16_t axes[4];
+  for (uint32_t axis = 0; axis < 4; ++axis)
+    axes[axis] = int16_t(target(k, axis) + (target(k + 1, axis) - target(k, axis)) * ease);
+  pad.thumb_lx = axes[0];
+  pad.thumb_ly = axes[1];
+  pad.thumb_rx = axes[2];
+  pad.thumb_ry = axes[3];
+}
 // Buttons the script holds now for user 0 (the clock starts at the first poll).
 uint16_t ScriptedButtons() {
-  static const auto start = std::chrono::steady_clock::now();
-  const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+  const double now = ScriptSeconds();
   uint16_t buttons = 0;
   for (const ScriptedPress& press : InputScript()) {
     if (now >= press.at && now < press.at + 0.2) {
@@ -338,6 +377,9 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
       std::memset(out_state, 0, sizeof(*out_state));
       out_state->packet_number = packet;
       out_state->gamepad.buttons = buttons;
+      ScriptedSticks(out_state->gamepad);  // banjo-nx (2026-10-23)
+      if (REXCVAR_GET(input_script_sticks) > 0)
+        out_state->packet_number = ++packet;  // the sticks change at every read
     }
     return X_ERROR_SUCCESS;
   }

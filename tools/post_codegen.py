@@ -148,7 +148,8 @@ def main():
         # The localized native copies (app/generated/hot, from sa2-nx): made from the text as it stands after every
         # step above, so each copy matches the function the build compiles. The list is app/src/cpu/hot/localized.txt;
         # direct_calls.py (above) has already sent the callers of those functions through their hooks.
-        run(tool('localize_native.py'), '--list')
+        # 2026-10-22: and the bulk list (app/src/cpu/hot/localized_bulk.txt, from the console profiles: tools/switch_hot_bulk.py).
+        run(tool('localize_native.py'), '--list', '--bulk')
         # cpu_aggressive B: the XAudio limiter's copy computes log10 only where the dB value is read (the recompiled
         # original stays as it is: the hook's guard compares the two). Switch back: BANJO_HOT_LAZY_LOG10=OFF
         # (-DBANJO_LAZY_LOG10_ON=0) or the key banjo_cpu_native_sub_82B0D0C0.

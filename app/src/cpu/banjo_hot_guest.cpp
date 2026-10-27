@@ -72,8 +72,16 @@ REXCVAR_DEFINE_INT32(banjo_hot_guard_calls, 64, "Banjo/Enhancements",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(banjo_hot_guard_period, 4096, "Banjo/Enhancements",
                      "Native copies of hot game functions: after the first N, one call in P is guarded (rounded up to a "
-                     "power of two, at most 1048576)")
-    .range(1, 1 << 20)
+                     "power of two, at most 1048576). 0 with banjo_hot_guard_calls = 0: no guard at all, every hook "
+                     "calls its copy directly (no countdown; bejeweled3-nx's direct dispatch)")
+    .range(0, 1 << 20)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// banjo-nx (2026-10-22, bejeweled3-nx's method): the bulk list's copies (app/src/cpu/hot/localized_bulk.txt, hooks
+// in app/src/cpu/banjo_hot_shard_<k>.cpp) under one master key; each also has its own (category Banjo/Bulk copies).
+REXCVAR_DEFINE_BOOL(banjo_cpu_native_bulk, true, "Banjo/Enhancements",
+                    "Bulk localized copies: every game function the console profiles found hot that still ran as "
+                    "generated code, as a localized copy (registers in C++ locals; tools/localize_native.py --bulk). "
+                    "false = all of them back to the generated code (their own keys: banjo_cpu_native_sub_*)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_hot_count, false, "Banjo/Enhancements",
                     "Measurement (PC): every native copy runs in its counting form and logs/hot_counts.txt gets how "
@@ -105,19 +113,37 @@ REXCVAR_DEFINE_BOOL(banjo_hand_state_flush, true, "Banjo/Enhancements",
                     "more buffer space; checked by the guards of the hooks that contain them")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+REXCVAR_DEFINE_BOOL(banjo_hand_audio_filter, true, "Banjo/Enhancements",
+                    "Hand-written native of XAudio's per-voice state-variable filter (sub_82B0DCB8, the audio "
+                    "thread's hottest guest function): the filter state in registers and four channels at a time "
+                    "(NEON double lanes) instead of a byte-swapped load and store of every value at every sample; "
+                    "bit-identical (the same double multiply-adds rounded to float), checked by the guard of its hook")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+REXCVAR_DEFINE_BOOL(banjo_hand_xaudio_mix, true, "Banjo/Enhancements",
+                    "Hand-written native of XAudio's ramped channel mix (XAudio's MixFrameBufferChannel, the loop of "
+                    "the audio thread's router: a voice's 256 samples times a gain ramp added to a submix channel): "
+                    "the same vector multiplies and adds, sixteen samples a step with no store-card mark per vector "
+                    "(one for the range); checked by the guard of the router's hook")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 namespace banjo::hand {
 
 uint8_t g_state[kNatives] = {};
 
 namespace {
-constexpr const char* kNames[kNatives] = {"memcpy", "memset", "constant writers", "state flush writers"};
+constexpr const char* kNames[kNatives] = {"memcpy", "memset", "constant writers", "state flush writers",
+                                          "XAudio voice filter", "XAudio channel mix"};
 constexpr const char* kKeys[kNatives] = {"banjo_hand_memcpy", "banjo_hand_memset", "banjo_hand_constants",
-                                         "banjo_hand_state_flush"};
+                                         "banjo_hand_state_flush", "banjo_hand_audio_filter",
+                                         "banjo_hand_xaudio_mix"};
 bool Own(uint32_t which) {
-  return which == kMemcpy      ? bool(REXCVAR_GET(banjo_hand_memcpy))
-         : which == kMemset    ? bool(REXCVAR_GET(banjo_hand_memset))
-         : which == kConstants ? bool(REXCVAR_GET(banjo_hand_constants))
-                               : bool(REXCVAR_GET(banjo_hand_state_flush));
+  return which == kMemcpy        ? bool(REXCVAR_GET(banjo_hand_memcpy))
+         : which == kMemset      ? bool(REXCVAR_GET(banjo_hand_memset))
+         : which == kConstants   ? bool(REXCVAR_GET(banjo_hand_constants))
+         : which == kFlush       ? bool(REXCVAR_GET(banjo_hand_state_flush))
+         : which == kAudioFilter ? bool(REXCVAR_GET(banjo_hand_audio_filter))
+                                 : bool(REXCVAR_GET(banjo_hand_xaudio_mix));
 }
 // banjo_hot_count: calls by size, bucket 0 = size 0, bucket k = sizes [2^(k-1), 2^k).
 std::atomic<uint64_t> g_sizes[kNatives][34];
@@ -303,7 +329,7 @@ Hook::Hook(const char* name_, const char* key_, PPCFunc* orig_, void (*native_)(
            void (*native_logged_)(PPCContext&, uint8_t*, Logged&),
            void (*reference_logged_)(PPCContext&, uint8_t*, Logged&), void (*native_counted_)(PPCContext&, uint8_t*),
            std::atomic<uint64_t>* hits_, uint32_t hit_count_, const CodeRange* code_, uint32_t code_ranges_,
-           uint64_t code_hash_, bool (*own_)(), uint32_t slot_, const RegSkip* skip_)
+           uint64_t code_hash_, bool (*own_)(), uint32_t slot_, const RegSkip* skip_, bool bulk_)
     : name(name_),
       key(key_),
       orig(orig_),
@@ -318,7 +344,8 @@ Hook::Hook(const char* name_, const char* key_, PPCFunc* orig_, void (*native_)(
       code_hash(code_hash_),
       own(own_),
       slot(slot_),
-      skip(skip_) {
+      skip(skip_),
+      bulk(bulk_) {
   // In list order: the hooks are defined in the order of banjo_hot_list.inc, so append.
   Hook** tail = &g_hooks;
   while (*tail) tail = &(*tail)->next;
@@ -338,6 +365,7 @@ bool WriteLog::Grow() {
 uint8_t InitHook(Hook& h, uint8_t* base) {
   // May run on several threads at once for the first call: every one of them stores the same values.
   bool on = banjo::EnhancementActive(banjo::EnhancementGroup::kCpu, h.own());
+  if (on && h.bulk && !REXCVAR_GET(banjo_cpu_native_bulk)) on = false;
   if (on && !GuestCodeMatches(h, base)) on = false;
   const bool verify = REXCVAR_GET(banjo_cpu_verify);
   uint32_t period = 1;
@@ -346,9 +374,16 @@ uint8_t InitHook(Hook& h, uint8_t* base) {
   h.verify = verify;
   h.guard_calls = uint32_t(std::clamp(REXCVAR_GET(banjo_hot_guard_calls), 0, 4000));
   h.period = period;
-  uint8_t state = on ? kOn : kOff;
-  if (on && REXCVAR_GET(banjo_hot_count)) state = kCount;
-  if (on && h.state.load(std::memory_order_relaxed) == kUninit) {
+  // No guard at all: the hook calls its copy directly (banjo_hot_guest.h, kDirect).
+  const bool direct = !verify && h.guard_calls == 0 && REXCVAR_GET(banjo_hot_guard_period) == 0;
+  uint8_t state = on ? (direct ? kDirect : kOn) : kOff;
+  if (on && REXCVAR_GET(banjo_hot_count) && h.native_counted) state = kCount;
+  if (on && h.bulk) {
+    // The bulk hooks say so in the summary of the reports (hundreds of first calls would each be a line).
+  } else if (on && state == kDirect && h.state.load(std::memory_order_relaxed) == kUninit) {
+    REXLOG_INFO("[hot] {} ({}): native copy ON, direct (no guard: banjo_hot_guard_calls = banjo_hot_guard_period = 0)",
+                h.name, h.key);
+  } else if (on && h.state.load(std::memory_order_relaxed) == kUninit) {
     if (state == kCount) {
       REXLOG_INFO("[hot] {} ({}): native copy ON in its counting form (banjo_hot_count; no guard)", h.name, h.key);
     } else if (verify) {
@@ -555,7 +590,16 @@ void Check(Hook& h, PPCContext& ctx, uint8_t* base, uint32_t& counter) {
 }
 
 void ForEachKey(void (*row)(void* user, const char* key, bool own), void* user) {
-  for (Hook* h = g_hooks; h; h = h->next) row(user, h->key, h->own());
+  bool bulk = false;
+  for (Hook* h = g_hooks; h; h = h->next) {
+    if (!h->bulk) {
+      row(user, h->key, h->own());
+    } else {
+      bulk = true;
+      if (!h->own()) row(user, h->key, false);  // a bulk copy switched off by its own key
+    }
+  }
+  if (bulk) row(user, "banjo_cpu_native_bulk", REXCVAR_GET(banjo_cpu_native_bulk));
   for (uint32_t k = 0; k < ::banjo::hand::kNatives; ++k) row(user, ::banjo::hand::kKeys[k], ::banjo::hand::Own(k));
 }
 
@@ -585,12 +629,28 @@ void Report() {
   }
   // One line per hook that was reached, so each fits the log's line and a tool reads one function per line.
   uint64_t compared = 0, not_comparable = 0, differences = 0, not_repeated = 0;
-  uint32_t reached = 0, on = 0;
+  uint32_t reached = 0, on = 0, direct = 0, bulk_total = 0, bulk_reached = 0, bulk_on = 0;
   for (Hook* h = g_hooks; h; h = h->next) {
     const uint8_t state = h->state.load(std::memory_order_relaxed);
+    bulk_total += h->bulk;
     if (state == kUninit) continue;
     ++reached;
-    on += state == kOn;
+    on += state == kOn || state == kDirect;
+    direct += state == kDirect;
+    if (h->bulk) {
+      ++bulk_reached;
+      bulk_on += state == kOn || state == kDirect;
+      compared += h->compared.load(std::memory_order_relaxed);
+      not_comparable += h->not_comparable.load(std::memory_order_relaxed);
+      not_repeated += h->not_repeated.load(std::memory_order_relaxed);
+      const uint64_t d = h->differences.load(std::memory_order_relaxed);
+      differences += d;
+      // A bulk hook has a line of its own only when it found a difference (its copy is off since).
+      if (d)
+        REXLOG_INFO("[hot] {} (bulk) off after {} difference(s); {} calls compared before", h->name, d,
+                    h->compared.load(std::memory_order_relaxed));
+      continue;
+    }
     const uint64_t c = h->compared.load(std::memory_order_relaxed);
     const uint64_t n = h->not_comparable.load(std::memory_order_relaxed);
     const uint64_t d = h->differences.load(std::memory_order_relaxed);
@@ -599,13 +659,16 @@ void Report() {
     differences += d;
     const uint64_t r = h->not_repeated.load(std::memory_order_relaxed);
     not_repeated += r;
+    if (state == kDirect) continue;  // nothing is counted without the guard: the summary says it is on
     REXLOG_INFO("[hot] {} {}: about {} calls so far, {} compared with the original, {} not comparable (they reach a "
                 "call outside the copy), {} differences, {} more that did not repeat (inputs changed by another thread)",
                 h->name, state == kOn ? "ON" : "off", h->uses.load(std::memory_order_relaxed), c, n, d, r);
   }
-  REXLOG_INFO("[hot] native copies: {} reached, {} on; {} calls compared so far, {} not comparable, {} differed once "
-              "and not when repeated, differences: {}",
-              reached, on, compared, not_comparable, not_repeated, differences);
+  REXLOG_INFO("[hot] native copies: {} reached, {} on ({} direct, no guard); bulk copies (banjo_cpu_native_bulk {}): {} "
+              "of {} reached, {} on; {} calls compared so far, {} not comparable, {} differed once and not when "
+              "repeated, differences: {}",
+              reached, on, direct, REXCVAR_GET(banjo_cpu_native_bulk) ? "on" : "off", bulk_reached, bulk_total, bulk_on,
+              compared, not_comparable, not_repeated, differences);
 }
 
 }  // namespace banjo::hot

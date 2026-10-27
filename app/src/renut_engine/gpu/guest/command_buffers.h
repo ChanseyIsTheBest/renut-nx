@@ -20,6 +20,8 @@
  */
 #pragma once
 
+#include <string>
+
 #include <rex/types.h>
 
 #include "renut_engine/gpu/render/draw.h"
@@ -50,6 +52,9 @@ void RecordResolve(u32 device_va, u32 flags, const ClearRect *source_rect, u32 d
 
 // D3DDevice_RunCommandBuffer on a recording device: records the run.
 void RecordRun(u32 device_va, u32 command_buffer_va);
+// banjo-nx (2026-10-26, banjo_renut_diag_fast_census): replayed recordings against the frame before's; empty when none.
+std::string RepeatCensusReport();
+std::string StateSourceReport();  // banjo-nx (2026-10-26, banjo_renut_diag_fast_census)
 
 // Copies the data of the device's recorded Begin*Vertices draw, if any. Any
 // thread, with or without State().mutex.
@@ -73,5 +78,14 @@ struct CommandBufferMemory {
   size_t live = 0;
 };
 CommandBufferMemory CommandBufferMemoryUsage();
+
+// banjo-nx (2026-10-26, banjo_renut_tags): the 10 s "[renut] recording from marks" line (empty with nothing recorded);
+// resets its counts.
+std::string TagsReport();
+// banjo-nx (2026-10-27, banjo_renut_shadow_sort): the 10 s "[renut] shadow sort" line; resets its counts.
+std::string ShadowSortReport();
+// banjo-nx (2026-10-27, banjo_renut_shadow_sort): a shader object's content hash and whether its draws may be reordered
+// (draw.h ShaderSortableByHash), where it is made; any thread.
+void NoteShaderSortKey(u32 va, uint64_t hash, bool sortable);
 
 } // namespace renut::gpu

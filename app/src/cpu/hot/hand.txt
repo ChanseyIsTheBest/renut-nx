@@ -14,3 +14,5 @@
 8222F0D8            # Direct3D shader float-constant writer, pixel shader block
 8222CB90 exact=r1,r3   # Direct3D state flush: dirty register words into type-0 packets
 8222D0E8 exact=r1,r3   # Direct3D state flush: dirty float-constant blocks into type-0 packets
+82B0DCB8 exact=r1,r3   # XAudio per-voice state-variable filter (audio thread)
+rex_XAudioMixFrameBufferChannel exact=r1   # XAudio's ramped channel mix, the router's loop (audio thread)

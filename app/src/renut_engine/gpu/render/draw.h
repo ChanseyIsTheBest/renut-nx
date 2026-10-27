@@ -12,6 +12,8 @@
  */
 #pragma once
 
+#include <string>
+
 #include <cstdint>
 #include <vector>
 
@@ -19,6 +21,8 @@
 
 #include "renut_engine/gpu/d3d/d3d.h"
 #include "renut_engine/gpu/backend/video.h"
+
+struct ShaderCacheEntry;  // banjo-nx (2026-10-27): ShaderSortableByHash
 
 namespace renut::gpu {
 
@@ -62,6 +66,49 @@ struct DrawCall {
 // Also before the command list is submitted.
 void FlushVertexFillsLocked();
 
+// banjo-nx (2026-10-27, the user's "export checks first", record-time translation): a texture fetch slot's guest
+// extent (TextureGuestExtent: the base level's pages and bytes, the mip chain's), worked out by the recording threads
+// (command_buffers.cpp NewOp) for the slots whose fetch words an op changed, kept per replay depth by Replay, and read
+// by the fast path's export check instead of a table of answers by fetch words (render/draw.cpp FastExportReads).
+struct SlotExtent {
+  u32 pages[2], sizes[2];
+};
+struct DrawSlotExtents {
+  u32 mask = 0;  // slots whose extent is known (bit r)
+  SlotExtent slot[d3d::kTextureFetchSlots];
+};
+// Set by Replay around a replayed draw whose device's texture slots it has the extents of; null otherwise.
+extern const DrawSlotExtents *g_draw_slot_extents;
+bool RecordExtentsOn();
+
+// banjo-nx (2026-10-27, the user's Phase A: resources resolved when bound, Unleashed's model where N&B allows it).
+// The recording threads (command_buffers.cpp NewOp) resolve each texture slot whose address or fetch words an op
+// changed to a texture object (its guest header's address and words at that moment; made on first use, shared by every
+// draw that binds it), and take a draw's index buffer header words; Replay keeps them per replay depth; the render
+// thread's draw reads one object per texture (render/draw.cpp FillTextures) and no guest header.
+struct TextureObject;
+// Any thread: the object of (va, header words), made on first use; null when the table is full (the draw then takes
+// the path without objects).
+TextureObject *FindTextureObject(u32 va, const u32 header[6]);
+struct DrawResources {
+  TextureObject *slot[d3d::kTextureFetchSlots] = {};
+  u32 mask = 0;  // slots whose object the recording gave (bit r)
+  u32 ib[3] = {};  // the index buffer header's Common, Address, Size when the draw was recorded
+  bool ib_valid = false;
+  // The vertex buffer headers' first two Format words (CPU base, size) of the draw's bound stream sources (bit s).
+  u32 vb_mask = 0;
+  u32 vb[16][2] = {};
+};
+// Set by Replay around a replayed draw; null otherwise (and with banjo_renut_resource_objects off, A/B 45).
+extern const DrawResources *g_draw_resources;
+bool ResourceObjectsOn();
+
+// banjo-nx (2026-10-27, the user's shadow-caster culling; banjo_renut_shadow_cull_indices, 0 = off by default; NOT
+// pixel-identical): whether Replay skips this draw: a draw of at most that many indices (or vertices) that writes depth
+// only, into a square depth target (the shadow maps; the scene's depth has the screen's shape). Replay's device image.
+bool ShadowCasterCulledLocked(const u8 *device_state, const DrawCall &call);
+u32 ShadowCullIndices();
+
 // The float constants of a replayed draw: the groups of four registers its
 // command buffer had set by the draw (m_Pending bit 63 - group) are in the
 // draw's snapshot, the rest are the running device's.
@@ -89,28 +136,142 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call,
 // 12,712-byte snapshot) 41 (10112-12711, the last one 40 bytes); SA2 47 (10112-13087). 'seq' numbers the chain's draws (consecutive, from 2; a whole copy marks every chunk); 0 for
 // any other draw. A memo of a draw's derived state is valid for the next draw when its seq is the memo's + 1 and none
 // of the chunks it reads changed.
+// banjo-nx (2026-10-26, Unleashed-style step 1): 'fields', the device fields that changed since the previous draw
+// (DrawField bits), found by the recording threads word by word (command_buffers.cpp NewOp) or from the chain's chunks
+// (queued.cpp): what a piece of the draw's state reads, by field, so a piece whose fields did not change keeps the
+// previous draw's answer (Unleashed's dirty states).
+enum DrawField : u32 {
+  kFieldFetch = 1u << 0,        // the texture fetch constants, 0x480-0x6EF (banjo-nx 2026-10-27: the vertex ones apart)
+  kFieldBools = 1u << 1,        // the bool and integer constants and the clip planes, 0x2780-0x287F
+  kFieldDest = 1u << 2,         // the destination packet, 0x2880-0x28BF
+  kFieldViewPackets = 1u << 3,  // the window, values and control packets, 0x28C0-0x2967
+  kFieldMisc = 1u << 4,         // the other packets, 0x2968-0x2A7F but 0x29C0
+  kField29C0 = 1u << 5,         // the word ComputeViewport reads at 0x29C0
+  kFieldUnread = 1u << 6,       // 0x2A80-0x2DFF: the private words no draw reads
+  kFieldPrivate = 1u << 7,      // the private render state, 0x2E00-0x2EFF but the declaration
+  kFieldDecl = 1u << 8,         // the vertex declaration, 0x2E2C
+  kFieldTail = 1u << 9,         // the rest: 0x2F00-0x3093, 0x3168-0x3183, 0x319C-0x31A3
+  kFieldIndex = 1u << 10,       // the index buffer, 0x3094
+  kFieldTargets = 1u << 11,     // the render targets and the depth surface, 0x3098-0x30AB
+  kFieldStreams = 1u << 12,     // the stream sources and strides, 0x30AC-0x30FF
+  kFieldTexWords = 1u << 13,    // the texture words, 0x3100-0x3167
+  kFieldScissor = 1u << 14,     // SetScissorRect's RECT, 0x3184-0x3193
+  kFieldShaders = 1u << 15,     // the pixel and vertex shaders, 0x3194-0x319B
+  kFieldPredication = 1u << 16, // the predication, 0x31A4
+  // banjo-nx (2026-10-27, render thread night): the vertex fetch constants, 0x6F0-0x77F, apart from the texture ones: a
+  // draw of another mesh changes its streams' fetch constants (72-77 % of the draws), which made every such draw take
+  // its textures again as if a texture had changed (Unleashed's dirty flags are per object).
+  kFieldVertexFetch = 1u << 17,
+  kFieldsAll = (1u << 18) - 1,
+};
+constexpr u32 FieldOfOffset(u32 at) {
+  if (at < 0x480)
+    return 0;
+  if (at < 0x6F0)
+    return kFieldFetch;
+  if (at < 0x780)
+    return kFieldVertexFetch;
+  if (at < 0x2780)
+    return 0;  // the float constants: by group (m_Pending)
+  if (at < 0x2880)
+    return kFieldBools;
+  if (at < 0x28C0)
+    return kFieldDest;
+  if (at < 0x2968)
+    return kFieldViewPackets;
+  if (at >= 0x29C0 && at < 0x29C4)
+    return kField29C0;
+  if (at < 0x2A80)
+    return kFieldMisc;
+  if (at < 0x2E00)
+    return kFieldUnread;
+  if (at >= 0x2E2C && at < 0x2E30)
+    return kFieldDecl;
+  if (at < 0x2F00)
+    return kFieldPrivate;
+  if (at < 0x3094)
+    return kFieldTail;
+  if (at < 0x3098)
+    return kFieldIndex;
+  if (at < 0x30AC)
+    return kFieldTargets;
+  if (at < 0x3100)
+    return kFieldStreams;
+  if (at < 0x3168)
+    return kFieldTexWords;
+  if (at < 0x3184)
+    return kFieldTail;
+  if (at < 0x3194)
+    return kFieldScissor;
+  if (at < 0x319C)
+    return kFieldShaders;
+  if (at < 0x31A4)
+    return kFieldTail;
+  return kFieldPredication;
+}
+// The fields of a run of device bytes.
+constexpr u32 FieldsOfRange(u32 at, u32 size) {
+  u32 fields = 0;
+  for (u32 w = at & ~3u; w < at + size; w += 4)
+    fields |= FieldOfOffset(w);
+  return fields;
+}
+
 struct ChainHint {
   uint64_t seq = 0;
   uint64_t changed[2] = {};
+  u32 fields = kFieldsAll;  // banjo-nx (2026-10-26)
 };
 extern ChainHint g_chain_hint;
 // banjo-nx (2026-10-20): the next ChainHint::seq, shared by every producer of hints (backend/queued.cpp's delta chain,
 // guest/command_buffers.cpp's replays): a producer whose number is not its previous one + 1 had another draw in between
-// and marks every chunk changed.
-uint64_t NextChainSeq();
+// and marks every chunk changed. banjo-nx (2026-10-27, render thread night): inline (a call into draw.cpp a draw).
+inline uint64_t g_chain_seq_counter = 1;  // the first hint is 2
+inline uint64_t NextChainSeq() { return ++g_chain_seq_counter; }
 constexpr u32 kChainHeadChunks = 30;
 constexpr u32 kChainTailBegin = 10112;
 // The chain chunk of a device byte outside the float constants.
 constexpr u32 ChainChunkOf(u32 device_offset) {
   return device_offset < kChainTailBegin ? device_offset / 64 : kChainHeadChunks + (device_offset - kChainTailBegin) / 64;
 }
-// Whether any chunk of device bytes [first, last] changed (both outside the float constants, on the same side).
-inline bool ChainChanged(const ChainHint &h, u32 first, u32 last) {
-  for (u32 c = ChainChunkOf(first); c <= ChainChunkOf(last); ++c) {
-    if ((h.changed[c / 64] >> (c % 64)) & 1)
-      return true;
+// Whether any chunk of device bytes [First, Last] changed (both outside the float constants, on the same side).
+// banjo-nx (2026-10-26): the chunks as a mask made at compile time, one AND a word (a loop over the chunks before, a
+// test and a branch each, at every check of every draw).
+struct ChainMask {
+  uint64_t m[2] = {};
+};
+constexpr ChainMask ChainMaskOf(u32 first, u32 last) {
+  ChainMask r{};
+  for (u32 c = ChainChunkOf(first); c <= ChainChunkOf(last); ++c)
+    r.m[c / 64] |= uint64_t(1) << (c % 64);
+  return r;
+}
+// banjo-nx (2026-10-26): the fields of each chain chunk, and of a chain's changed chunks (coarse: a chunk's fields).
+struct ChainFieldTable {
+  u32 f[128];
+};
+constexpr ChainFieldTable MakeChainFieldTable() {
+  ChainFieldTable t{};
+  for (u32 c = 0; c < 128; ++c) {
+    const u32 at = c < kChainHeadChunks ? c * 64 : kChainTailBegin + (c - kChainHeadChunks) * 64;
+    t.f[c] = at < d3d::kDeviceSnapshotSize ? FieldsOfRange(at, 64) : 0;
   }
-  return false;
+  return t;
+}
+inline constexpr ChainFieldTable kChainFieldTable = MakeChainFieldTable();
+inline u32 ChainFields(const uint64_t changed[2]) {
+  u32 fields = 0;
+  for (u32 w = 0; w < 2; ++w)
+    for (uint64_t bits = changed[w]; bits; bits &= bits - 1)
+      fields |= kChainFieldTable.f[w * 64 + u32(__builtin_ctzll(bits))];
+  return fields;
+}
+
+template <u32 First, u32 Last>
+inline bool ChainChanged(const ChainHint &h) {
+  constexpr ChainMask m = ChainMaskOf(First, Last);
+  static_assert(First <= Last && (Last < kChainTailBegin || First >= kChainTailBegin));
+  return ((h.changed[0] & m.m[0]) | (h.changed[1] & m.m[1])) != 0;
 }
 
 struct ClearRect {
@@ -163,6 +324,58 @@ bool FrontBufferWrittenLocked(u32 texture_va);
 
 // A vertex declaration record at 'declaration_va' is being destroyed.
 void ForgetVertexDeclarationLocked(u32 declaration_va);
+// banjo-nx (2026-10-23, batch 6b): the 10 s report's repeat census line (banjo_renut_diag_repeat_census), or empty.
+std::string RepeatCensusReport();
+
+// banjo-nx (2026-10-26, banjo_renut_diag_unleashed_census): what Unleashed's resource model and record-time
+// translation would find in N&B. Resources: the headers our Create hooks made (kind 1 vertex buffer, 2 index buffer,
+// 3 texture, 4 a texture header the game had D3D_SetTextureHeader write), and the Lock calls by kind. Runs: each
+// RunCommandBuffer's recordings, counted as run before (the same recording again) or not.
+bool UnleashedCensusOn();
+void NoteHookResource(u32 header, u8 kind);
+void ForgetHookResource(u32 header);
+void NoteResourceLock(u32 resource, u32 bytes);
+void NoteCommandBufferRun(const void *recording, u32 draws, uint64_t swap);
+std::string UnleashedCensusReport();
+std::string FastCensusReport();  // banjo-nx (2026-10-26, banjo_renut_diag_fast_census)
+// banjo-nx (2026-10-26, the record-time draw path): the fast draws' 10 s line (empty when none), and the executor's
+// kept state dropped (a shader or vertex declaration record destroyed).
+std::string FastDrawReport();
+std::string TextureAnswersReport();  // banjo-nx (2026-10-27): FillTextures' answers by kind
+// banjo-nx (2026-10-27, banjo_renut_diag_draw_kinds): the replay's draws by kind (shadow: a depth target and no pixel
+// shader; other draws without one; colour draws), with the render thread's time from the op's state to the draw's end,
+// the fields that changed, and the runs of one kind. Replay times each draw op when DrawKindsCensusOn().
+bool DrawKindsCensusOn();
+void NoteDrawKind(uint64_t ticks);
+// banjo-nx (2026-10-27): a replayed draw that changed no field and wrote no constant since the draw before, drawing the
+// indices right after its range with the same primitive and base vertex ('same_state' without the range test).
+void NoteDrawMerge(bool same_state, bool contiguous);
+// banjo-nx (2026-10-27, render thread night, banjo_renut_merge_draws / A/B 33): whether the device's shaders let a draw
+// take the draws after it that change nothing (MergeDrawsOn): none exports, skins once, draws fur or the composite.
+bool MergeDrawsOn();
+bool MergeableShadersLocked(const u8 *device_state);
+// banjo-nx (2026-10-27, banjo_renut_shadow_sort): whether draws of these shaders (guest addresses; pixel 0: none) may be
+// replayed in another order: both known, neither exporting memory, skinning once or of the fur family, no composite.
+bool SortableShadersLocked(u32 vs_va, u32 ps_va);
+// The same test from a shader's hash and cache entry, on any thread (where a shader object is made).
+bool ShaderSortableByHash(uint64_t hash, const ShaderCacheEntry *entry, bool pixel);
+void CountMergedDraws(uint64_t draws, uint64_t ops);
+std::string DrawKindsReport();
+inline uint64_t RenderTicks() {
+#if defined(__aarch64__)
+  uint64_t t;
+  asm volatile("mrs %0, cntpct_el0" : "=r"(t));
+  return t;
+#else
+  return uint64_t(__builtin_ia32_rdtsc());
+#endif
+}
+void InvalidateFastDrawLocked();
+u32 FastTextureMaskGuess();
+void PrefetchTextureMemoLocked(u32 va, const d3d::TextureFetchConstant &fetch);
+// banjo-nx (2026-10-26, API-level stage 2): the 10 s "[renut] whole buffers" line; resets its counts.
+std::string WholeBuffersReport();
+std::string ConvertReuseReport();  // banjo-nx (2026-10-26, banjo_renut_convert_reuse)
 
 // Once per guest Swap: ages the converted vertex stream cache and drops the
 // streams no draw has read for a while.

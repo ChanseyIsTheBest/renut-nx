@@ -84,12 +84,14 @@ if(NOT TARGET rexglue_switch_startup)
     # It also counts the libnx calls that cost IPC or walk memory (fences,
     # submissions, NvMap, GPU addresses and mappings, armDCacheClean, the window
     # queue and svcSleepThread) and the time the calling threads spend inside.
+    # banjo-nx (2026-10-27): svcSetThreadCoreMask, to keep the game threads off the system core when the process
+    # is granted four cores (threading_switch.cpp, banjo_system_core).
     target_link_options(rexglue_switch_startup INTERFACE
         "LINKER:--wrap=threadCreate,--wrap=threadClose"
         "LINKER:--wrap=nvFenceWait,--wrap=nvGpuChannelKickoff,--wrap=nvMapCreate"
         "LINKER:--wrap=nvAddressSpaceAllocFixed,--wrap=nvioctlNvhostAsGpu_MapBufferEx"
         "LINKER:--wrap=armDCacheClean,--wrap=nwindowQueueBuffer,--wrap=bqDequeueBuffer"
-        "LINKER:--wrap=svcSleepThread")
+        "LINKER:--wrap=svcSleepThread,--wrap=svcSetThreadCoreMask")
 endif()
 
 function(rexglue_switch_configure_target target_name)

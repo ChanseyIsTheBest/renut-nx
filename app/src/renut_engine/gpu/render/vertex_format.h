@@ -111,6 +111,10 @@ u32 FetchDeclType(u32 format, bool is_signed, bool is_integer);
 // stream's vertex fetch constant (usually 2 = 8in32).
 void ConvertVertices(const HostVertexStream &stream, const u8 *guest, u32 guest_stride,
                      u32 vertex_count, u32 endian, u8 *host);
+// banjo-nx (2026-10-23, batch 6): the same from the stream's elements and host stride (a queued fill keeps them in an
+// arena instead of a copy of the stream's vector, a heap allocation per fill).
+void ConvertVertices(const HostVertexElement *elements, u32 element_count, u32 host_stride, const u8 *guest,
+                     u32 guest_stride, u32 vertex_count, u32 endian, u8 *host);
 
 const char *UsageSemantic(u8 usage);
 

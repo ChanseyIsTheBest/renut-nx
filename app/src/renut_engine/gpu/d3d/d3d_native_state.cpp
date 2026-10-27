@@ -1383,6 +1383,7 @@ u32 Srw(u32 value, u32 amount) {
 // ring and their bits are cleared. (Its SetPending_Predicated, 0x8226AAB8,
 // clears only bits these masks clear too.)
 void FlushStatePackets(Device d) {
+  d.TouchTags();  // banjo-nx (2026-10-26, banjo_renut_tags): what they covered stays marked
   if (const u64 states = d.Pending(kPendingStates))
     d.SetPending(kPendingStates, states & ~(u64(0x1FFFF) | (u64(0x1FFFFFFFFF) << 21)));
   d.SetPending(kPendingFetch, d.Pending(kPendingFetch) & ~(u64(0x1FFFFF) << 34));
@@ -1689,6 +1690,47 @@ void EndExport(Device device, u32 index, u32 resource, u32 flags) {
   else if (flags != 2)
     Export512Pixels(device);
   device.SetW(kExportNanVertexDone, (!count && flags == 1) ? 1 : 0);
+}
+
+// banjo-nx (2026-10-26, banjo_renut_tags): the slots of d3d_native.h.
+u32 TouchSlotSlow(u32 va) {
+  u32 slot = 0;
+  if (va) {
+    for (u32 i = 1; i < kTouchSlots; ++i) {
+      if (g_touch_va[i].load(std::memory_order_acquire) == va) {
+        slot = i;
+        break;
+      }
+    }
+  }
+  const u32 index = TouchMapIndex(va);
+  if (!slot)
+    slot = kTouchSlots + index % kTouchSinks;
+  g_touch_map[index].store(uint64_t(va) << 32 | slot, std::memory_order_relaxed);
+  return slot;
+}
+
+void TrackDeviceTouches(u32 va) {
+  if (!va)
+    return;
+  for (u32 i = 1; i < kTouchSlots; ++i) {
+    if (g_touch_va[i].load(std::memory_order_acquire) == va) {
+      g_touch[i].chunks = ~uint64_t(0);  // made again: nothing known
+      return;
+    }
+  }
+  for (u32 i = 1; i < kTouchSlots; ++i) {
+    u32 expected = 0;
+    if (g_touch_va[i].load(std::memory_order_relaxed) != 0)
+      continue;
+    // Every chunk marked before the slot is anyone's: the device's first op compares them all.
+    g_touch[i].chunks = ~uint64_t(0);
+    if (g_touch_va[i].compare_exchange_strong(expected, va, std::memory_order_acq_rel)) {
+      g_touch_map[TouchMapIndex(va)].store(uint64_t(va) << 32 | i, std::memory_order_release);
+      return;
+    }
+  }
+  // No slot left: the device marks its threads' sinks and is compared whole.
 }
 
 }  // namespace renut::gpu::native

@@ -103,13 +103,6 @@ u32 LevelBytes(const TextureLevelLayout &level, TextureDimension dimension, u32 
 
 } // namespace
 
-TextureFetch TextureFetch::FromGuest(const d3d::TextureFetchConstant &guest) {
-  TextureFetch fetch;
-  for (u32 i = 0; i < 6; ++i)
-    fetch.dword[i] = guest.dword[i];
-  return fetch;
-}
-
 TextureFetch TextureFetch::FromHeader(const d3d::TextureFetchConstant &header) {
   TextureFetch fetch = FromGuest(header);
   if (fetch.BasePage())
