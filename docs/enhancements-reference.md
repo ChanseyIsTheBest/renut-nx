@@ -1713,6 +1713,56 @@ The pipeline cache is saved once no pipeline was built for 15 s (at most once a 
 regardless), not every minute with new pipelines: the save holds the driver's cache lock, which a compile on the
 render thread waits for. Unleashed saves at its loading screens. Same pipelines.
 
+### Render thread night and the shadow sort (2026-10-27)
+
+Measured on the console in `docs/record-time-draw-path.md` ("Console run of the shadowsort package"). All are exact;
+the ones the A/B list switches have their target in brackets.
+
+- `banjo_renut_touch_compare` [26], `banjo_renut_tags_apart` [27] (Banjo/Enhancements, on): the native D3D setters mark
+  only values that change, and their tags stay out of the recording devices (fewer chunks compared a recorded op).
+- `banjo_deko3d_texture_skip` [39] (on): plume's bindTextures skipped for a draw whose pipeline, descriptor epoch,
+  image set and shared-constant lines are those of its last whole run; the deko3d line counts "bound textures N read,
+  M skipped".
+- `banjo_renut_shadow_sort` [40] (**off** since the 2026-10-27 console run: render thread +1.13 ms, GPU +0.65 ms): runs of
+  depth-only draws replayed sorted by shader contents, render state and texture slots; `banjo_renut_shadow_sort_verify`
+  (Banjo/Debug) compares each sorted draw's whole device with its recorded op's. Set it on for A/B 40.
+- `banjo_renut_replay_lookahead` [29] (**off** since the 2026-10-27 console run: +2.15 ms): the replay prefetching the next
+  op's shader lookups, guest headers and texture memo entries. Set it on for A/B 29.
+- Without a key of their own (A/B only): 28 render-state numbers by content, 30 base-vertex draws, 31 no texture or pixel
+  constant work for draws that sample nothing, 32 texture memo refresh, 34 resident literals, 35 texture epochs by page
+  and address, 36 kept fetch data, 37 kept stream sources, 38 index copies bound by pool chunk, 41 the fast path's shader
+  checks by cache entry, not by shader object.
+
+### Four-core mode and mesh objects (2026-10-27 afternoon)
+
+- `banjo_system_core` (Banjo/Threads, `1`) and `banjo_system_core_compiles` (`true`): NetherSX2_nx's 4-core mode (MIT,
+  NaGaa95). With all four cores granted (a forwarder whose NPDM allows CPU 0-3) the audio output thread, the Audio
+  Worker, the XMA Decoder, XAudio's mixer threads and the shader compiles run on core 3 alone; every other thread stays on
+  0-2. No effect with the usual three cores. See `docs/four-core-mode.md`. Same output: thread placement only.
+- `banjo_renut_mesh_objects` [42] (Banjo/Enhancements, on): a whole-buffer draw's geometry (its streams' and index
+  buffer's whole copies) kept as an object under what it is resolved from, found by one probe; any copy dropped or cache
+  entry erased retires every object (`g_mesh_gen`), and the copies are proven once per kick interval as before. The
+  10 s line "mesh objects" counts the answers. Exact: the same copies the old path finds for the same inputs, proven by
+  the same rule; `banjo_renut_whole_buffers_verify` checks the draws either way. See `docs/record-time-draw-path.md`.
+- `banjo_renut_record_extents` [43] (Banjo/Enhancements, on), `banjo_renut_record_extents_verify` (Banjo/Debug): the
+  recording threads work out the guest extent of each texture slot whose fetch words a recorded op changed; a replayed
+  draw's memexport check tests those against the 1 KB export bitmap instead of a table of answers by fetch words (which
+  the pending exports' changes, several a frame, emptied). Exact (emulator verify: about 3 million checks, 0 differ).
+  See `docs/record-time-draw-path.md` ("Record-time translation, the export checks").
+- `banjo_renut_shadow_cull_indices` (Banjo/Enhancements, **0 = off**; NOT pixel-identical, the user's call): shadow
+  casters of at most this many indices are not drawn into the shadow maps (depth-only draws into a square depth target:
+  N&B's 1024 and 768 maps). `renut_shadowcull.toml` sets 300 (about 14 % of the shadow draws on the emulator's title
+  screen; 3000 would be about 65 %). The 10 s line "shadow casters skipped" counts them.
+  `banjo_renut_diag_shadow_census` (Banjo/Debug): the depth-only draws by depth target and index count.
+- `banjo_xma_frame_cache` (Banjo/Audio, on), `banjo_xma_frame_cache_verify` (Banjo/Debug), `banjo_xma_frame_cache_mb`
+  (24): a decoded XMA frame kept under the chain of frames its codec decoded since it was opened (the format at the root,
+  each packet's exact bytes); a sound played again from its start takes the samples of the first time instead of
+  FFmpeg's decode. The codec catches up on the frames it skipped (decoded, output discarded) before the first frame the
+  cache cannot answer, at most 256 in a row (short repeated sounds). Exact: FFmpeg's xmaframes decoder (WMA Pro) depends
+  only on the frames since it was opened (overlap-add tail, previous block length, reused scale factors); the verify key
+  decodes every frame and compares. `sdk/src/audio/xma_context.cpp`, XmaContext::DecodeFrame; the XMA log line every
+  10 s counts the answers.
+
 ## Other keys
 
 Not enhancements, but they decide how the ones above run or are measured.

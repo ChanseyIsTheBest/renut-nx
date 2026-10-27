@@ -1511,3 +1511,87 @@ functions gathered by the linker (their 4 KB pages 1,449 -> 584), inline copies 
 callers' files; twelve ideas audited out (two localized copies that measured dearer or that their guard could not
 check; `-mno-outline-atomics`, which changed nothing: GCC did not outline our atomics). Each with its CMake switch:
 `docs/codegen-enhancements.md`, "Package 27's codegen round".
+
+## Bulk localized copies and direct dispatch (2026-10-22, bejeweled3-nx's method)
+
+The user's request: apply the Bejeweled 3 port's CPU method (its `docs/optimising-functions.md`: four steps that took
+its heaviest frames from 25 to 15 ms on the console) to Banjo, from the console profiles we already have, because the
+busy town is starting to be CPU-limited. Its four steps, and where Banjo stands on each:
+
+1. **Changed-only register write-backs in every copy.** Already Banjo's: `tools/localize_native.py`'s `dirty_sets` is a
+   may-differ dataflow over each copy (a return stores only the registers changed on some path to it; a call stores
+   only those changed AND reachable by its callee, and loads back only those the callee can change; a `switch` jump
+   table is followed, not given up on). Nothing to port.
+2. **Bulk localization.** New. `tools/switch_hot_bulk.py` reads console profiles (`rex_profile.log` with the ELF of the
+   NRO that wrote it), adds up each recompiled function's samples over every thread, and writes
+   `app/src/cpu/hot/localized_bulk.txt`: every function still in generated code with at least 8 samples over the
+   seven console runs of 2026-10-21 (packages 36u to 36z3, gameplay reports only), except tiny leaves (12 guest
+   instructions or fewer, no call: the generator inlines them already), forms the copy tool refuses (time base reads,
+   atomics, host calls), anything an app or SDK source names (their own hooks), and the five script interpreters whose
+   jump tables `tools/switch_goto.py` threads (a copy is made before that step and would undo it). 363 functions;
+   `tools/localize_native.py --list --bulk` (run by `tools/post_codegen.py`) made 360 of them (three have a callee with a
+   switch form it does not know). They cover 18,982 of the 20,887 samples a threshold of 3 would take (808
+   functions). Their hooks (`BANJO_HOT_HOOK_BULK`) go into `app/generated/hot/banjo_hot_bulk_<k>.inc`, twelve shards by
+   header size, each compiled by its own `app/src/cpu/banjo_hot_shard_<k>.cpp` (`banjo_hot_prelude.h`; CMake's
+   `BANJO_HOT_SOURCES` gives them the copies' compile rules). One master key, `banjo_cpu_native_bulk`; each copy also
+   has its own `banjo_cpu_native_sub_<address>` (category "Banjo/Bulk copies"). The `[hot]` report summarises them
+   ("bulk copies ... N of 360 reached, M on") and names one only when its guard found a difference.
+3. **Leaf callees inlined in the copies.** Already Banjo's, in a stronger form: a copy brings its direct callees along
+   as copies of their own (the closure: any callee whose whole call tree can be copied, up to 1,200 lines a member and
+   6,000 a copy, inlined by force up to 300 lines or when called once), where bejeweled3-nx inlines leaves of up to 12
+   (or, for its hottest, 160) instructions. The bulk copies make 2,273 calls to inlined callee copies and 2,068 real
+   calls (indirect, imports, app hooks, call trees too large).
+4. **Direct hook dispatch.** New. With `banjo_hot_guard_calls = 0`, `banjo_hot_guard_period = 0` (now allowed: "no
+   guard"), verify and `banjo_hot_count` off, a hook's state is `kDirect`: one byte and the copy, no countdown to the
+   next checked call (for the bulk hooks, past the 60 per-thread slots, that countdown was a counter shared by every
+   thread and written at every call). `renut.toml` ships this; `configs/banjo_hot_guard_on.toml` puts the guard back
+   (64 first calls per thread, then 1 in 4096) and `configs/banjo_cpu_verify.toml` checks every call. The Switch build
+   no longer makes the counting form of the copies (a PC measurement). The report now comes with the renderer's 10 s
+   line (`banjo_renut_tuning.cpp`): without a guard nothing else calls it.
+
+The A/B of the round: `configs/banjo_cpu_native_bulk_off.toml` (the 360 back to generated code, the hand-picked 25
+stay). Earlier finding to watch (this section's "Why 18 and not 40"): copies of functions with about forty context
+registers measured longer on the A57; the bulk copies have a median of 14, one has 41 (`sub_82226BD0`).
+
+**A guard bug the bulk copies found** (emulator, guard on: `banjo_hot_guard_calls = 64`, `banjo_hot_guard_period =
+4096`). One repeatable difference in 329 reached copies, `sub_82226330` (a draw's vertex-shader constants: a 4x4
+matrix built by its callee `sub_8225F3F8`, uploaded by Direct3D's constant writer): the copy and the original wrote
+different constants. Not the hand-written constant writer (the same with `banjo_hand_constants = false`): the matrix
+is written with unaligned vector stores, which `tools/vec_unaligned_stores.py` writes as `REX_STVLX` / `REX_STVRX`
+(one helper call), and the copies' logged forms did not record that form (only `REX_STORE_*`, raw vector stores and
+dcbz). The guard neither rolled those stores back nor compared them, so a guarded call made them four times. The
+copy's play form was exact all along (the same helper as the generated code). `localize_native.py` now records them
+in the logged forms (`if (s.Note(<the bytes they cover>)) REX_STVLX(...)`; the play form's `Note` is a constant true)
+and refuses any other form of them; 33 copy headers had them, hand-picked ones included. For the other ports with this
+tool (sa2-nx's family): the same gap is there wherever the copies are made after `vec_unaligned_stores.py`.
+
+## Render thread night and the shadow sort (2026-10-27)
+
+The record of the work and its measurements is `docs/record-time-draw-path.md` (sections "Render thread night", "Render
+thread audit", "Shadow sort" and "Console run of the shadowsort package"). The console's city run of
+builds/2026-10-27_1047_shadowsort (handheld, stock clocks): 17.2 fps, render thread 53.6 ms, GPU 40.5 ms, 10.28 us of
+render thread a draw (setters2: 16.1 fps, 56.9 ms, 41.0 ms, 11.23 us). Its in-run A/B over targets 41-26 put every item
+within -3.7 % ... +4.0 %; two cost time and are now OFF by default, each with a note at its definition: the shadow sort
+(`banjo_renut_shadow_sort`, A/B 40: render thread +1.13 ms, GPU +0.65 ms) and the replay's look-ahead prefetch (its own
+key now, `banjo_renut_replay_lookahead`, A/B 29: +2.15 ms in one period). Found the same day: the A/B target list kept
+only targets below 32 and the single target was limited to 0-19, so the night packages' lists never ran 32-39; both
+now go to 63.
+
+## Four cores, mesh objects, XMA cache, record-time extents, shadow culling (2026-10-27 afternoon)
+
+The user's five-hour block (CPU-gap items 8, 2, 3, 4 and NetherSX2_nx's 4-core mode), then "more like Unleashed".
+Emulator title-screen runs only (b26-b32); console numbers pending.
+
+- **Four-core mode** (`banjo_system_core`, `banjo_system_core_compiles`, `banjo_forwarder_program_id`; NetherSX2_nx,
+  MIT, NaGaa95): `docs/four-core-mode.md`. Banjo writes its forwarder's four-core NPDM itself
+  (`sdmc:/atmosphere/contents/05D6EA1333487000/exefs/main.npdm`). Thread placement only.
+- **Mesh objects** (#8, geometry side; `banjo_renut_mesh_objects`, A/B 42): about 70 % of the whole-buffer draws
+  answered by one probe on the emulator's title screen; verify 0 differences.
+- **XMA frame cache** (#4; `banjo_xma_frame_cache`): 10-30 % of the decoded frames answered on the title screen;
+  catch-up checks 0 differences.
+- **Record-time extents** (`banjo_renut_record_extents`, A/B 43): the texture export checks from extents the recording
+  threads work out; 88 % of the checks; verify 0 differences in about 3 million.
+- **Shadow-caster culling** (`banjo_renut_shadow_cull_indices`, **off**; not pixel-identical): `renut_shadowcull.toml`.
+- **Not built**: #2 (the voice filter across voices: XAudio mixes each voice's filter output right after it, one voice
+  at a time), #3 (the reverb is already NEON), the texture side of #8, the replay without the device image (it would
+  cost more than the chunk copies it saves). Reasons in `docs/record-time-draw-path.md`.

@@ -1094,3 +1094,520 @@ freeze's stack had a thread waiting on it while uam ran). Now:
 - a draw's request goes ahead of the background threads' ones (Deko3DSetBackgroundThread: Renut's prebuild workers), and
   at most 256 background requests wait; one that found no room is queued by the first draw that refreshes its pipeline.
 With cache 60 none of this happens in play (it has every variant the lists name, and the generic ones of every shader).
+
+## 29. Host textures released when the heap runs short (2026-10-22, package 36z7)
+
+The 36z3 and 36z6 console runs crashed loading the town (`std::bad_alloc` in Renut's command recording, the heap at
+2,903 of 3,090 MB, 744 MB of host textures). Renut's two texture rules (its backstop: idle 600 frames at 85 % of the
+budget; banjo-nx's `banjo_renut_memory_policy`: cold 120 frames with less than `banjo_renut_textures_reserve_mb` of
+budget left) both read `QueryGpuMemory`'s budget, and on deko3d that was 0 (`backend.cpp`): both returned at once and no
+host texture was ever released on the Switch.
+
+- `QueryGpuMemory` on deko3d (Switch): budget = what deko3d holds + the heap's room. plume takes deko3d's memory from the
+  malloc heap (`memalign`), the heap the guest's memory and everything else share, so "budget left" is that room: what
+  `sbrk` has not handed out (`fake_heap_end - sbrk(0)`, O(1)). The free pieces inside the taken part (`mallinfo`, a walk
+  of every piece: 140,000 of them in the crash) are left out, so it errs on releasing earlier.
+- `render/textures.cpp`: with less than half the reserve left, a texture is cold after 8 frames (still more than the 2
+  in flight) and the check runs every second of wall time as well as every 32 frames (the town loaded at 0.5-4 fps:
+  32 frames were up to a minute). Never a texture only the GPU wrote (`banjo_renut_keep_gpu_written`).
+- `renut.toml`: `banjo_renut_textures_reserve_mb = 512` (code default 192: normal play uses about 2.4 GB of the 3.1 GB,
+  so this only acts in heavy areas).
+
+Emulator: with a reserve of 16 GB (always under pressure) the route ran at 26-30 fps, textures released every second
+and made again when drawn; with 512 the budget reads 913 of 1,605 MB there. Still in the heap and not addressed: the
+12 or so game threads' 16 MB host stacks (`xthread.cpp`), about 200 MB.
+
+## 30. The distribution build and the web installer (2026-10-22, the user's request)
+
+Shaders made from the game's files are game data, so a release NRO cannot carry them. The NRO now also reads them from
+**`deko3d_glsl.bin` next to itself**, which banjo-nx-installer (a web page beside this repository, like sa2-nx's and
+bejeweled3-nx's installers) makes from the player's own copy, together with the DKSH cache `deko3d_shaders.bin`.
+
+- **Version 2 of the GLSL package** (`banjo_renut_deko3d.cpp`, OpenInstalled): version 1 without a dictionary, each
+  shader's GLSL one zstd frame of raw blocks, plus the numbers of the shader table (`shader_cache.h`: masks, vertex
+  inputs, literals) of the shaders it holds, and a 16-byte tag (`kInstalledTag`, "renut7-bnxglsl1") naming the
+  translator and GLSL chain it was made with. A package with another tag, or one that is not sound, is logged and not
+  used. The table is read at start; a shader's GLSL is read from the card when the shader is made (all of them would
+  be 175 MB). Format: banjo-nx-installer's `lib/package.js`.
+- **Look-ups** go to the installed package first, then the NRO's own (CreateGameShader, BoolSpecMask). Renut's
+  `FindShaderEntry` searches the NRO's table merged with the package's (`shader_library.cpp`, Table): the package's
+  entries, then the build's own for the shaders the package lacks; the vertex inputs and literals an entry's offsets
+  index are `g_activeShaderVertexInputs` / `g_activeShaderLiterals` (draw.cpp, hooks/shader.cpp).
+- **Distribution build**: the NRO's own table and GLSL hold only the shaders the game makes at runtime (150,
+  `app/out/pc-me/shader_capture`), which no installer finds in the game's files:
+
+      python tools/renut_switch_shader_cache.py --only app/out/pc-me/shader_capture --out-dir app/out/renut_switch_dist
+      python tools/deko3d_shader_package.py --glsl out/deko3d_shaders/glsl_opt_any --only app/out/pc-me/shader_capture --raw --out app/out/renut_switch_dist
+
+  then configure a Switch build with `BANJO_RENUT_SHADER_CACHE_CPP` and `BANJO_DEKO3D_GLSL_CPP` pointing at
+  `app/out/renut_switch_dist/`. `--raw` packages without a dictionary in raw zstd blocks (1.2 MB instead of 125 KB),
+  so the installer's page reads those 150 shaders out of the NRO (`lib/nro.js`) and compiles their variants too. No
+  SPIR-V is embedded (the Switch build has only the deko3d back end).
+- A normal (full) build reads an installed package the same way, so the installer's output also works with it.
+
+The installer (banjo-nx-installer/README.md) runs this repository's own tools: reNut's `dump_shaders.py`,
+`renut_early_alpha.py`, `deko3d_glsl.py` and `deko3d_glsl_opt.py` unchanged in Pyodide, the translator and uam built
+for WebAssembly from `app/thirdparty`. Its DXC is v2025.1 (the native build's is 1.8.2407): about a quarter of the
+shaders get different temporaries in their GLSL, which compile and behave the same.
+
+## 31. Render-thread round for the city (2026-10-23, the user's request: 75 -> 33 ms, pixel-identical)
+
+The console's city (handheld, CPU 1020 / GPU 460.8 / RAM 1600 MHz): 13.4 fps, render thread 73-80 ms a frame at 97 % of
+core 1, GPU 45 ms, about 5,000 draws a frame (46 % depth-only), so ~15 us a draw. The profile's hottest lines were
+loads into memo tables, guest headers and caches: the frame's records do not stay in the A57's 2 MB L2. Three batches,
+all exact (the same commands in the same order):
+
+- Shared constants: the changed 64-byte lines as one mask (line_compare.h `Lines64DifferMask`, no branch per line;
+  `banjo_renut_inline_line_compare` has no effect now). Literal registers pushed as runs.
+- Memos: stream and index memos of 16-byte slots (hash and node; the key compared in the node) with 16,384 each;
+  texture extents 2,048; texture slots 2,048 entries of two whole lines; fetch copies 1,024; pipeline memo ways with a
+  separate line of key-hash tags. Per-shader answers (float constant groups, exports, bound fetches) kept in the
+  `ShaderRecord` (`DrawSummary`, `DrawSummaryOf`) instead of three memos keyed by the cache entry; the record's per-draw
+  fields grouped in its first lines.
+- Prefetching (no effect on results): at a draw's start its textures' headers and memo entries, extents, vertex and
+  index buffers' headers and summaries; after its index buffer header the index memo slot, then its entry and the
+  range's store cards; after PrepareGeometry the stream memo slots, then entries and cards; in FillTextures the host
+  textures a memo hit transitions; the pipeline object before BindTargets; and a draw ahead, in the replay, the next
+  draw's shader lookups and the guest headers it changed (`PeekNextWord`).
+- Smaller: `PagesClean` sixteen pages at a time with NEON where no card is written; the bound streams' hash only for
+  FurSkinLocked; render-thread counters as a load and a store (no exclusive-monitor loops), the replay's draw count once
+  a buffer; the chain-reuse counters ("[renut] chain reuse" line, only with `banjo_renut_chain_reuse` on).
+
+Emulator note: Ryujinx runs the replay under a JIT on x86 caches, so it shows the instruction savings and checks the
+results (store-card and pushed-constant verify modes) but not the cache effects; the console is the measure.
+
+Console result (batch 3 against the release NRO, same city route): render thread 66.7 -> 64.0 ms a frame (13.35 ->
+12.85 us a draw), GPU 45 ms, both about 12.9 fps. The frame (about 77 ms) is held by the CPU as a whole: the process
+used 316 % of its 3 cores, a third of core 2 going to the uam thread (next section).
+
+## 32. Background compiles off the game's CPU (2026-10-23, the user's report: compiling at the title and standing still)
+
+- The cause of the endless compiles: the pipeline list asks for variants the cache never had (the lit shaders' bool
+  combinations, 1129/1130/1243-1254, alpha function 5 or 8). The console compiled about 120 a session at about 1 s
+  each and never caught up; the list needed 14,634 stage variants and the cache had 12,797. Built on the PC instead:
+  the SD's deko3d_glsl.bin unpacked over glsl_opt (the keys need the installed text: 2,989 of 4,731 differ), then
+  `tools/deko3d_variant_cache.py --glsl <unpacked> --list <SD pipeline_list.bin> --merge <SD deko3d_shaders.bin>`
+  (1,837 variants in about 2 minutes, 0 failed; the 128 run-time variants the logs name all gave the same keys).
+- The uam thread's priority: `banjo_deko3d_compile_priority` 0x3E was refused (an application's lowest priority is
+  0x3B, the game threads' own) and the log printed the asked value; the profile showed the thread at 0x3B in every
+  report, so Horizon's round robin at 0x3B gave it half of core 2 (53 % in the city). plume now reads the allowed mask
+  (svcGetInfo InfoType_PriorityMask), takes the asked priority or the lowest allowed above it, and logs what the kernel
+  gave ("uam thread: core 2, priority 0x3B (0x3E asked, ...)"); lending compares with that priority.
+- `banjo_deko3d_background_compile_share` (default 25): after each background compile the uam thread rests in
+  proportion (at most 8 s), so background compiles use at most that share of the core; a compile a thread waits for
+  ends the rest (it is queued ahead of the background ones). Same pixels: the generic variant draws meanwhile.
+- The deko3d report line now gives the compiles a thread waited for and the time ("N waited for: X ms in all") and
+  the rests: a draw that stops the game for a compile shows there.
+- Blocking and non-blocking compiles told apart (the user's request): a compile a drawing thread waits for (plume
+  `compile()` from a thread without Deko3DSetBackgroundThread: the game stops), one the pipeline prebuild waits for
+  (nothing on screen waits), and background ones (queued, the generic variant drawn meanwhile). The log line names
+  the kind ahead of "run-time variant" ("BLOCKING (a draw waits)", "blocking (prebuild waits)", "background"); every
+  blocking-draw compile is logged (up to 512), the others the first 64. The report line: "blocking: N a draw waited
+  for (X ms in all, boost mode B times for Y ms), M the prebuild waited for".
+- `banjo_deko3d_compile_wait_boost` (default on, the user's request): only for a compile a draw waits for, boost mode
+  (`appletSetCpuBoostMode(ApmCpuBoostMode_FastLoad)`: CPU 1785 MHz, the GPU at 76.8 MHz, which has nothing new while
+  the frame waits), counted by waiters and back to normal the moment the last one is done; a refusal (applet mode) is
+  logged once and not tried again; never left on at shutdown.
+
+## 33. Audio by hand, stream cache pressure, lighter render and recording threads (2026-10-23, batch 4)
+
+The console's city run with the cache-61 package (15.0 fps, render thread 63 ms of a 66.8 ms frame, 301 % of 300 % CPU)
+had the render thread at 96 % of core 1 and cores 0 and 2 full (game 139 %, audio 43 %, the uam thread 19 %): frame time
+follows total CPU, so audio savings count like render-thread ones. The user asked for the audio to be hand-optimised
+and the render thread made lighter; the stream cache fix of section 32's run is here too.
+
+Audio (bit-identical, each with a verify path):
+- XAudio's per-voice state-variable filter, sub_82B0DCB8 (a fifth of the audio thread; one load in it, of the `low` value
+  stored the sample before through an integer store, had 331 of the thread's samples): hand-written native
+  (app/src/cpu/hot/banjo_hand_natives.h, namespace audio_filter, `banjo_hand_audio_filter`), the state in registers,
+  four channels at a time in two NEON double chains, the same double multiply-adds rounded to float (the sign of an
+  exact zero included). Hooked in front of the generated copy (hot/hand.txt; the copy's header edited by hand the same
+  way the tool writes it, because today's tool output also changed unrelated copies); the guard compares it with the
+  original (`banjo_cpu_verify`).
+- XAudio's mono 16-bit linear sample-rate converter, SRC::LinearVector::ProcessBlock<short,1> (11 % of the thread):
+  native (app/src/cpu/banjo_xaudio_native.cpp, `banjo_native_xaudio_src`, `_verify`): the same NEON operations SIMDe
+  gives the recompiled code, the same flush modes, without the emulated lvlx gathers; the scalar prologue and epilogue
+  are the original's statements (u64tod included). Declined: a destination not 16-aligned, an odd source address, a
+  count of 0 or less, a channel count of 0 (the original traps). -ffp-contract=off (whole target and LTO link) keeps
+  every multiply and add separate on both sides.
+- Looked at and left: the router (CRouterEffect::Process, a tight loop already), the XMA decoder's codec reopen per
+  sound (VLC tables: a small share of a small thread).
+
+Stream cache (`banjo_renut_stream_cache_pressure`, default on): copies refused at banjo_renut_stream_cache_mb are
+counted; with any since the last 60-frame pass, that pass also drops copies no draw read for 60 frames. The report
+line: "N copies refused at the cap, X MB dropped for room". Same pixels.
+
+Render thread:
+- draw.cpp and command_buffers.cpp built with -fno-threadsafe-statics (cmake/banjo_renut_gpu.cmake): their 26-odd
+  cvar statics and StoreCards / PhysicalOf were a load-acquire each at every call (the profile's atomic_base.h:518
+  lines). Only the render thread runs them; the content verifier reaches only pointer statics every thread sets alike.
+- PrefetchNextHeaders (5 % of the thread in the console profile): only the tail chunks the next op changed that hold
+  header words (a constexpr table), and in them only words whose value differs from this draw's.
+- ApplyState: constant groups copied 64 bytes at a time (inline) instead of a C library call per run.
+
+Recording threads (NewOp, about 10 % of a core over two threads): ChangedChunks copies a changed whole chunk with a
+fixed-size copy; CopyState counts the op's bytes, grows the arena once and copies chunks and groups with fixed-size
+copies (it made a vector insert per chunk and per run).
+
+## 34. Batch 5: stutters on the card, 30 CPU reductions (2026-10-23, the user's request)
+
+Console facts that set it (batch 4, stock and overclocked runs): the area after the city went from 5-10 fps to 17-18.5
+(stream cache pressure); the hand filter's first form (NEON double lanes) was slower than the original (vector float
+/ double converts ~8 cycles on the A57, a four-lane chain for calls that filter one or two channels); the native
+resampler took the converter from ~10.5 % to 3.7 % of the audio thread. The overclocked run's stutters (0.1-1.5 s) were
+the render thread reading the card: each new shader's GLSL from deko3d_glsl.bin (fseek / fread under the package lock,
+which the pipeline prebuild held for its own reads), each new variant from deko3d_shaders.bin, and textures the 512 MB
+reserve released every 32 frames although 486 MB were free.
+
+Stutters:
+- deko3d_glsl.bin with a dictionary: tools/deko3d_glsl_compress.py makes it from the installer's raw package (161 MB of
+  GLSL -> 15 MB, dictionary 128 KB, zstd -19; 190 sampled shaders unpack byte for byte, the info section copied); the
+  NRO (OpenInstalled) reads a package with a dictionary whole into memory and unpacks each shader there. Raw packages are
+  read as before. The installer should make the compressed form (a zstd encoder in the page) in a later release.
+- `banjo_deko3d_async_cache_reads` (default on): a variant the cache file holds is read on the uam thread, ahead of the
+  compiles and with no rest after it, while the draw uses the generic variant (plume asyncCacheReads, cache index
+  through SetDeko3DShaderCacheContains). Same pixels.
+- renut.toml: banjo_renut_textures_reserve_mb 384 (512), banjo_renut_stream_cache_mb 192 (128).
+
+Audio: the voice filter as scalar chains, a channel each, interleaved (the subtraction in float, the same bits); the
+static VLC tables of FFmpeg's WMA Pro / XMA decoder built once (ff_thread_once in wmaprodec.c: they were rebuilt at every
+decoder open, i.e. every new sound, a twentieth of the XMA thread, and rewritten while other decoders read them); copies
+(localized.txt) of the router, XACT sound events, the engine frame, the stereo converter and its outer loop, the scalar
+converter, routed voice effects, both voice-state getters, the two XMA sync functions.
+
+The localize tool: the store-card form of vector stores (REX_CARD(ea), store) accepted (index format 5); every hot copy
+regenerated from today's codegen (39 hooks, 359 bulk). Also mapped: tools/inline_leaves.py's REX_INL(sub_X) calls (each generated file's static copy of a tiny leaf, invisible to the shard files) back to sub_X (index format 7); three bulk functions the tool had refused for a switch-body form in a callee now copy too. tools/switch_hot_bulk.py classes the game's named functions
+(rex_*) as host code, so none had been listed: the named ones were added by hand from the console profiles.
+
+Render thread: DrawNeedsExportFlush keeps each texture fetch slot's answer while its words and the pending exports
+(g_export_generation) are the same; ExpandLoop's identity swizzle stores the decoded slots directly; FillTextures goes
+through the set slots only and converts each fetch constant once; Replay uses the op's call unless it has UP data;
+ConvertExportedStreamsLocked walks used_mask; pipeline key compares inline (NEON) instead of memcmp calls; the stream and
+index caches test their cap before hashing (no hash for a copy that cannot be kept); the pressure pass's idle time 150
+frames (60 was 2 s at 30 fps). Recording threads: ChunkDiffers in NEON.
+
+Batch 5's first emulator run (guards every 64th call) found two faults, fixed before the package:
+- three bulk copies (sub_822340D0, sub_82234168, sub_822341E8) wrote a wrong back chain (0x40... for 0x70...): the
+  codegen's r1 mirror (tools/r1_local.py: r1l, REX_R1_SYNC / KEEP / RELOAD / ASSUMED) was outside the localize tool's
+  register model. The tool now reads the text as before that pass (r1l -> ctx.r1, the macros dropped; index format 8),
+  which gives the copies batch 4 verified.
+- the render thread stopped at the title: an async cache read handed the draw the shader's generic variant, which was not
+  in the cache, so it compiled on the render thread (a 64 KB lit shader, minutes in the emulator). The background read is
+  now taken only when the generic variant is at hand (loadVariant noCompile); otherwise the variant is read at once.
+- second run: one guard difference left, sub_82226330 (bulk), its old one: the codegen's carded unaligned vector stores
+  (REX_STVLX_C / REX_STVRX_C) were missed by the tool's logged form again (the guard only: the copy stores the same as
+  the original). VEC_LR takes the _C forms. The resampler's verify showed 49 of 544,000 calls differing in state words
+  +16 and +40, which ProcessBlock does not write (another audio thread changed them between the two runs); the outputs
+  matched.
+
+
+## 35. Batch 6: forty more CPU items, render thread and audio mixer (2026-10-23, the user's request)
+
+The batch-5 city profile (stock clocks, 13.2 fps, 5,030 draws a frame at about 12.4 us each): render thread 90 % of a
+core, the audio mixer thread 26 % (voice filter 21 % of it, router 15 %, reverb 25 %, the kernel's IRQL and spinlock
+calls about 6 %). One emulator test after all forty (guards on), as the user asked. Pixel-identical; the audio the same
+bits (the one exception noted below is a NaN's sign).
+
+Also in it, batch 5's console regression (stock clocks: city 11-14.6 fps, GPU 50 ms): plume's refreshPipeline queued
+cached variants as compiles and the background cap blocked cache reads too (both fixed: refresh re-queues with the
+cache flag; cached jobs are neither capped nor counted); the limiter's lazy log10 had been lost when the copies were
+regenerated (tools/limiter_lazy_log10.py --hot must run after every localize); the 192 MB stream cache plus re-uploads
+shrank the memory budget's room to 130 MB (the tomls back at 128 MB).
+
+Render thread (24):
+1. Memexport readback in CPU-cached memory: plume's deko3d buffer takes HOST_CACHED for READBACK too, cleans and
+   invalidates the block once at creation, and map(readRange) drops the lines it will read (dc civac); unmap writes
+   nothing back. CompleteMemExportsLocked maps the slot's windows only. The copy out of uncached memory was 2.8 % of the
+   render thread (memcpy samples returning to its line).
+2. Fetch-data copies kept across kicks (`banjo_renut_kick_reuse`): FetchCopy remembers the interval of the flush that
+   made it (made_serial), the upload rings' resets then and the copy itself; a later draw of the frame takes it when the
+   rings were not reset since and the store cards prove its guest pages unwritten since the interval before that flush
+   (KickHeld; PagesClean with made - 1, for a write whose card was taken before its bytes landed). The game writes a
+   buffer after the draws that read it only once the GPU is done with them (after a kick), so a draw-time proof is the
+   flush-time answer. The city made 8 kicks a frame, each copying the fetch data again (2.7 % at FlushVertexFillsLocked's
+   memcpy). Verify (`banjo_renut_store_cards_verify`): the kept bytes compared with guest memory.
+3. Converted vertex streams kept across kicks the same way: the queued-stream table lives for the frame (its ring's
+   resets) instead of a flush, 4,096 slots. Verify: the stream converted again and compared.
+4. Queued fills keep their elements in an arena (g_fill_elements) and the host stride, not a copy of the declaration's
+   HostVertexStream (a vector: a heap allocation and free per fill); ConvertVertices has a span form.
+5. Host shaders of destroyed shader objects kept (`banjo_renut_shader_reuse`, 128, least recently kept goes; never freed
+   at exit): N&B destroys and makes shader objects while it streams, and each new one unpacked and parsed its GLSL on
+   the render thread (ZSTD 1 %, the GLSL scans, the string copies). A host shader is immutable but for its variants.
+6. The composite pixel shader's answer kept in the record's draw summary (CompositePs scanned its list at every draw).
+7. A declaration's streams in first-element order made once (stream_order); DrawNeedsExportFlush walked the elements.
+8. PendingExportSlots' answers kept per caller slot (a fetch constant's stream check, its fetch by address, its copy,
+   the index buffer) while the range and g_export_generation are the same: DrawNeedsExportFlush, FetchFromExportWindow,
+   ConvertExportedStreamsLocked and FindExportedStream.
+9. The bound slots' texture fetch constants converted once a draw (the prefetches, DrawNeedsExportFlush and
+   FillTextures each converted them).
+10. GetStreamSource once a stream (DrawStreamKeys' sources passed to BindStreams).
+11. ApplyState's last chunk (the only one not 64 bytes) copied at its fixed size: inline, no C library call.
+12. The recording threads' ChangedChunks and CopyState: the same for the last chunk's compare and copies.
+13. Packed vertex components (8, 10, 11 and 2-bit) from tables of DecodeComponent's own results (no float division).
+14. Half-float vertex components with NEON's conversion (the same values); a word with an infinity or NaN half takes
+    HalfToFloat (the conversion would quiet a signalling NaN).
+15. plume: bindGraphicsBuffers skipped when no binding and no pipeline changed since it ran (it would bind nothing).
+16. The shared constants' texture lines left out of the compare when FillTextures wrote its previous call's words and that
+    call's draw pushed last (the buffer holds them); push-constants verify compares them.
+17. The GPU profile's per-shader labels from a small memo (a map search per draw of the timed frames).
+18. Uncached 16-bit indices read, widened and ranged in one NEON pass.
+19. Their rebase to 16-bit host indices in NEON (PrepareGeometry and TrackIndices).
+20. A shader's literal registers as runs made once per cache entry (LiteralRuns), pushed as the per-draw loop pushed them.
+21. PushSharedConstants copies its held lines at a fixed size (no C library call per run).
+22. The NVK pipeline-bind hint not called on deko3d (two calls a bind that did nothing).
+23. Pending exports counted (AnyPendingExports a test, not a walk of the slots).
+24. A texture's extent prefetched only when DrawNeedsExportFlush's kept answer will not answer it.
+
+Audio (16):
+1-4. Raw exports of KfLowerIrql, KeRaiseIrqlToDpcLevel / KfRaiseIrql, KeAcquire/ReleaseSpinLock(At/From)RaisedIrql and
+   KfAcquire/ReleaseSpinLock: the caller's context as it comes (no current_ppc_context(): a thread-pointer read and a
+   call) and no argument shim. XAudio's router makes four of them for every voice and frame.
+5. The voice filter's negation off the per-sample chain: high = -h with h = float(fma(q, band, -d)), and the band update
+   takes h with -freq (exact: rounding is symmetric). Only a NaN's sign can differ (real audio has none).
+6. Hand-written native of XAudio's ramped channel mix (rex_XAudioMixFrameBufferChannel, hand.txt), in front of its copy
+   inside the router's: the same multiplies and adds a block at a time, each float byte-reversed once, the store cards
+   marked once for the 1,024 bytes (`banjo_hand_xaudio_mix`).
+7-16. Localized copies of ten more mixer functions (localized.txt): UpdateRPCs (CTrack), CRPC::ProcessEvents,
+   CCue::GetState, CEngine::ProcessEvents, CEngine::ProcessEngineCallbacks, the mono converter's outer loop, CWave and
+   play-wave-variation SetVolume, CRPC::OnVariableChange, CClip::Stop. XMASourceEffect::Process, PCMSourceEffect::Process,
+   CSubmixVoice::Process, CSourceVoice::ProcessEffects, CEngine::ProcessVoiceList, CWave::ProcessEvents (raw guest
+   access) and XMAPlaybackResumePlayback (MMIO) cannot be copies.
+
+Pitfall: the localize tool reads every identifier in the app's sources (strings included) as a function a hook may
+replace; a cvar description naming rex_XAudioMixFrameBufferChannel made the router call it as a real function, without
+its native. Name generated functions in app/src/cpu/hot only.
+
+Emulator check (one run with every change, guards every 64th call, store-cards and push-constants verify on): 1.25 M
+calls compared, 0 differences (the filter's hook 5,535 compared, every new copy 0 differences); 2,600-3,700 fetch copies
+(18-31 MB) per 10 s kept across kicks and none stale under verify; no renderer warning. The router's own guard never
+compares (it calls the kernel), so a test build made the channel mix its own hook (the router as plain code): 109,117
+calls compared with the original, 0 differences. Package builds/2026-10-23_1745_batch6 (NRO 5176f2666ac3, ELF beside it).
+
+### 35b. Batch 6b: the recording compare, and a census before the next big step (2026-10-23)
+
+The user asked for a frame-to-frame draw cache (#1), cheaper command recording (#2) and whether static shadow maps
+could be skipped exactly (#5). Re-reading the draw path changed the estimate for #1: nearly every per-draw piece
+(textures, pipelines, streams, indices, viewport, export answers) is memoised already, so a whole-draw cache mostly
+replaces a dozen probes with one larger one (5-10 %, not 30-40 %). Measured first instead:
+
+- `ChangedChunks` (the recording threads' NewOp, about 8 ms of core time a frame): the fetch constants' and the tail's
+  whole chunks four at a time, all loads of the four before any test, no branch per chunk, the copies after; checked
+  once at the first op against `ChangedChunksReference` (the chunk-at-a-time form) on made-up devices (a difference
+  falls back to keeping every chunk).
+- `banjo_renut_diag_repeat_census` (on in this package's renut.toml): frames 0 and 1 of every 32 hash each draw's state
+  (the fetch constants and the tail but for the unread 10880-11775) with its call, and its shaders' constants when its
+  guest data is unwritten since (store cards). The 10 s line gives the share of draws repeating their state, and per
+  target the share that repeat completely, shadow maps (depth targets alone) apart, with the maps that repeat whole.
+
+Static shadow maps (#5) are exact to skip: a depth-only map does not depend on the draw order, so a map whose draws all
+repeat (state, constants, data) comes out the same, and the casters that did not change could be kept in a copy with
+only the changed ones drawn over it. Whether it pays depends on the maps' views staying put (the census's shadow line).
+
+City census (emulator, Showdown Town, the scripted route then `input_script_sticks`: both sticks wandering at random,
+the camera turning; a capture every 30 s confirmed it): about 3,900 draws a frame. Against the frame before (and the one
+before that): draws whose whole device state repeats 0-3 % (8 % at most against N-2), constants 1-4 % (shadow maps
+0.0 %), guest data unwritten 70-76 %, nothing repeating whole, no shadow map the same. The shadow maps follow the camera:
+while it moves every caster's constants change, so skipping a map exactly never applies in play. Whole-state repeats are
+rare too (fetch constants and other device words change between frames even where the draw does not read them), so a
+frame-to-frame draw cache would have to key on the fields each piece reads, which is what the per-piece memos already
+do. Not built. Kick reuse in the city: 4,808 fetch copies (41 MB) and 6,248 converted streams (82 MB) per 10 s not
+made again. `input_script_sticks = <s>` (sdk input_system.cpp): the sticks' random wander for emulator routes.
+Package builds/2026-10-23_2032_batch6b (NRO c581bdef39c1; census off by default).
+
+## 36. Recording from the setters' marks, and incremental draw state (2026-10-26, the user's plan #1 and #2)
+
+The user's plan, pixel-identical: #1 incremental draw state on the render thread, #2 recording from setter tags (#3, the
+GPU reading guest memory, later). Both audited for the A57 before the emulator test (assembly of the touched files read
+with `-S -fno-lto`, the switch-dist objects being LTO-only).
+
+**#2, `banjo_renut_tags` (on) and `banjo_renut_tags_check` (32).** A recorded op keeps the device's 64-byte chunks that
+changed since the device's previous op (NewOp). It found them by comparing all 53 chunks (the fetch constants' 12, the
+tail's 41) with a shadow at every op: NewOp was 26 % of each recording thread in the batch-6 profile. Now the native
+setters mark what they write: `native::Device` has a `slot` (in what was padding: the struct stays 16 bytes, two
+registers in an AArch64 call), and `SetW/SetH/SetB/SetQ` OR the written byte's chunk bit (`TouchBit`, a table by 64-byte
+line; a constant for a constant offset, nothing outside the chunks) into `g_touch[slot]` (one cache line a slot). Only
+the recording (no-hardware) devices get a slot (`TrackDeviceTouches` in CreateDevice, every chunk marked); the title
+devices, which two threads may use at once, mark a sink. The slot is found by a direct-mapped table keyed by the device
+address (`g_touch_map`: one load, no call; a `thread_local` is a call to `__aarch64_read_tp` on the Switch). NewOp takes
+the marks and compares only those chunks (`ChangedChunksMarked`: each marked chunk compared and stored into the shadow
+from the same NEON loads, no branch on the compare); the op is the same (the same chunks, the same bytes). Writes
+outside the setters mark by hand (BeginCommandBuffer's fetch-constant clear, SetVertexFetchConstant's clear, the fence
+words of KickDevice and Swap). The first emulator check (verify form) found the game's own code writing device fields
+too, about 1.2 % of ops: Direct3D's inline setters compiled into N&B (a ZEnable as the depth control word and the
+private copy at 0x2E64, a sampler's address mode in its fetch constant, the vertex declaration, 0x29C0). Such a write
+sets the field's dirty tag (`m_Pending` words 2-4, or the GPU would never get the state), so the tags count as marks
+(`native::TagChunks`): a fetch constant's tag is its chunks, its texture word and the stream words; any other tag the
+render state's chunks (0x2780-0x2A7F and 0x2E00-0x2EFF). Tags the native layer clears before an op (FlushStatePackets,
+EndCommandBuffer) are turned into marks first (`TouchTags`). A write nothing marks is what the check finds: every 32nd op of a device also compares every chunk; a chunk changed without a mark goes into the op, is logged
+with its device offset ("Recording from marks: device +0x..."), and the marks are not used again (whole compares from
+then on). `banjo_renut_tags_check = 1` is the verify form: every op checked, the marks kept, each such chunk counted.
+The 10 s line "[renut] recording from marks" gives the ops, the share compared from marks, the chunks marked and
+changed an op, the checks and the unmarked chunks. In-run A/B target 21.
+
+Also: `ForgetSnapshotDeltas(device)` resets the immediate draws' delta chain only for the chain's own device. Every
+recorded op called it, took the chain's lock and made the chain's next draw a whole device copy, for any device.
+
+**#1, incremental draw state: sa2-nx's chain reuse made cheap and turned on for the replayed draws**
+(`banjo_renut_chain_reuse` and `banjo_renut_chain_reuse_replays` on; in-run A/B target 20 turns the reuse off for a
+half). A replayed draw knows which chunks its ops changed since the replay's previous draw; it takes that draw's
+targets, framebuffer, viewport, texture and sampler words, pipeline key and pipeline when nothing each is made from
+changed. It was off since package 36r: on the console the checks cost more than they saved (DrawStateLocked 9.5 ->
+12.6 %). Now: the chunk tests are masks made at compile time (`ChainChanged<First, Last>`, one AND a word; a loop with a
+branch a chunk before), the replays' hints are two shifts (`PlainToChain`), the targets' five words, the viewport's packet bytes (10432-10599, 0x29C0, the predication) and each bound
+texture slot's fetch constant and texture word are compared themselves instead of their chunks (run 2 below), the
+texture words and headers are copied only for a draw the next one can take them from, and the answers are counted in plain words (handed over every 1,024
+draws; five calls and ten atomic updates a draw before).
+
+Emulator checks (the city route with the sticks wandering, every op checked whole, `banjo_renut_chain_reuse_verify`
+and `banjo_renut_snapshot_deltas_verify` on). Run 1 (marks alone): about 3,000 unmarked chunks per 10 s (1.2 % of ops,
+six chunks: the inline writers above); reuse 0 differences but low hits (targets 6-10 %, viewport 23 %: the target words
+share a chunk with the index and stream words, the viewport's packets one with the depth and blend words). Run 2 (marks
+and tags; targets, viewport and texture slots compared word by word, not by chunk; stopped at 11 minutes as the user
+asked): 0 unmarked chunks in 70 reports (285-425 thousand ops each, every one checked), 20 chunks compared an op of 53
+(4.3 changed); reuse 0 differences, targets 99 %, viewport 95 %, texture words 52-57 %, pipeline key and pipeline 36-37 %;
+delta chain 0 differences. Package builds/2026-10-26_1251_batch7 (NRO c1cb76969750, ELF beside it): renut.toml as batch
+6b's, renut_ab_batch7.toml with the in-run A/B of targets 20 and 21 (30 s halves), renut_all_off.toml.
+
+## 37. Unleashed-style draw path, steps 1-3 (2026-10-26, the user's request after the batch-7 console log)
+
+The batch-7 console run (stock clocks, the city, about 5,200 draws a frame) had the render thread at 63-71 ms a frame,
+12.2-13.4 us a draw, about 10 % better than batch 5; the three cores the game gets were at 282 % of 300 %. The user
+asked how Unleashed and Marathon reach their CPU figures, then for the three steps. Unleashed's renderer
+(UnleashedRecomp/gpu/video.cpp) keeps host state with dirty bits: each draw sends the game thread's changed state to
+the render thread as small commands, and the render thread redoes only what is dirty (FlushRenderStateForRenderThread:
+the pipeline looked up only when its state changed, textures and constants bound only when dirty; g_sharedConstants
+kept from draw to draw). Renut's renderer had most of the pieces memoised already (texture, stream, index and pipeline
+memos; float constants pushed as the groups that changed, PushFloatConstants' model of the GPU's buffer), but every
+draw still walked every piece, and the console profile of batch 7 was flat: DrawStateLocked itself 24 %, the constant
+pushes 13 %, the geometry 11 %, the replay 7 %, no single cost above 8 %. So the steps make whole sections of the draw
+skip when their inputs did not change.
+
+**Step 1: what changed, found at record time, and the render thread's dirty state.**
+- `ChainHint::fields` (draw.h `DrawField`, 17 bits): the device fields that changed since the previous draw: fetch
+  constants, bool and integer constants, the destination packet, the window/values/control packets, the other
+  packets, 0x29C0, the private render state, the declaration, the index buffer, the targets, the streams, the texture
+  words, the scissor RECT, the shaders, the predication, and the unread private words. The recording threads find them
+  in NewOp, word by word in the chunks that hold more than one field (`MixedChunkFields`: the targets share a chunk
+  with the index buffer and the streams; NEON compare-and-narrow, about 25 instructions a chunk), the other changed
+  chunks whole; each op keeps them (`Op::fields`) and Replay ORs them up to each draw. The immediate draws' chain gives
+  them by chunk (`ChainFields`).
+- The reuse tests read fields: the targets' words and the viewport's 168 packet bytes are no longer compared (the
+  viewport's was a C library memcmp at every draw: 3 % of the render thread in the batch-7 console profile), the
+  texture slots' fetch constants and words only when they changed, the pipeline key by field instead of by chunk.
+- `banjo_renut_persistent_shared` (on): the draws' SharedConstants kept from one draw to the next (Unleashed's
+  g_sharedConstants): each draw writes the words it sets, puts back what the draw before set and it does not (texture
+  slots: all three dimension words and the sampler of a set slot, the defaults for a slot no longer set; vertex fetch
+  slots; bound fetch entries; export windows; point sprites; tessellation; the skin mode), and no longer zeroes 848
+  bytes and copies 640 bytes of defaults (memset and the defaults' copy were 6.9 % of the render thread). A reused
+  draw's texture words are in the block already. `banjo_renut_persistent_shared_verify` checks at every draw that every
+  word the draw did not set is what a new block holds.
+- `banjo_renut_keep_fetches` (on): the bound slots' converted fetch constants kept for the next draw while no fetch
+  constant changed, and their header and memo prefetches skipped then; Replay prefetches the next op's headers only
+  when it changed a header word.
+
+**Step 2: vertex and index data.** The streams and indices were already host copies kept across frames, proven
+unchanged by the store cards (Unleashed's host buffers kept in step). What was left is per-draw overhead:
+- A draw that fetches nothing by address (most draws) makes no fetch-data allocation (it took 16 bytes at a 256-byte
+  alignment of the upload ring at every such draw, about 1.3 MB of ring a frame, and wrote a fetch record nothing read).
+- `banjo_deko3d_vtx_dedupe` (on): plume's setVertexBuffers sends only the slots whose range differs from what the
+  command list bound there (every draw re-sent each stream and the zero stream).
+
+**Step 3: constants.** The float constants were already pushed as the groups that changed (the GPU buffer's model).
+PushFloatConstants walked every group the shader reads at every draw; now the groups with a register the buffer does
+not hold are found word by word (`RegisterGroups`, a 256-entry table; a compile-time test proves it equal to
+UsedGroups) and only those and the dirty ones are looked at.
+
+Emulator checks (the city route, sticks wandering): `banjo_renut_persistent_shared_verify`,
+`banjo_renut_chain_reuse_verify` (which also checks the kept fetch constants) and `banjo_deko3d_push_constants_verify`
+on: 0 words of the kept block different from a new block's, 0 reused pieces different from the made ones, 0 draws with
+a register the push model got wrong, over about 350,000 replayed draws per 10 s in the city; captures right. Reuse in
+the city: targets 99 %, viewport 94 %, texture words 56 %, pipeline key and pipeline 39 % (36-37 % with chunk tests).
+One earlier run of the step-1 build stopped drawing in the intro (between "appMainDraw tick 5" and 6, no guest fault in
+Ryujinx's log); the two runs after it, with the same code and more, went through: not reproduced, noted. Package
+builds/2026-10-26_1435_steps123 (NRO b878bd540f61, ELF beside it): renut.toml, renut_steps_off.toml (batch 7's and
+these steps' switches off: the same NRO for a before/after), renut_ab_steps123.toml (in-run A/B of targets 20 and 21).
+The emulator gives no console timing; the console run decides what these are worth.
+
+## 38. Toward an API-level draw path: census, then stages 1-4 (2026-10-26, the user's requests)
+
+**Census first (`banjo_renut_diag_unleashed_census`, off by default).** The user asked for (A) Unleashed's resource
+model (host buffers and textures made at Create and updated at Unlock) and (B) deko3d command lists recorded on the
+recording threads. One emulator run in the city counted what each would find: vertex streams from buffers our
+CreateVertexBuffer hook made 1 % (those are the dynamic ones, written every frame), index buffers 0.1 %, textures 28 %
+(Create or D3D_SetTextureHeader); Lock calls 0-1 per 10 s; the game-made streams' and indices' data written since the
+frame before about 0.03 %; RunCommandBuffer recordings run again: 0 of about 1,000-1,400 per 10 s. N&B builds its own
+resource headers on its own memory and writes it without locking, so (A) has nothing to hook; its data is static,
+which the converted copies proven by the store cards already use. Every recording runs once, so (B) would only move
+work to the recording threads (the three cores at 282 % of 300 %). The user chose to rewrite the draw path in stages
+toward Unleashed's model instead, each checked in the emulator.
+
+**Stage 1: shared constants and texture slots as dirty state.**
+- Unleashed's SetDirtyValue for the persistent SharedConstants: every write goes through `SetShared` (or marks its
+  region with `MarkShared`), which marks the 64-byte line only when the value changes (`g_sc_dirty`, bit 21 the tail);
+  PushSharedConstants pushes exactly those lines, comparing nothing (it compared all 21 lines at every draw: 5.4 % of the
+  render thread in the batch-7 console profile). `banjo_renut_persistent_shared_verify` compares anyway and logs a line
+  changed without a mark.
+- Each fetch slot's last answer (`g_slot_last`): a slot whose inputs are the memo hit's word for word takes it there
+  and does the memo hit's work without reading the memo's entry (256 KB of them; with the fetch constants unchanged
+  DrawStateLocked no longer prefetches it). The verify checks the kept words against the memo's answer.
+
+**Stage 2: whole buffers (`banjo_renut_whole_buffers`, on).** Unleashed binds a buffer whole and draws with the game's
+first index and base vertex. A draw whose every stream and whose index buffer have a converted copy of the whole buffer
+binds those and draws that way (the host vertex index is then the guest's: tessellation[3] 0); the copies are made once
+the store cards show the whole range unwritten for 3 kicks and are proven at each kick's first use like the range
+copies (dropped and the draw takes the ranges when written). Before, every draw converted, cached and bound the range
+its indices reach, with its indices rebased: a copy and a memo lookup per range, a binding per draw. Dynamic, Draw*UP,
+fan and quad, tessellated and fur skin-once draws keep the ranges, and so does a draw that reads a pending export's
+window. `banjo_renut_whole_buffers_verify` compares each whole draw's indices with the guest's and its vertices' rows
+with the range converted again. The 10 s line "[renut] whole buffers" gives the share of draws drawn whole.
+
+**Stage 3: constants.** Nothing further: the float constants were already pushed as the groups that changed (with
+step 3's `RegisterGroups` the groups looked at are only the dirty and the unheld ones), and the shared constants are
+stage 1's dirty lines.
+
+**Stage 4: sections skipped when their inputs did not change.**
+- The memexport read check (DrawNeedsExportFlush, 2.4 % of the render thread; it ran at every draw while exports were
+  pending): its "none, and no read met a window" answer is kept for the next draw while the pending exports
+  (`g_export_generation`), the fetch constants, texture words, streams, index buffer, shaders and declaration are the
+  same and the draw has no exports of its own (`banjo_renut_chain_reuse_verify` checks it).
+- Whole buffers while exports are pending, for a draw none of whose buffers a pending export writes.
+- The index cache prefetch skipped for a draw that will most likely be drawn whole.
+
+- Whole buffers took 0 % of draws in the stage-2 run: the whole path gave up whenever any export was pending, which
+  in the city is always. Stage 4's per-buffer test fixed it; the 10 s line now also gives why a draw took the ranges
+  (by the first reason met) and the cache's size.
+
+**Emulator checks (city route, banjo2).**
+- api4 (every verify mode on: chain reuse, persistent shared, push constants, whole buffers): 0 warnings; 96-97 % of
+  draws whole; the rest: kind (fans, quads, tessellated, skinned once) about 80 %, a stream in a pending export's
+  window about 18 %, written lately the rest.
+- api4ab (in-run A/B, target 22 = banjo_renut_whole_buffers): render thread 133 ms a frame on average with whole
+  buffers against 173 off over 12 pairs (the emulator, noisy; console to confirm). The A/B's off halves made range
+  copies again each minute and filled banjo_renut_stream_cache_mb (128): up to 180,000 draws a 10 s fell back for a
+  full cache. Without the A/B (run gpu1) 0-600.
+- Whole copies made lately drop the range copies of their buffer no draw used for 4 frames (DropReplacedRanges, one
+  pass over the caches 4 frames after the copy): in practice those ranges are still in use then and go with the idle
+  pass, so it drops little.
+
+**GPU, from the 2026-10-23 table (the user's request).** The console's city frame (batch 7, 42.9 ms of GPU): shadow
+maps 4.4 ms (2,380 depth-only draws), depth resolves 3.0, colour resolves 1.6, exported stream conversion 1.6, PS
+3277104C 5.0 (four blended draws with 17 texture fetches). The deko3d counters give about 32 full barriers and 31
+copy-engine buffer copies a frame: all memexport (a seed copy before each memexport draw, a readback copy after it,
+the fetch data put together on the GPU), each copy between full barriers.
+- `banjo_renut_batched_readbacks` (on, A/B target 24): a memexport draw's readback copy (read by the CPU only after
+  the slot's fence) waits for the list's end (FinishRecordingLocked), all of them in one group between two barriers.
+  Nothing writes a window after its draw (a slot's windows only grow), and every later reader waits for the draw with
+  its own barrier (deko3d's Primitives completes all earlier 3D work, fragments included). City: about 9 memexport
+  draws a frame, one readback group a frame instead of nine (about 16 full barriers fewer).
+- `banjo_renut_convert_reuse` (on, A/B target 23): a stream conversion (stream_convert_cs between two full barriers)
+  already made in the frame from the same export slot, offset, vertices, strides and elements, with no export recorded
+  since (g_export_generation), is used again. City: half of them (about 14 a frame).
+- Not done, measured or reasoned: colour hand-over at the end of the main pass (its resolve and clear come in two
+  halves, 0-384 and 384-720; one 648p copy, 0.2-0.3 ms; parked); the mid-frame colour and depth copies for the water
+  (the same target keeps being drawn: needed); seeds through the 3D engine's inline data (about 600 KB a frame);
+  shadow draws sorted (61 % of draws bind a pipeline, 34 % change shaders, but a bind is tens of front-end methods:
+  the console has to show it matters first); the alpha-test early-out is already in 3,936 shaders.
+
+Package builds/2026-10-26_1937_stages_gpu1 (NRO f102648be906): renut.toml, renut_steps_off.toml (every switch of
+batch 7, steps 1-3, stages 1-4 and the two GPU items off), renut_ab_stages.toml (targets 20-24 in turn, 30 s off and
+on each).
