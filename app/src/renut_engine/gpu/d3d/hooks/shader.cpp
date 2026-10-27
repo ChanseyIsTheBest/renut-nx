@@ -177,11 +177,38 @@ void PrefetchShaderLocked(u32 shader_va, RecordKind kind) {
     if (last.record) {
       __builtin_prefetch(last.record);
       __builtin_prefetch(reinterpret_cast<const char *>(last.record) + 64);  // the draw summary
+      __builtin_prefetch(reinterpret_cast<const char *>(last.record) + 128);  // (its used words, 2026-10-27)
       __builtin_prefetch(last.record->entry);
     }
     return;
   }
   __builtin_prefetch(&ShaderMemoSetFor(kind_index, shader_va));
+}
+
+// banjo-nx (2026-10-27, the replay stream's second stage): when the memo already holds the shader (its set fetched an op
+// before by PrefetchShaderLocked), the record's lines the draw reads first (the draw summary with them). A look only:
+// the memo is not reordered and a shader not in it is left to FindShaderLocked.
+void PrefetchShaderRecordLocked(u32 shader_va, RecordKind kind) {
+  if (!shader_va)
+    return;
+  const u32 kind_index = KindIndex(kind);
+  const ShaderRecord *record = nullptr;
+  if (g_last_shader[kind_index].va == shader_va) {
+    record = g_last_shader[kind_index].record;
+  } else {
+    for (const ShaderMemo &memo : ShaderMemoSetFor(kind_index, shader_va).way) {
+      if (memo.va == shader_va) {
+        record = memo.record;
+        break;
+      }
+    }
+  }
+  if (record) {
+    const char *r = reinterpret_cast<const char *>(record);
+    __builtin_prefetch(r);
+    __builtin_prefetch(r + 64);
+    __builtin_prefetch(r + 128);
+  }
 }
 
 ShaderRecord *FindShaderLocked(u32 shader_va, RecordKind kind) {

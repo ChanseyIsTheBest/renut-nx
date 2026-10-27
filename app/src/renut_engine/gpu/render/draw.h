@@ -12,6 +12,8 @@
  */
 #pragma once
 
+#include <cstring>  // SameWords
+
 #include <string>
 
 #include <cstdint>
@@ -90,6 +92,48 @@ struct TextureObject;
 // Any thread: the object of (va, header words), made on first use; null when the table is full (the draw then takes
 // the path without objects).
 TextureObject *FindTextureObject(u32 va, const u32 header[6]);
+// banjo-nx (2026-10-27, geometry objects): a stream source's object by what its whole copy is resolved from (the
+// stream's fetch words, its source's address, the stride byte | stream << 8, the source header's first two Format
+// words), an index buffer's by its header's Common, Address and Size: the recording threads' lookups (thread-safe,
+// made on first use, null when full). The render thread keeps each one's resolved copy (render/draw.cpp).
+struct GeometryObject;
+GeometryObject *FindStreamObject(const u32 key[6]);
+GeometryObject *FindIndexObject(const u32 key[3]);
+bool GeometryObjectsRecorded();  // banjo_renut_geometry_objects (the recording's side)
+// banjo-nx (2026-10-28, total CPU: the recording threads' lookups): the same lookups in two steps, so a caller with
+// several takes their table lines together (the misses overlap): ...Hash gives the key's hash and fetches the line of
+// its first table slot, ...At looks the key up from that hash.
+uint64_t TextureObjectHash(u32 va, const u32 header[6]);
+TextureObject *FindTextureObjectAt(uint64_t hash, u32 va, const u32 header[6]);
+uint64_t StreamObjectHash(const u32 key[6]);
+GeometryObject *FindStreamObjectAt(uint64_t hash, const u32 key[6]);
+uint64_t IndexObjectHash(const u32 key[3]);
+GeometryObject *FindIndexObjectAt(uint64_t hash, const u32 key[3]);
+bool LookupTablesOn();  // banjo_renut_record_lookups (command_buffers.cpp RecordResources' batched lookups and memos)
+// banjo-nx (2026-10-28, ARM audit): Replay's stream, a stage further for the resources: an object's lines the draw reads
+// (a geometry object's key line and answers, a texture object's answer lines), an op ahead; then, at the op's own
+// ApplyResources (its answers came an op before), the lines of the copies its current answers name, which
+// GeometryObjectsHit's proof reads first (ProveCopyRange's first load of the index copy was 1.45 % of the render thread
+// in the c4 console run: a miss at nearly every draw). Prefetches only.
+void PrefetchGeometryObject(const GeometryObject *o, bool index);
+void PrefetchTextureObject(const TextureObject *o);
+void PrefetchGeometryCopies(const GeometryObject *o, bool index);
+// banjo-nx (2026-10-28, ARM audit): kWords 32-bit words equal, as 64-bit loads, XORs and ORs with one test at the end (a
+// memcmp of a constant size is a call or a compare and branch a piece).
+template <u32 kWords>
+[[gnu::always_inline]] inline bool SameWords(const u32 *a, const u32 *b) {
+  uint64_t diff = 0;
+  u32 i = 0;
+  for (; i + 2 <= kWords; i += 2) {
+    uint64_t x, y;
+    std::memcpy(&x, a + i, 8);
+    std::memcpy(&y, b + i, 8);
+    diff |= x ^ y;
+  }
+  if constexpr (kWords % 2 != 0)
+    diff |= a[kWords - 1] ^ b[kWords - 1];
+  return diff == 0;
+}
 struct DrawResources {
   TextureObject *slot[d3d::kTextureFetchSlots] = {};
   u32 mask = 0;  // slots whose object the recording gave (bit r)
@@ -98,6 +142,11 @@ struct DrawResources {
   // The vertex buffer headers' first two Format words (CPU base, size) of the draw's bound stream sources (bit s).
   u32 vb_mask = 0;
   u32 vb[16][2] = {};
+  // banjo-nx (2026-10-27, geometry objects, banjo_renut_geometry_objects): the draw's stream sources' objects (bit s of
+  // obj_mask) and its index buffer's (FindStreamObject, FindIndexObject), when the recording made them.
+  u32 obj_mask = 0;
+  GeometryObject *streams[16] = {};
+  GeometryObject *index_obj = nullptr;
 };
 // Set by Replay around a replayed draw; null otherwise (and with banjo_renut_resource_objects off, A/B 45).
 extern const DrawResources *g_draw_resources;

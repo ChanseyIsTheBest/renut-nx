@@ -529,6 +529,49 @@ Package: builds/2026-10-27_1455_fourcore (NRO 13c8107ca771, b33): four-core defa
 extents, the ARM pass, the cull (off; renut_shadowcull.toml / renut_shadowcull_ab.toml).
 
 
+## Phase A on the console, then replay, copies, geometry and deko3d like Unleashed (2026-10-27 evening, c1-c3)
+
+Phase A (texture objects resolved by the recording threads, package b35): console A/B 45 -2.26 ms (-4.3 %, 4 of 4
+pairs), static city 18.6 fps at 50.3 ms (3 cores by mistake). The b35 profile (rex_profile's render-thread PCs, named
+with `rt_fn_lines.py`: objdump -dl's line markers, since addr2line gives no lines for the big LTO functions) showed
+where the rest goes; the user then asked for the constants, deko3d recording and copies, and "make replay and the
+geometry proofs like Unleashed". Built (each exact, own key):
+
+- **Replay stream** (A/B 46). Op records were 288 bytes: every other op started mid-line and a draw read up to four
+  lines (three loads were 4 % of the thread). Ops are 64-aligned; a draw's op is its header line and an `OpCall` line
+  (the call without pointers, UP data by arena offset, the shaders' recorded words). Prefetch in three stages: the op
+  three ahead's lines; the shader memo sets of the op two ahead; the next op's arena state, resource and extent records
+  and shader records (`PrefetchShaderRecordLocked`: a look in the memo set fetched an op before). Nothing decoded ahead.
+- **Constants**. The push read the shader's used registers and literal count from its cache entry (a miss at shader
+  changes): both are in the record's draw summary now. Run lengths by one count; literal runs prefetched.
+- **Fetch cache** (A/B 47). Vertex fetch data (bone palettes, instance data) re-copied from guest memory at every kick
+  (~600 MB per 10 s on the console, the bulk memcpy) gets the whole-buffer copies' rules: a pool copy once unwritten for
+  three kicks, proven once per interval. Emulator: ring copies 240 -> 5-16 MB per 10 s; verify 0 differ.
+- **Geometry objects** (A/B 48). Stream sources and index buffers resolved to objects by the recording threads (by the
+  words the hardware takes at the draw); the render thread keeps each object's whole copy, two answers for a stream
+  (shadow and main pass shaders). Replaces the mesh objects (A/B 42 measured -0.07 ms: keyed per submesh, 340k made per
+  10 s). Emulator c2 (one answer): 60 % of draws answered; c3 has the second answer.
+- **deko3d recording**. The pipeline object's draw-time fields first (they were before and after a kilobyte of blend
+  and vertex state), prefetched once the fast path knows the pipeline; its shader objects prefetched before
+  dkCmdBufBindShaders; single-piece uniform pushes inline; `Deko3DShaderReadsVertexId` kept in the draw summary (the
+  fast path's hottest line in b35).
+
+Not built: Phase B (loader hooks): see docs/porting-guide-renderer.md 1b. Not changed: the per-interval store-card
+proofs (they are what keeps whole copies exact when the game writes a buffer between kicks; five lines a proof).
+
+Verify (emulator title screen, c2): Phase A 27.4 million answers 0 differ (9,037 headers rewritten after recording, 0
+bind differently); store cards 0 changed under clean cards; fetch cache 0 differ.
+c3 (two answers per stream object): geometry objects answer about 97 % of the whole-buffer draws (60 % with one); Phase A
+24.8 million 0 differ; export checks 1.7 million 0 differ. c4 puts the stream's shader stages under their own key
+(banjo_renut_replay_stream_shaders, A/B 49).
+
+Emulator four-core test mode (banjo_system_core_test: three cores, the "system core" shared with game threads): c3 froze
+at audio start-up 2 of 2 times (the whole process: not even the stall watchdog wrote); c3 boots without the test mode,
+and with it when the replay stream is off; c2 boots with it. Read as the emulator's scheduler with the new timing
+(Ryujinx warns "too few processor cores"); the console's core 3 holds no game threads. banjo_renut_replay_stream_shaders
+is the switch if a console ever shows it.
+
+
 ## Pitfalls found
 
 - API-level stage 1 converted the alpha test to SetShared but left the alpha-to-coverage test reading

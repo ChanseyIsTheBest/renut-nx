@@ -880,6 +880,19 @@ void os::switch_cpu_profiler::AppendThreadCpuUsage(std::string& out)
     mutexUnlock(&g_slotsMutex);
 }
 
+uint64_t os::switch_cpu_profiler::TotalThreadTicks()
+{
+    uint64_t total = 0;
+    mutexLock(&g_slotsMutex);
+    for (const ThreadSlot& thread : g_slots)
+    {
+        if (thread.active)
+            total += ThreadTicks(thread.handle);
+    }
+    mutexUnlock(&g_slotsMutex);
+    return total;
+}
+
 size_t os::switch_cpu_profiler::CopyThreads(ThreadInfo* out, size_t capacity)
 {
     size_t count = 0;

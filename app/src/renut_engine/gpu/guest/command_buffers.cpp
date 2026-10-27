@@ -94,6 +94,27 @@ REXCVAR_DEFINE_BOOL(banjo_renut_replay_lookahead, false, "Banjo/Enhancements",
                     "(2026-10-23): while a replayed draw is drawn, the next op's shader lookups, guest headers and texture "
                     "memo entries are prefetched from its recorded chunks. In-run A/B target 29 with this key on")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_replay_stream, true, "Banjo/Enhancements",
+                    "Renut's renderer (2026-10-27, the replay stream): recorded ops are 64-byte aligned and a draw's op "
+                    "is two lines (its call without pointers, the UP data by offset, the shaders' words as recorded); "
+                    "while an op is replayed, the op two ahead's lines and the next op's arena state, resource and "
+                    "extent records and (other shaders) shader lookups are prefetched from recorded values, nothing "
+                    "decoded. Exact (prefetches only). In-run A/B target 46")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_replay_stream_shaders, false, "Banjo/Enhancements",
+                    "Renut's renderer (2026-10-27, with banjo_renut_replay_stream): the shader memo's sets prefetched "
+                    "two ops ahead and the shader records one op ahead (a look in the set fetched an op before); off: "
+                    "the sets one op ahead. Exact (prefetches only). In-run A/B target 49. OFF by default since the c4 "
+                    "console run (2026-10-27): +0.7 ms a frame with it, 4 of 5 periods worse")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_first_op_groups, true, "Banjo/Enhancements",
+                    "Renut's renderer (2026-10-28, cache-miss audit): a recorded buffer's first op keeps the float "
+                    "constant groups the recording has set so far, not all 512 registers (8 KB copied into the arena "
+                    "on the recording thread and again into the replay's device image on the render thread, for "
+                    "every buffer). A replayed draw reads a group from the image only when its op's set mask holds it "
+                    "(the others from the running device), and every such group was copied by an op at or before it. "
+                    "Exact. In-run A/B target 51")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_shadow_sort_verify, false, "Banjo/Debug",
                     "Renut's renderer (banjo_renut_shadow_sort): each sorted run's ops are also applied as recorded "
                     "and the device each sorted draw (and the run's end) is drawn from is compared whole with the one "
@@ -183,7 +204,26 @@ void ForEachGroupRun(uint64_t mask, F f) {
 
 enum class OpKind { Draw, Clear, Resolve, Run };
 
-struct Op {
+// banjo-nx (2026-10-27, the replay stream, banjo_renut_replay_stream): a draw's call as its op keeps it: DrawCall's
+// values without its pointers (Draw*UP / Begin*Vertices data are arena offsets, kNoUp none) and the shaders' words as
+// recorded (Replay prefetches the next draw's shader lookups from them). An op is 64-byte aligned and a draw reads only
+// its first two lines: the first (kind .. the dirty masks) and this. (Before: the DrawCall's pointers took the second
+// line and the arena offsets were on the third; with a 288-byte op every other op started mid-line, so a draw read up
+// to four lines, each a miss: the console's b35 profile had three loads of the op's lines at 4 % of the render thread.)
+constexpr u32 kNoUp = 0xFFFFFFFFu;
+struct OpCall {
+  u32 primitive = 0;
+  bool indexed = false, tessellation = false, up_indices_32 = false;
+  u32 start_vertex = 0, count = 0;
+  i32 base_vertex = 0;
+  u32 start_index = 0;
+  u32 up_stride = 0, up_vertex_count = 0;
+  u32 up_vertices = kNoUp, up_indices = kNoUp;  // arena offsets
+  u32 vs_word = 0, ps_word = 0;                 // the device's shader words when recorded (prefetch only)
+};
+static_assert(sizeof(OpCall) <= 64);
+
+struct alignas(64) Op {
   OpKind kind = OpKind::Draw;
   // banjo-nx (2026-10-27, Phase A): the arena offset of the op's resource record (RecordResources), or 0xFFFFFFFF.
   // In the padding after 'kind'.
@@ -210,9 +250,8 @@ struct Op {
   // clear them, so the others hold what the previous op of the buffer had.
   uint64_t vs_dirty = ~uint64_t(0), ps_dirty = ~uint64_t(0);
 
-  // Draw
-  DrawCall call;
-  size_t up_vertices = kNone, up_indices = kNone;  // arena offsets
+  // Draw (the op's second line)
+  OpCall call;
 
   // Clear / Resolve
   u32 flags = 0;
@@ -243,7 +282,47 @@ struct Op {
   u32 sort_tex = 0;  // and of the first texture slots' addresses (the third: alpha-tested casters share shaders, not textures)
   u8 sort_why = 0;
 };
+static_assert(offsetof(Op, call) == 64 && alignof(Op) == 64, "a draw's op is its first two lines");
 constexpr u32 kNoExtents = 0xFFFFFFFFu;
+
+// The DrawCall a recorded draw replays (its UP data in the buffer's arena).
+inline DrawCall CallOf(const OpCall &c, const u8 *arena) {
+  DrawCall d;
+  d.primitive = c.primitive;
+  d.indexed = c.indexed;
+  d.start_vertex = c.start_vertex;
+  d.count = c.count;
+  d.base_vertex = c.base_vertex;
+  d.start_index = c.start_index;
+  d.tessellation = c.tessellation;
+  d.up_vertices = c.up_vertices != kNoUp ? arena + c.up_vertices : nullptr;
+  d.up_stride = c.up_stride;
+  d.up_vertex_count = c.up_vertex_count;
+  d.up_indices = c.up_indices != kNoUp ? arena + c.up_indices : nullptr;
+  d.up_indices_32 = c.up_indices_32;
+  return d;
+}
+// A draw call into its op (the UP data's offsets set by the caller).
+inline void SetOpCall(OpCall &o, const DrawCall &c, const u8 *device) {
+  o.primitive = c.primitive;
+  o.indexed = c.indexed;
+  o.start_vertex = c.start_vertex;
+  o.count = c.count;
+  o.base_vertex = c.base_vertex;
+  o.start_index = c.start_index;
+  o.tessellation = c.tessellation;
+  o.up_stride = c.up_stride;
+  o.up_vertex_count = c.up_vertex_count;
+  o.up_indices_32 = c.up_indices_32;
+  o.up_vertices = o.up_indices = kNoUp;
+  if (device) {
+    u32 v;
+    std::memcpy(&v, device + d3d::kDeviceOffsetVertexShader, 4);
+    o.vs_word = __builtin_bswap32(v);
+    std::memcpy(&v, device + d3d::kDeviceOffsetPixelShader, 4);
+    o.ps_word = __builtin_bswap32(v);
+  }
+}
 
 // banjo-nx (2026-10-27, setter rewrite): the arena's growth leaves its new bytes as they are: every op's state is copied
 // in whole right after (CopyState), and zeroing them first was a second write of the op's bytes on the recording threads
@@ -294,6 +373,19 @@ inline bool ReplayLookAheadOn() {
   static const bool on = REXCVAR_GET(banjo_renut_replay_lookahead);
   return on && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 29;
 }
+// banjo-nx (2026-10-27): banjo_renut_replay_stream, and not in A/B 46's off half. The bytes of an op's arena state
+// prefetched (eight lines: an op's state is about 500 bytes in the city, 3.1 chunks and 4.7 constant groups).
+inline bool ReplayStreamOn() {
+  static const bool on = REXCVAR_GET(banjo_renut_replay_stream);
+  return on && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 46;
+}
+// banjo-nx (2026-10-27): the stream's shader stages (memo sets two ahead, records one ahead), and not in A/B 49's off
+// half. (Without them: the memo sets one ahead, as in c2.)
+inline bool ReplayStreamShadersOn() {
+  static const bool on = REXCVAR_GET(banjo_renut_replay_stream_shaders);
+  return on && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 49;
+}
+constexpr u32 kStreamStateBytes = 512;
 // The replay's counts (render thread).
 uint64_t g_sort_replayed_runs = 0, g_sort_replayed_draws = 0, g_sort_refused_runs = 0;
 uint64_t g_sort_verified = 0, g_sort_verify_differ = 0;  // banjo_renut_shadow_sort_verify's
@@ -375,7 +467,8 @@ std::unordered_map<u32, std::shared_ptr<HostCommandBuffer>> g_buffers;
 // recordings is what is worth keeping, and an arena one unusual frame grew
 // past kMaxKeptArena goes rather than holding that memory for good.
 constexpr size_t kMaxFreeBuffers = 256;
-constexpr size_t kMaxFreeBytes = 64u << 20;
+// banjo-nx (2026-10-28, the d4 console crash): 32 MB (was 64): the heap was all but full (see GrowArena).
+constexpr size_t kMaxFreeBytes = 32u << 20;
 constexpr size_t kMaxKeptArena = 8u << 20;
 std::mutex g_free_mutex;
 std::vector<std::unique_ptr<HostCommandBuffer>> g_free_buffers;
@@ -384,6 +477,56 @@ std::atomic<size_t> g_live_buffers{0};
 
 size_t CapacityBytes(const HostCommandBuffer &buffer) {
   return buffer.arena.capacity() + buffer.ops.capacity() * sizeof(buffer.ops[0]);
+}
+
+// banjo-nx (2026-10-28, the d4 console crash: std::bad_alloc in CopyState's arena growth on a recording thread, the heap
+// 2.9 of its 3.08 GB in use with 18 MB of it free in 243,000 pieces). The spare buffers given back to the heap (when an
+// arena's growth found no room).
+void ReleaseSpareBuffers() {
+  std::vector<std::unique_ptr<HostCommandBuffer>> spare;
+  {
+    std::lock_guard lock(g_free_mutex);
+    spare.swap(g_free_buffers);
+    g_free_bytes = 0;
+  }
+  static std::atomic<uint32_t> logged{0};
+  if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
+    RGPU_WARN("command buffers: an arena's growth found no room in the heap: {} spare buffers given back, asked again",
+              spare.size());
+}
+// An arena grows by doubling while small and by a quarter past 8 MB (doubling a 30 MB arena asks for 60 MB in one
+// piece, beside the 30 it copies from); when that allocation fails, the spare buffers go back to the heap and it is
+// asked again for no more than the arena needs (and only then does the failure stand).
+constexpr size_t kArenaQuarterFrom = 8u << 20;
+template <typename Arena>
+void ReserveArena(Arena &arena, size_t size) {
+  const size_t cap = arena.capacity();
+  if (size > cap) {
+    const size_t want = cap < kArenaQuarterFrom ? std::max(size, cap * 2) : std::max(size, cap + cap / 4);
+    try {
+      arena.reserve(want);
+    } catch (const std::bad_alloc &) {
+      ReleaseSpareBuffers();
+      arena.reserve(size);
+    }
+  }
+}
+template <typename Arena>
+void GrowArena(Arena &arena, size_t size) {
+  ReserveArena(arena, size);
+  arena.resize(size);
+}
+// A vector emptied for a new recording: one whose capacity is past 'keep' bytes and more than twice what its last
+// recording used is given back to the heap (a buffer kept a loading screen's or a busy frame's size for good, and the
+// d4 run's 36 buffers held 75 MB, its spares 42 MB more).
+template <typename V>
+void ResetForRecording(V &v, size_t keep) {
+  const size_t cap_bytes = v.capacity() * sizeof(typename V::value_type);
+  if (cap_bytes > keep && v.capacity() / 2 > v.size()) {
+    V().swap(v);
+  } else {
+    v.clear();
+  }
 }
 
 std::shared_ptr<HostCommandBuffer> NewBuffer() {
@@ -399,8 +542,8 @@ std::shared_ptr<HostCommandBuffer> NewBuffer() {
   g_live_buffers.fetch_add(1, std::memory_order_relaxed);
   const uint64_t recording_id = g_recording_ids.fetch_add(1, std::memory_order_relaxed) + 1;
   if (buffer) {
-    buffer->ops.clear();
-    buffer->arena.clear();
+    ResetForRecording(buffer->ops, kMaxKeptArena / 2);  // banjo-nx (2026-10-28)
+    ResetForRecording(buffer->arena, kMaxKeptArena);
     buffer->ClearSortPlan();  // banjo-nx (2026-10-27)
   } else {
     buffer = std::make_unique<HostCommandBuffer>();
@@ -454,7 +597,7 @@ u32 RecordingBuffer(u32 device_va) {
 
 size_t Reserve(HostCommandBuffer &buffer, size_t size) {
   const size_t offset = (buffer.arena.size() + 15) & ~size_t(15);
-  buffer.arena.resize(offset + size);
+  GrowArena(buffer.arena, offset + size);
   std::memset(buffer.arena.data() + offset, 0, size);  // banjo-nx (2026-10-27): as the zeroing resize gave them
   return offset;
 }
@@ -462,6 +605,7 @@ size_t Reserve(HostCommandBuffer &buffer, size_t size) {
 // Appends rather than going through Reserve: resize would zero the bytes the
 // copy then overwrites (a device snapshot per op).
 size_t CopyIn(HostCommandBuffer &buffer, const u8 *data, size_t size) {
+  ReserveArena(buffer.arena, ((buffer.arena.size() + 15) & ~size_t(15)) + size);  // banjo-nx (2026-10-28)
   buffer.arena.resize((buffer.arena.size() + 15) & ~size_t(15));
   const size_t offset = buffer.arena.size();
   buffer.arena.insert(buffer.arena.end(), data, data + size);
@@ -820,7 +964,7 @@ size_t CopyState(HostCommandBuffer &buffer, const u8 *device, uint64_t plain_dir
   for (uint64_t chunks = plain_dirty; chunks; chunks &= chunks - 1)
     bytes += ChunkSize(u32(std::countr_zero(chunks)));
   bytes += size_t(std::popcount(vs_dirty) + std::popcount(ps_dirty)) * kConstantGroupBytes;
-  arena.resize(offset + bytes);
+  GrowArena(arena, offset + bytes);
   u8 *to = arena.data() + offset;
   for (uint64_t chunks = plain_dirty; chunks; chunks &= chunks - 1) {
     const u32 i = u32(std::countr_zero(chunks));
@@ -914,24 +1058,34 @@ struct ExtentMemoEntry {
   bool valid = false;
 };
 struct ExtentMemo {
+  // banjo-nx (2026-10-28, cache-miss audit 2): each slot's last words and extent, looked at first: a chunk change marks
+  // two or three slots whose words did not change, and the memo's entry (12 KB a device) was a miss at most of them
+  // (0.65 % of the recording threads in the c4 console run).
+  ExtentMemoEntry last[d3d::kTextureFetchSlots];
   ExtentMemoEntry entry[256];
 };
 ExtentMemo g_extent_memos[native::kTouchSlots];
 
 // False (nothing written) for words that are not a texture's (the last slots share their bytes with vertex fetch
 // constants): such a slot is left out of the record, and a draw that samples it takes the answers table.
-inline bool SlotExtentOf(const d3d::TextureFetchConstant &guest, ExtentMemo *memo, SlotExtent &out) {
+inline bool SlotExtentOf(const d3d::TextureFetchConstant &guest, ExtentMemo *memo, u32 slot, SlotExtent &out) {
   const TextureFetch fetch = TextureFetch::FromGuest(guest);
   if (!fetch.IsTexture())
     return false;
   ExtentMemoEntry *m = nullptr;
+  ExtentMemoEntry *last = memo ? &memo->last[slot] : nullptr;
+  if (last && last->valid && SameWords<6>(last->words, fetch.dword)) {
+    out = last->e;
+    return true;
+  }
   if (memo) {
     uint64_t h = 0;
     for (u32 i = 0; i < 6; ++i)
       h = (h ^ fetch.dword[i]) * 0x9E3779B97F4A7C15ull;
     m = &memo->entry[u32(h >> 56)];
-    if (m->valid && std::memcmp(m->words, fetch.dword, sizeof(m->words)) == 0) {
+    if (m->valid && SameWords<6>(m->words, fetch.dword)) {
       out = m->e;
+      *last = *m;
       return true;
     }
   }
@@ -946,6 +1100,7 @@ inline bool SlotExtentOf(const d3d::TextureFetchConstant &guest, ExtentMemo *mem
     std::memcpy(m->words, fetch.dword, sizeof(m->words));
     m->e = out;
     m->valid = true;
+    *last = *m;
   }
   return true;
 }
@@ -980,7 +1135,7 @@ u32 RecordExtents(HostCommandBuffer &buffer, const u8 *device, uint64_t plain_di
   u32 slots = 0, count = 0;
   for (u32 bits = changed; bits; bits &= bits - 1) {
     const u32 r = u32(std::countr_zero(bits));
-    if (SlotExtentOf(fetch[r], memo, found[count])) {
+    if (SlotExtentOf(fetch[r], memo, r, found[count])) {
       slots |= 1u << r;
       ++count;
     }
@@ -988,7 +1143,7 @@ u32 RecordExtents(HostCommandBuffer &buffer, const u8 *device, uint64_t plain_di
   // The record says which slots it changed (all of 'changed': those it leaves out are unknown from here on).
   auto &arena = buffer.arena;
   const size_t offset = (arena.size() + 3) & ~size_t(3);
-  arena.resize(offset + 8 + size_t(count) * sizeof(SlotExtent));
+  GrowArena(arena, offset + 8 + size_t(count) * sizeof(SlotExtent));
   u8 *to = arena.data() + offset;
   std::memcpy(to, &changed, 4);
   std::memcpy(to + 4, &slots, 4);
@@ -1023,63 +1178,298 @@ struct ResourceHead {
   u32 vb_mask = 0;  // a draw's stream sources whose header words follow the objects (bit s, 8 bytes each)
 };
 static_assert(sizeof(ResourceHead) == 24);
-u32 RecordResources(HostCommandBuffer &buffer, const u8 *device, uint64_t plain_dirty, OpKind kind) {
+// banjo-nx (2026-10-28, ARM audit): bit i set for each of the 16 words at 'p' that is not zero (any byte order): one NEON
+// compare of four vectors and a narrowing, where a loop tested the words one at a time.
+inline u32 SetWordsOf16(const u8 *p) {
+#if defined(__aarch64__)
+  const uint32x4_t a = vreinterpretq_u32_u8(vld1q_u8(p)), b = vreinterpretq_u32_u8(vld1q_u8(p + 16));
+  const uint32x4_t c = vreinterpretq_u32_u8(vld1q_u8(p + 32)), d = vreinterpretq_u32_u8(vld1q_u8(p + 48));
+  // Each word's zero test as a byte (0xFF zero), in word order, then those bytes' top bits as a mask.
+  const uint16x8_t ab = vcombine_u16(vmovn_u32(vceqzq_u32(a)), vmovn_u32(vceqzq_u32(b)));
+  const uint16x8_t cd = vcombine_u16(vmovn_u32(vceqzq_u32(c)), vmovn_u32(vceqzq_u32(d)));
+  const uint8x16_t zero = vcombine_u8(vmovn_u16(ab), vmovn_u16(cd));
+  static constexpr u8 kBits[16] = {1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128};
+  const uint8x16_t bits = vandq_u8(zero, vld1q_u8(kBits));
+  const u32 zeros = u32(vaddv_u8(vget_low_u8(bits))) | u32(vaddv_u8(vget_high_u8(bits))) << 8;
+  return ~zeros & 0xFFFFu;
+#else
+  u32 set = 0;
+  for (u32 i = 0; i < 16; ++i) {
+    u32 w;
+    std::memcpy(&w, p + i * 4, 4);
+    set |= u32(w != 0) << i;
+  }
+  return set;
+#endif
+}
+
+// banjo-nx (2026-10-28, banjo_renut_record_lookups): each recording device's last objects (its thread's alone, as the
+// extent memos): a texture slot's by its address and header words, a stream's by its key, the index buffer's by its
+// header words. Objects are never freed, so a remembered one stays good.
+struct ResourceMemo {
+  struct Tex {
+    u32 va = 0;
+    u32 header[6] = {};
+    TextureObject *obj = nullptr;
+  };
+  struct Geo {
+    u32 key[6] = {};
+    GeometryObject *obj = nullptr;
+  };
+  Tex tex[d3d::kTextureFetchSlots];
+  Geo stream[16];
+  u32 ib[3] = {};
+  GeometryObject *ib_obj = nullptr;
+  // banjo-nx (2026-10-28, ARM audit): the 10 s line's counts, the device's thread's alone (a load and a store; shared
+  // counters took an exclusive-access loop and moved their line between the two recording threads' cores at every op).
+  std::atomic<uint64_t> hits{0}, tables{0};
+};
+ResourceMemo g_resource_memos[native::kTouchSlots];
+inline void BumpOwn(std::atomic<uint64_t> &c, uint64_t n) {
+  c.store(c.load(std::memory_order_relaxed) + n, std::memory_order_relaxed);
+}
+
+u32 RecordResources(HostCommandBuffer &buffer, const u8 *device, uint64_t plain_dirty, OpKind kind, u32 touch_slot) {
   u32 slots = 0;
   for (uint64_t bits = plain_dirty & kAllChunks; bits; bits &= bits - 1)
     slots |= kTextureSlotsOfChunk[std::countr_zero(bits)];
   ResourceHead head;
   head.slots = slots;
+  const bool draw = kind == OpKind::Draw;
+  // banjo-nx (2026-10-28, banjo_renut_record_lookups / A/B 50): the lookups in three steps, each step's misses together
+  // (the guest headers' lines, then the tables' lines), and the device's memo first. Off: one lookup after the other,
+  // as before.
+  const bool batch = LookupTablesOn() && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 50;
+  ResourceMemo *memo = batch && touch_slot - 1 < native::kTouchSlots - 1 ? &g_resource_memos[touch_slot] : nullptr;
+  const auto word = [device](u32 offset) {
+    u32 v;
+    std::memcpy(&v, device + offset, 4);
+    return __builtin_bswap32(v);
+  };
+  // Step 1: the guest headers' addresses (the slots', the index buffer's, the bound stream sources').
+  u32 tex_va[d3d::kTextureFetchSlots];
+  const d3d::BaseTexture *tex_header[d3d::kTextureFetchSlots];
+  for (u32 bits = slots; bits; bits &= bits - 1) {
+    const u32 r = u32(std::countr_zero(bits));
+    tex_va[r] = word(d3d::kDeviceOffsetTextures + r * 4);
+    tex_header[r] = tex_va[r] ? GuestPtr<const d3d::BaseTexture>(tex_va[r]) : nullptr;
+    if (batch && tex_header[r])
+      __builtin_prefetch(&tex_header[r]->Format);
+  }
+  const d3d::IndexBuffer *ib = nullptr;
+  const d3d::VertexBuffer *vb[16];
+  u32 vb_set = 0;  // the streams with a source (vb[s] set)
+  if (draw) {
+    ib = GuestPtr<const d3d::IndexBuffer>(word(d3d::kDeviceOffsetIndexBuffer));
+    if (batch && ib)
+      __builtin_prefetch(ib);
+    // banjo-nx (2026-10-28, ARM audit): the 16 source words' non-zero ones found at once (most draws bind one or two).
+    const u32 sources = SetWordsOf16(device + d3d::kDeviceOffsetStreamSources);
+    for (u32 bits = sources; bits; bits &= bits - 1) {
+      const u32 s = u32(std::countr_zero(bits));
+      u32 sva;
+      std::memcpy(&sva, device + d3d::kDeviceOffsetStreamSources + s * 4, 4);
+      vb[s] = GuestPtr<const d3d::VertexBuffer>(__builtin_bswap32(sva));
+      if (vb[s]) {
+        vb_set |= 1u << s;
+        if (batch)
+          __builtin_prefetch(&vb[s]->Format);
+      }
+    }
+  }
+  // Step 2: the headers' words and the keys; the memo's objects; for the others the hash (which fetches the table line).
   u32 vb_words[16][2];
-  if (kind == OpKind::Draw) {
-    u32 ib_va;
-    std::memcpy(&ib_va, device + d3d::kDeviceOffsetIndexBuffer, 4);
-    if (const auto *ib = GuestPtr<const d3d::IndexBuffer>(__builtin_bswap32(ib_va))) {
+  if (draw) {
+    if (ib) {
       head.ib[0] = u32(ib->resource.Common);
       head.ib[1] = u32(ib->Address);
       head.ib[2] = u32(ib->Size);
       head.flags |= 1;
     }
     // The bound stream sources' vertex buffer headers (their CPU base and size: GetStreamSource reads them).
-    for (u32 s = 0; s < 16; ++s) {
-      u32 sva;
-      std::memcpy(&sva, device + d3d::kDeviceOffsetStreamSources + s * 4, 4);
-      if (const auto *vb = sva ? GuestPtr<const d3d::VertexBuffer>(__builtin_bswap32(sva)) : nullptr) {
-        vb_words[s][0] = u32(vb->Format.dword[0]);
-        vb_words[s][1] = u32(vb->Format.dword[1]);
-        head.vb_mask |= 1u << s;
+    for (u32 bits = vb_set; bits; bits &= bits - 1) {
+      const u32 s = u32(std::countr_zero(bits));
+      vb_words[s][0] = u32(vb[s]->Format.dword[0]);
+      vb_words[s][1] = u32(vb[s]->Format.dword[1]);
+    }
+    head.vb_mask = vb_set;
+  }
+  // banjo-nx (2026-10-27, geometry objects): a draw's stream sources and index buffer as objects (render/draw.h
+  // FindStreamObject: the stream's fetch words, source, stride byte | stream << 8, the source header's two words).
+  // flags bit 1: a word of their mask (and a pad word) and their pointers follow the header words; bit 2: then the
+  // index buffer's.
+  GeometryObject *stream_objects[16];
+  u32 object_mask = 0;
+  GeometryObject *index_object = nullptr;
+  u32 stream_keys[16][6];
+  uint64_t stream_hash[16];
+  u32 stream_lookups = 0;
+  uint64_t index_hash = 0;
+  bool index_lookup = false;
+  uint64_t memo_hits = 0;
+  if (draw && GeometryObjectsRecorded()) {
+    for (u32 bits = head.vb_mask; bits; bits &= bits - 1) {
+      const u32 s = u32(std::countr_zero(bits));
+      const u32 fetch_index = d3d::kFirstVertexFetchIndex + d3d::StreamFetchIndex(s);
+      const u32 constants = u32(offsetof(d3d::Device, m_Constants)) + fetch_index * 8;
+      u32 *key = stream_keys[s];
+      key[0] = word(constants);
+      key[1] = word(constants + 4);
+      key[2] = word(d3d::kDeviceOffsetStreamSources + s * 4);
+      key[3] = u32(device[d3d::kDeviceOffsetStreamStrides + s]) | s << 8;
+      key[4] = vb_words[s][0];
+      key[5] = vb_words[s][1];
+      if (memo && memo->stream[s].obj && SameWords<6>(memo->stream[s].key, key)) {
+        stream_objects[s] = memo->stream[s].obj;
+        object_mask |= 1u << s;
+        ++memo_hits;
+      } else if (batch) {
+        stream_hash[s] = StreamObjectHash(key);
+        stream_lookups |= 1u << s;
+      } else if (GeometryObject *o = FindStreamObject(key)) {
+        stream_objects[s] = o;
+        object_mask |= 1u << s;
+      }
+    }
+    if (head.flags & 1) {
+      if (memo && memo->ib_obj && SameWords<3>(memo->ib, head.ib)) {
+        index_object = memo->ib_obj;
+        ++memo_hits;
+      } else if (batch) {
+        index_hash = IndexObjectHash(head.ib);
+        index_lookup = true;
+      } else {
+        index_object = FindIndexObject(head.ib);
       }
     }
   }
+  TextureObject *tex_objects[d3d::kTextureFetchSlots];
+  u32 tex_words[d3d::kTextureFetchSlots][6];
+  uint64_t tex_hash[d3d::kTextureFetchSlots];
+  u32 tex_lookups = 0;
+  for (u32 bits = slots; bits; bits &= bits - 1) {
+    const u32 r = u32(std::countr_zero(bits));
+    tex_objects[r] = nullptr;
+    if (!tex_header[r])
+      continue;
+    std::memcpy(tex_words[r], &tex_header[r]->Format, sizeof(tex_words[r]));
+    if (memo && memo->tex[r].obj && memo->tex[r].va == tex_va[r] && SameWords<6>(memo->tex[r].header, tex_words[r])) {
+      tex_objects[r] = memo->tex[r].obj;
+      ++memo_hits;
+    } else if (batch) {
+      tex_hash[r] = TextureObjectHash(tex_va[r], tex_words[r]);
+      tex_lookups |= 1u << r;
+    } else {
+      tex_objects[r] = FindTextureObject(tex_va[r], tex_words[r]);
+    }
+  }
+  // Step 3: the tables (their lines asked for in step 2); the memo takes what they gave.
+  for (u32 bits = stream_lookups; bits; bits &= bits - 1) {
+    const u32 s = u32(std::countr_zero(bits));
+    if (GeometryObject *o = FindStreamObjectAt(stream_hash[s], stream_keys[s])) {
+      stream_objects[s] = o;
+      object_mask |= 1u << s;
+      if (memo) {
+        std::memcpy(memo->stream[s].key, stream_keys[s], 24);
+        memo->stream[s].obj = o;
+      }
+    }
+  }
+  if (index_lookup) {
+    index_object = FindIndexObjectAt(index_hash, head.ib);
+    if (memo && index_object) {
+      std::memcpy(memo->ib, head.ib, 12);
+      memo->ib_obj = index_object;
+    }
+  }
+  for (u32 bits = tex_lookups; bits; bits &= bits - 1) {
+    const u32 r = u32(std::countr_zero(bits));
+    tex_objects[r] = FindTextureObjectAt(tex_hash[r], tex_va[r], tex_words[r]);
+    if (memo && tex_objects[r]) {
+      memo->tex[r].va = tex_va[r];
+      std::memcpy(memo->tex[r].header, tex_words[r], sizeof(tex_words[r]));
+      memo->tex[r].obj = tex_objects[r];
+    }
+  }
+  if (memo) {
+    if (memo_hits)
+      BumpOwn(memo->hits, memo_hits);
+    if (const u32 tables = u32(std::popcount(stream_lookups) + std::popcount(tex_lookups)) + (index_lookup ? 1u : 0u))
+      BumpOwn(memo->tables, tables);
+  }
+  if (object_mask)
+    head.flags |= 2;
+  if (index_object)
+    head.flags |= 4;
   if (!slots && !head.flags && !head.vb_mask)
     return kNoResources;
   auto &arena = buffer.arena;
   const size_t offset = (arena.size() + 7) & ~size_t(7);
-  arena.resize(offset + sizeof(head) + size_t(std::popcount(slots)) * sizeof(TextureObject *) +
-               size_t(std::popcount(head.vb_mask)) * 8);
+  GrowArena(arena, offset + sizeof(head) + size_t(std::popcount(slots)) * sizeof(TextureObject *) +
+               size_t(std::popcount(head.vb_mask)) * 8 + ((head.flags & 2) ? 8 : 0) +
+               size_t(std::popcount(object_mask)) * sizeof(GeometryObject *) +
+               ((head.flags & 4) ? sizeof(GeometryObject *) : 0));
   u8 *to = arena.data() + offset;
   std::memcpy(to, &head, sizeof(head));
   to += sizeof(head);
   for (u32 bits = slots; bits; bits &= bits - 1) {
-    const u32 r = u32(std::countr_zero(bits));
-    u32 va;
-    std::memcpy(&va, device + d3d::kDeviceOffsetTextures + r * 4, 4);
-    va = __builtin_bswap32(va);
-    TextureObject *obj = nullptr;
-    if (const auto *header = va ? GuestPtr<const d3d::BaseTexture>(va) : nullptr) {
-      u32 words[6];
-      std::memcpy(words, &header->Format, sizeof(words));
-      obj = FindTextureObject(va, words);
-    }
-    std::memcpy(to, &obj, sizeof(obj));
-    to += sizeof(obj);
+    std::memcpy(to, &tex_objects[std::countr_zero(bits)], sizeof(TextureObject *));
+    to += sizeof(TextureObject *);
   }
   for (u32 bits = head.vb_mask; bits; bits &= bits - 1) {
     std::memcpy(to, vb_words[std::countr_zero(bits)], 8);
     to += 8;
   }
+  if (head.flags & 2) {
+    const u32 mask_words[2] = {object_mask, 0};
+    std::memcpy(to, mask_words, 8);
+    to += 8;
+    for (u32 bits = object_mask; bits; bits &= bits - 1) {
+      std::memcpy(to, &stream_objects[std::countr_zero(bits)], sizeof(GeometryObject *));
+      to += sizeof(GeometryObject *);
+    }
+  }
+  if (head.flags & 4)
+    std::memcpy(to, &index_object, sizeof(index_object));
   return u32(offset);
 }
-inline void ApplyResources(DrawResources &table, const u8 *record, bool draw) {
+// banjo-nx (2026-10-28, ARM audit): Replay's stream, for the next op: its objects' lines (its record came an op before).
+// Trimmed after the d4 console profile (the helper 1.2 ms a frame, many prefetches an op): an object the replay holds
+// already for that slot or stream (in use an op ago: in the cache) is skipped.
+void PrefetchResourceObjects(const u8 *record, const DrawResources &held) {
+  ResourceHead head;
+  std::memcpy(&head, record, sizeof(head));
+  const u8 *from = record + sizeof(head);
+  for (u32 bits = head.slots; bits; bits &= bits - 1, from += sizeof(TextureObject *)) {
+    const u32 r = u32(std::countr_zero(bits));
+    TextureObject *obj;
+    std::memcpy(&obj, from, sizeof(obj));
+    if (obj && !(((held.mask >> r) & 1) && held.slot[r] == obj))
+      PrefetchTextureObject(obj);
+  }
+  from += size_t(std::popcount(head.vb_mask)) * 8;
+  if (head.flags & 2) {
+    u32 object_mask;
+    std::memcpy(&object_mask, from, 4);
+    from += 8;
+    for (u32 bits = object_mask; bits; bits &= bits - 1, from += sizeof(GeometryObject *)) {
+      const u32 s = u32(std::countr_zero(bits));
+      GeometryObject *o;
+      std::memcpy(&o, from, sizeof(o));
+      if (!(((held.obj_mask >> s) & 1) && held.streams[s] == o))
+        PrefetchGeometryObject(o, false);
+    }
+  }
+  if (head.flags & 4) {
+    GeometryObject *o;
+    std::memcpy(&o, from, sizeof(o));
+    if (o != held.index_obj)
+      PrefetchGeometryObject(o, true);
+  }
+}
+// 'copies' (the stream on): the objects' lines came an op before (PrefetchResourceObjects): the copies their answers
+// name are fetched; else the answers' lines, as before.
+inline void ApplyResources(DrawResources &table, const u8 *record, bool draw, bool copies) {
   ResourceHead head;
   std::memcpy(&head, record, sizeof(head));
   const u8 *from = record + sizeof(head);
@@ -1101,6 +1491,34 @@ inline void ApplyResources(DrawResources &table, const u8 *record, bool draw) {
   for (u32 bits = head.vb_mask; bits; bits &= bits - 1) {
     std::memcpy(table.vb[std::countr_zero(bits)], from, 8);
     from += 8;
+  }
+  // banjo-nx (2026-10-27, geometry objects): a draw's own (none from an earlier draw).
+  u32 object_mask = 0;
+  if (head.flags & 2) {
+    std::memcpy(&object_mask, from, 4);
+    from += 8;
+    for (u32 bits = object_mask; bits; bits &= bits - 1) {
+      GeometryObject *&o = table.streams[std::countr_zero(bits)];
+      std::memcpy(&o, from, sizeof(GeometryObject *));
+      from += sizeof(GeometryObject *);
+      if (copies && draw) {
+        PrefetchGeometryCopies(o, false);
+      } else {
+        __builtin_prefetch(reinterpret_cast<const char *>(o) + 64);  // its answers, read once the draw reaches geometry
+        __builtin_prefetch(reinterpret_cast<const char *>(o) + 128);
+      }
+    }
+  }
+  if (draw) {
+    table.obj_mask = object_mask;
+    table.index_obj = nullptr;
+    if (head.flags & 4) {
+      std::memcpy(&table.index_obj, from, sizeof(table.index_obj));
+      if (copies)
+        PrefetchGeometryCopies(table.index_obj, true);
+      else
+        __builtin_prefetch(reinterpret_cast<const char *>(table.index_obj) + 64);
+    }
   }
 }
 DrawResources g_replay_resources[kMaxRunDepth];
@@ -1237,15 +1655,18 @@ Op *NewOp(u32 device_va, OpKind kind, HostCommandBuffer **out_buffer) {
     FlushTagCounts(counts);
   op.plain_dirty = first ? kAllChunks : changed;
   op.fields = first ? kFieldsAll : fields | WholeChunkFields(changed & ~kPlainFields.mixed);
-  op.vs_dirty = first ? ~uint64_t(0) : vs_dirty;
-  op.ps_dirty = first ? ~uint64_t(0) : ps_dirty;
+  // banjo-nx (2026-10-28, banjo_renut_first_op_groups / A/B 51): the first op's groups, those set so far (see the key).
+  static const bool first_groups_key = REXCVAR_GET(banjo_renut_first_op_groups);
+  const bool first_groups = first && first_groups_key && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 51;
+  op.vs_dirty = first ? (first_groups ? set.vs : ~uint64_t(0)) : vs_dirty;
+  op.ps_dirty = first ? (first_groups ? set.ps : ~uint64_t(0)) : ps_dirty;
   op.state = CopyState(buffer, bytes, op.plain_dirty, op.vs_dirty, op.ps_dirty);
   // banjo-nx (2026-10-27): the changed texture slots' extents (banjo_renut_record_extents).
   if (RecordExtentsOn())
     op.extents = RecordExtents(buffer, bytes, op.plain_dirty, touch_slot);
   // banjo-nx (2026-10-27, Phase A): the op's resources (banjo_renut_resource_objects).
   if (ResourceObjectsOn())
-    op.resources = RecordResources(buffer, bytes, op.plain_dirty, kind);
+    op.resources = RecordResources(buffer, bytes, op.plain_dirty, kind, touch_slot);
   *out_buffer = &buffer;
   return &op;
 }
@@ -1482,7 +1903,7 @@ void CensusRecording(const HostCommandBuffer &buffer, u32 command_buffer_va) {
     std::array<uint64_t, 18> fh{};
     mix(ho, uint64_t(op.kind) | uint64_t(op.plain_dirty) << 8);
     if (op.kind == OpKind::Draw) {
-      const DrawCall &c = op.call;
+      const OpCall &c = op.call;
       mix(ho, uint64_t(c.primitive) | uint64_t(c.indexed) << 8 | uint64_t(u32(c.base_vertex)) << 16);
       mix(ho, uint64_t(c.start_index) | uint64_t(c.start_vertex) << 32);
       mix(ho, c.count);
@@ -1523,7 +1944,7 @@ void CensusRecording(const HostCommandBuffer &buffer, u32 command_buffer_va) {
     mix(hs, op.vs_dirty ^ (op.ps_dirty << 1));
     if (op.kind == OpKind::Draw) {
       ++draws;
-      const DrawCall &c = op.call;
+      const OpCall &c = op.call;
       mix(hs, uint64_t(c.primitive) | uint64_t(c.indexed) << 8 | uint64_t(c.tessellation) << 9 |
                   uint64_t(u32(c.base_vertex)) << 16);
       mix(hs, uint64_t(c.start_index) | uint64_t(c.start_vertex) << 32);
@@ -1605,7 +2026,11 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
   resources.mask = 0;
   resources.ib_valid = false;
   resources.vb_mask = 0;
+  resources.obj_mask = 0;  // (geometry objects)
+  resources.index_obj = nullptr;
   const bool use_resources = ResourceObjectsOn() && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 45;
+  const bool stream = ReplayStreamOn();  // banjo-nx (2026-10-27, the replay stream)
+  const bool stream_shaders = stream && ReplayStreamShadersOn();
   static const bool kinds = DrawKindsCensusOn();  // banjo-nx (2026-10-27): the draw-kind census's times
   const Op *merge_prev = nullptr;  // banjo-nx (2026-10-27): the draw op before, with nothing between (the merge census)
   // banjo-nx (2026-10-27, banjo_renut_shadow_sort): the buffer's sorted runs (PlanSortedRuns), each taken at its first op
@@ -1693,7 +2118,7 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
               hint_plain = 0;
               hint_fields = 0;
             }
-            DrawStateLocked(state, sop.call, &constants);
+            DrawStateLocked(state, CallOf(sop.call, arena), &constants);
             g_chain_hint = {};
             if (kinds)
               NoteDrawKind(RenderTicks() - entry_start);
@@ -1704,6 +2129,8 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
           resources.mask = 0;  // (and their resources)
           resources.ib_valid = false;
           resources.vb_mask = 0;
+          resources.obj_mask = 0;
+          resources.index_obj = nullptr;
           merge_prev = nullptr;
           op_index = run.end - 1;  // the loop's step goes on at run.end, from the run's last op as recorded
           continue;
@@ -1712,6 +2139,56 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
       }
     }
     const Op &op = ops[op_index];
+    // banjo-nx (2026-10-27, the replay stream, banjo_renut_replay_stream / A/B 46): the recording read as a stream, the
+    // way Unleashed's render thread takes its queue: the op two ahead's two lines, and for the next op (its lines came
+    // with the previous op) what this loop and its draw will read first: its state in the arena (ApplyState), its
+    // resource and extent records, and with other shaders their lookups' lines (recorded words, nothing decoded:
+    // the look-ahead's peeks at the device, A/B 29, cost more than they saved). Prefetches only.
+    if (stream) {
+      // Three stages (2026-10-27, after the b35 profile's shader record misses): the op three ahead's lines; for the op
+      // two ahead (its lines came an op ago), the shader memo's sets of shaders it changes to; for the next op (its sets
+      // came an op ago), the records they name.
+      if (op_index + 3 < op_count) {
+        const char *far = reinterpret_cast<const char *>(&ops[op_index + 3]);
+        __builtin_prefetch(far);
+        __builtin_prefetch(far + 64);
+      }
+      // (Without the shader stages, A/B 49: the next op's sets, as c2 did.)
+      const size_t sets_at = stream_shaders && op_index + 2 < op_count ? op_index + 2 : op_index + 1;
+      if (sets_at < op_count) {
+        const Op &with = ops[sets_at];
+        if (with.kind == OpKind::Draw && (with.fields & kFieldShaders)) {
+          PrefetchShaderLocked(with.call.vs_word, RecordKind::VertexShader);
+          PrefetchShaderLocked(with.call.ps_word, RecordKind::PixelShader);
+        }
+      }
+      // banjo-nx (2026-10-28, ARM audit): the resources a stage further (record two ahead, objects one ahead, copies at
+      // the op's own ApplyResources).
+      if (op_index + 2 < op_count && ops[op_index + 2].resources != kNoResources) {
+        const u8 *r = buffer.arena.data() + ops[op_index + 2].resources;
+        __builtin_prefetch(r);
+        __builtin_prefetch(r + 64);
+      }
+      if (op_index + 1 < op_count) {
+        const Op &next = ops[op_index + 1];
+        const u8 *arena = buffer.arena.data();
+        if (next.state != kNone) {
+          const u32 bytes = u32(std::popcount(next.plain_dirty)) * kChunkBytes +
+                            u32(std::popcount(next.vs_dirty) + std::popcount(next.ps_dirty)) * kConstantGroupBytes;
+          const u8 *s = arena + next.state;
+          for (u32 at = 0; at < std::min(bytes, kStreamStateBytes); at += 64)
+            __builtin_prefetch(s + at);
+        }
+        if (next.resources != kNoResources)
+          PrefetchResourceObjects(arena + next.resources, resources);
+        if (next.extents != kNoExtents)
+          __builtin_prefetch(arena + next.extents);
+        if (stream_shaders && next.kind == OpKind::Draw && (next.fields & kFieldShaders)) {
+          PrefetchShaderRecordLocked(next.call.vs_word, RecordKind::VertexShader);
+          PrefetchShaderRecordLocked(next.call.ps_word, RecordKind::PixelShader);
+        }
+      }
+    }
     const uint64_t op_start = kinds ? RenderTicks() : 0;
     ApplyState(state, buffer.arena.data() + op.state, op.plain_dirty, op.vs_dirty, op.ps_dirty);
     if (op.extents != kNoExtents)
@@ -1719,11 +2196,13 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
     else if (op.plain_dirty & ((uint64_t(1) << kFetchChunks) - 1))
       extents.mask &= ~SlotsOfFetchChunks(op.plain_dirty);  // (recorded with the key off: not known)
     if (op.resources != kNoResources) {
-      ApplyResources(resources, buffer.arena.data() + op.resources, op.kind == OpKind::Draw);
+      ApplyResources(resources, buffer.arena.data() + op.resources, op.kind == OpKind::Draw, stream && op_index > 0);
     } else {  // nothing recorded: a draw has no index words of its own; slots it changed (key off) are not known
       if (op.kind == OpKind::Draw) {
         resources.ib_valid = false;
         resources.vb_mask = 0;
+        resources.obj_mask = 0;
+        resources.index_obj = nullptr;
       }
       for (uint64_t bits = op.plain_dirty & kAllChunks; bits; bits &= bits - 1)
         resources.mask &= ~kTextureSlotsOfChunk[std::countr_zero(bits)];
@@ -1735,16 +2214,10 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
     switch (op.kind) {
     case OpKind::Draw: {
       // banjo-nx (2026-10-23, batch 5): the op's own call unless it has Begin/Draw*UP data to point at (most draws).
-      DrawCall up_call;
-      const DrawCall *call_ptr = &op.call;
-      if (op.up_vertices != kNone || op.up_indices != kNone) {
-        up_call = op.call;
-        if (op.up_vertices != kNone)
-          up_call.up_vertices = buffer.arena.data() + op.up_vertices;
-        if (op.up_indices != kNone)
-          up_call.up_indices = buffer.arena.data() + op.up_indices;
-        call_ptr = &up_call;
-      }
+      // banjo-nx (2026-10-27, the replay stream): the op keeps the call without pointers (OpCall).
+      const DrawCall op_call = CallOf(op.call, buffer.arena.data());
+      const bool has_up = op.call.up_vertices != kNoUp || op.call.up_indices != kNoUp;
+      const DrawCall *call_ptr = &op_call;
       // banjo-nx (2026-10-27, render thread night, banjo_renut_merge_draws / A/B 33): the draws right after this one that
       // change no state and write no constant (their ApplyState does nothing) and draw the next indices of the same list
       // with the same base vertex (or the next vertices) become part of this draw: one host draw, the same primitives
@@ -1752,18 +2225,18 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
       static const bool merge_on = MergeDrawsOn();
       size_t merged = 0;
       DrawCall merged_call;
-      if (merge_on && call_ptr == &op.call && !op.call.tessellation &&
+      if (merge_on && !has_up && !op.call.tessellation &&
           (op.call.primitive == 1 || op.call.primitive == 2 || op.call.primitive == 4) &&
           banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 33) {
-        const DrawCall &c0 = op.call;
+        const DrawCall &c0 = op_call;
         u32 end = c0.indexed ? c0.start_index + c0.count : c0.start_vertex + c0.count;
         size_t j = op_index + 1;
         for (; j < op_count; ++j) {
           const Op &n = ops[j];
-          if (n.kind != OpKind::Draw || n.plain_dirty || n.vs_dirty || n.ps_dirty || n.up_vertices != kNone ||
-              n.up_indices != kNone)
+          if (n.kind != OpKind::Draw || n.plain_dirty || n.vs_dirty || n.ps_dirty || n.call.up_vertices != kNoUp ||
+              n.call.up_indices != kNoUp)
             break;
-          const DrawCall &c = n.call;
+          const OpCall &c = n.call;
           if (c.primitive != c0.primitive || c.indexed != c0.indexed || c.tessellation || !c.count ||
               (c0.indexed ? (c.base_vertex != c0.base_vertex || c.start_index != end) : c.start_vertex != end))
             break;
@@ -1788,7 +2261,7 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
       }
       if (kinds) {
         const bool same_state = merge_prev && op.fields == 0 && op.plain_dirty == 0 && op.vs_dirty == 0 &&
-                                op.ps_dirty == 0 && op.up_vertices == kNone && op.up_indices == kNone &&
+                                op.ps_dirty == 0 && !has_up &&
                                 merge_prev->call.primitive == call.primitive && merge_prev->call.indexed == call.indexed &&
                                 !call.tessellation &&
                                 (call.primitive == 1 || call.primitive == 2 || call.primitive == 4);  // point, line, triangle lists
@@ -1913,8 +2386,8 @@ void BeginRecording(u32 device_va, u32 command_buffer_va) {
   if (!slot || slot.use_count() > 1) {
     slot = NewBuffer();
   } else {
-    slot->ops.clear();
-    slot->arena.clear();
+    ResetForRecording(slot->ops, kMaxKeptArena / 2);  // banjo-nx (2026-10-28)
+    ResetForRecording(slot->arena, kMaxKeptArena);
     slot->ClearSortPlan();  // banjo-nx (2026-10-27)
     slot->id = g_recording_ids.fetch_add(1, std::memory_order_relaxed) + 1;  // banjo-nx (2026-10-26): a new recording
   }
@@ -2062,13 +2535,11 @@ void RecordDraw(u32 device_va, const DrawCall &call, u32 up_vertex_bytes, u32 up
     if (const auto *bytes = GuestPtr<const u8>(device_va))
       op->sort_why = SortFacts(bytes, call, *op);
   }
-  op->call = call;
-  op->call.up_vertices = nullptr;
-  op->call.up_indices = nullptr;
+  SetOpCall(op->call, call, GuestPtr<const u8>(device_va));
   if (call.up_vertices)
-    op->up_vertices = CopyIn(*buffer, call.up_vertices, up_vertex_bytes);
+    op->call.up_vertices = u32(CopyIn(*buffer, call.up_vertices, up_vertex_bytes));
   if (call.up_indices)
-    op->up_indices = CopyIn(*buffer, call.up_indices, up_index_bytes);
+    op->call.up_indices = u32(CopyIn(*buffer, call.up_indices, up_index_bytes));
 }
 
 void RecordDeferredDraw(u32 device_va, const DrawCall &call, const u8 *scratch, u32 bytes) {
@@ -2076,12 +2547,11 @@ void RecordDeferredDraw(u32 device_va, const DrawCall &call, const u8 *scratch, 
   Op *op = NewOp(device_va, OpKind::Draw, &buffer);
   if (!op)
     return;
-  op->call = call;
-  op->call.up_vertices = nullptr;
-  op->up_vertices = Reserve(*buffer, bytes);
+  SetOpCall(op->call, call, GuestPtr<const u8>(device_va));
+  op->call.up_vertices = u32(Reserve(*buffer, bytes));  // (Begin*Vertices draws have no indices)
   std::lock_guard lock(g_record_mutex);
   g_pending_vertices.push_back(
-      {device_va, RecordingBuffer(device_va), op->up_vertices, scratch, bytes});
+      {device_va, RecordingBuffer(device_va), op->call.up_vertices, scratch, bytes});
   SyncPendingCount();
 }
 
@@ -2507,13 +2977,29 @@ std::string TagsReport() {
   const uint64_t unmarked = g_tag_unmarked.exchange(0, std::memory_order_relaxed);
   if (!ops)
     return {};
+  // banjo-nx (2026-10-28, banjo_renut_record_lookups): the recording's object lookups (the devices' counts since the
+  // last report).
+  uint64_t hits_now = 0, tables_now = 0;
+  for (const ResourceMemo &m : g_resource_memos) {
+    hits_now += m.hits.load(std::memory_order_relaxed);
+    tables_now += m.tables.load(std::memory_order_relaxed);
+  }
+  static uint64_t hits_was = 0, tables_was = 0;
+  const uint64_t memo_hits = hits_now - hits_was, tables = tables_now - tables_was;
+  hits_was = hits_now;
+  tables_was = tables_now;
   return fmt::format("recording from marks (banjo_renut_tags): {} ops, {:.1f} % compared from the setters' marks, {:.1f} "
                      "chunks marked an op of those (of {}), {:.1f} chunks changed an op; {} whole checks, {} chunks "
-                     "changed without a mark{}",
+                     "changed without a mark{}{}",
                      ops, 100.0 * double(marked_ops) / double(ops),
                      marked_ops ? double(marked) / double(marked_ops) : 0.0, kPlainChunks,
                      double(changed) / double(ops), checks, unmarked,
-                     g_tags_failed.load(std::memory_order_relaxed) ? " (marks off: every chunk compared)" : "");
+                     g_tags_failed.load(std::memory_order_relaxed) ? " (marks off: every chunk compared)" : "",
+                     memo_hits || tables
+                         ? fmt::format("; object lookups (banjo_renut_record_lookups): {} from the devices' memos, {} "
+                                       "from the tables ({:.1f} % memo)",
+                                       memo_hits, tables, 100.0 * double(memo_hits) / double(memo_hits + tables))
+                         : std::string());
 }
 
 CommandBufferMemory CommandBufferMemoryUsage() {

@@ -480,6 +480,14 @@ namespace plume {
         graphicsBuffersDirty = true;  // banjo-nx (2026-10-23, batch 6): its masks
         if (!p->valid)
             return;
+        // banjo-nx (2026-10-27, deko3d recording): the texture bindings' arrays (heap memory) bindTextures reads at
+        // the draw, while the shaders and the state groups are bound.
+        if (p->boundTextures) {
+            for (int st = 0; st < 3; st++) {
+                if (!p->texBindings[st].empty())
+                    __builtin_prefetch(p->texBindings[st].data());
+            }
+        }
         // banjo-nx (2026-10-19): a load and a store (a lost count is possible between two recording threads), not
         // an exclusive read-modify-write loop: the A57 has no LSE atomics.
         auto bump = [](std::atomic<uint64_t> &c) { c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); };
@@ -496,6 +504,34 @@ namespace plume {
         }
         if (p->stateHash != boundStateHash) {
             bump(GetDeko3DStats().stateBinds);
+            // banjo-nx (2026-10-28, ARM audit): the lines of the groups that differ asked for together first (the
+            // binds below read them one after the other, past the pipeline's hot block: a miss each; the c4 console
+            // profile's hottest setPipeline loads were the vertex input counts and the blend words).
+            {
+                uint32_t differ = 0;
+                for (uint32_t g = 0; g < 9; g++)
+                    differ |= uint32_t(boundGroups[g] != p->groupHash[g]) << g;
+                const auto fetch = [](const void *from, size_t bytes) {
+                    const char *c = static_cast<const char *>(from);
+                    for (size_t at = 0; at < bytes; at += 64)
+                        __builtin_prefetch(c + at);
+                    __builtin_prefetch(c + bytes - 1);
+                };
+                if (differ & 0xF)
+                    fetch(&p->rasterizer, sizeof(p->rasterizer) + sizeof(p->multisample) + sizeof(p->color) +
+                                              sizeof(p->colorWrite));
+                if ((differ & 0x10) && p->blendCount) {
+                    fetch(&p->blend[0], sizeof(p->blend[0]) * p->blendCount);
+                    fetch(&p->blendWords[0], sizeof(p->blendWords[0]) * p->blendCount);
+                }
+                if (differ & 0xE0)
+                    fetch(&p->depthStencil, size_t(reinterpret_cast<const char *>(&p->attribs[0]) -
+                                                   reinterpret_cast<const char *>(&p->depthStencil)));
+                if (differ & 0x100) {
+                    fetch(&p->attribs[0], sizeof(p->attribs) + sizeof(p->attribCount));
+                    fetch(&p->vtxBuffers[0], sizeof(p->vtxBuffers) + sizeof(p->vtxBufferCount));
+                }
+            }
             // banjo-nx (2026-10-19, CPU proposal 13): only the groups whose state differs from what is bound (a group
             // the GPU already holds is a redundant command). The stencil values and the depth bias are left as they
             // are by a pipeline that does not set them (no stencil, a dynamic bias), as before; the dynamic setters
@@ -1171,8 +1207,8 @@ namespace plume {
         return true;
     }
 
-    bool Deko3DPushUniform(RenderCommandList *commandList, uint64_t address, uint32_t uboSize, uint32_t offset,
-                           const void *data, uint32_t size) {
+    bool Deko3DPushUniformSlow(RenderCommandList *commandList, uint64_t address, uint32_t uboSize, uint32_t offset,
+                               const void *data, uint32_t size) {
         Deko3DCommandList *cl = static_cast<Deko3DCommandList *>(commandList);
         if (!cl || !address || !size || offset + size > uboSize)
             return false;

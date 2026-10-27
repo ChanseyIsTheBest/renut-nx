@@ -49,6 +49,10 @@ namespace os::switch_cpu_profiler
     };
     size_t CopyThreads(ThreadInfo* out, size_t capacity);
 
+    // banjo-nx (2026-10-28): the CPU time of every registered thread so far, summed, in system ticks (19.2 MHz): the A/B
+    // halves' CPU a game frame (banjo_renut_tuning.cpp). Waits for the thread list.
+    uint64_t TotalThreadTicks();
+
     // The calling thread's registered name, for a crash report: false (and `out` untouched) when it has none or the
     // thread list is locked at the moment (the crash handler cannot wait for it).
     bool TryGetCurrentThreadName(char* out, size_t size);

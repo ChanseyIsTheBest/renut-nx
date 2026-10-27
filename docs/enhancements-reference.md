@@ -1763,6 +1763,86 @@ the ones the A/B list switches have their target in brackets.
   decodes every frame and compares. `sdk/src/audio/xma_context.cpp`, XmaContext::DecodeFrame; the XMA log line every
   10 s counts the answers.
 
+### Phase A, the replay stream, fetch cache and geometry objects (2026-10-27 evening)
+
+- `banjo_renut_resource_objects` [45] (Banjo/Enhancements, on), `banjo_renut_resource_objects_verify` (Banjo/Debug):
+  Phase A. The recording threads resolve each changed texture slot to a texture object and take each draw's index and
+  vertex buffer header words; the render thread uses the objects' answers (no guest header read). Exact (emulator verify
+  19.7 million answers, 0 differ, including headers the game rewrote after recording). Console A/B 45: -2.26 ms.
+- `banjo_renut_replay_stream` [46] (on): ops 64-byte aligned, a draw's op two lines (`OpCall`: the call without
+  pointers, the UP data by offset, the shaders' words); Replay prefetches in three stages (ops three ahead, the shader
+  memo's sets two ahead, the next op's arena state, records and shader records). Exact (prefetches only).
+  `banjo_renut_replay_stream_shaders` [49] (**off** since 2026-10-28): its shader stages alone (off: the memo sets one op
+  ahead). The c4 console A/B measured it +0.7 ms a frame (4 of 5 periods worse), so it is off by default. The emulator's
+  four-core test mode also froze with it on (see `docs/record-time-draw-path.md`).
+- `banjo_renut_fetch_cache` [47] (on), `banjo_renut_fetch_cache_verify` (Banjo/Debug): vertex fetch data (shaders'
+  fetches by address) kept in the stream cache's pool once unwritten for three kicks, proven once per kick (store cards
+  or exact hash) as the whole-buffer copies are; a draw whose fetch buffers are all kept in one pool chunk binds it.
+  The 10 s line "fetch cache". Exact.
+- `banjo_renut_geometry_objects` [48] (on): each draw's stream sources and index buffer resolved to objects by the
+  recording threads (one per buffer); the render thread keeps each object's whole copy and a draw takes them with a
+  pointer and a few compares a buffer. Replaces `banjo_renut_mesh_objects` while on (A/B 48's off half is the mesh
+  objects). The 10 s line "geometry objects". Exact (same copies, same proofs; `banjo_renut_whole_buffers_verify`).
+- Not keyed (exact, small): the constants push reads the shader's used registers and literal flag from its record's draw
+  summary; the deko3d pipeline object's draw-time fields first, prefetched once the pipeline is known.
+
+### Total CPU (2026-10-28)
+
+The c4 console run showed the three game cores (0-2) about 98 % busy: the frame is the total CPU on them divided by
+three, not the render thread alone (A/B 48 cut the render thread 4.6 ms and the frame about 2 ms). Items are now judged by
+the CPU of all threads a frame, which each `[renut A/B]` half reports ("CPU ... ms a frame (all threads)", Switch only).
+
+- `banjo_renut_record_lookups` [50] (on): the recording threads' object lookups (texture, stream and index buffer objects,
+  46 % of NewOp in the c4 run, about 6 ms a frame). The tables hold each object's key words beside its number, so a
+  lookup reads one line, not two (always, also in A/B 50's off half). With the key on: an op's lookups are made in three
+  steps whose misses overlap (the guest headers' lines, then the table lines, then the compares), and each recording
+  device remembers the object it found last for each texture slot, stream and the index buffer. The 10 s "recording
+  from marks" line counts memo and table lookups. The same objects (exact).
+- Not keyed (exact): the fast path's pipeline cache entry has the pipeline and the words its check compares on its first
+  line and the key's draw-time fields (point sprite, colour count and mask, depth control, stencil mask) on its second
+  (`KeyHot`), so a pipeline change reads the two lines the entry's prefetch took, not four.
+- ARM audit of the render and recording code (2026-10-28; the user's request; not keyed, all exact). The c4 profile's
+  hot instructions were nearly all cache misses, so most items move data or fetch it earlier:
+  - Replay's stream takes the resources a stage further: a draw's resource record two ops ahead, its objects' lines one
+    op ahead, and at the op's own `ApplyResources` the lines of the copies their answers name (`ProveCopyRange`'s first
+    load of the index copy was 1.45 % of the render thread on its own).
+  - The shader record's two declaration pointers moved to its first two lines (from its fourth: 1 % of the render
+    thread); the declaration record's `layout_hash`, stream order and count to its first line and the layout's
+    `used_mask` before its 512 bytes of streams (they were on its ninth and tenth lines).
+  - The recording's new lookups: fixed-size key compares as 64-bit XOR/OR (`SameWords`, no `memcmp`), the 16 stream
+    source words tested at once with NEON (most draws bind one or two), and the lookup counts kept per recording device
+    (a shared counter took an exclusive-access loop and moved its line between the two recording threads at every op).
+  - The whole index copy's first index by shifts (the division by the index size was a `udiv` at every such draw).
+  - plume's `setPipeline` asks for the lines of every state group that differs before the binds read them (vertex
+    input counts, blend words: a miss per bind before).
+- Cache-miss audit 2 (2026-10-28, the user's request; exact): the render thread's and recording threads' hottest loads in
+  the c4 profile, each traced to the data it missed:
+  - `banjo_renut_first_op_groups` [51] (on): a recorded buffer's first op keeps the float constant groups set so far,
+    not all 512 registers. That was 8 KB per buffer, copied on the recording thread and again into the replay's device
+    image. A replayed draw reads a group from the image only when its op's set mask holds it, and every such group was
+    copied at or before its op.
+  - The store cards and page serials a copy's proof reads are fetched with the copy, an op ahead (`PagesClean`'s loads
+    were about 2 % of the render thread); the fetch cache's entries and their cards while a draw's fetch copies are
+    gathered.
+  - The memexport granule bitmap sits behind a 64-bit summary (a bit per 8 MB): most ranges are answered without the
+    1 KB bitmap (its loads were about 0.8 %).
+  - At a shader change: the device image's bool and alpha-test lines, and the bound declaration's first lines, fetched
+    while the shaders and the declaration are found. The targets' write counters are fetched once the targets are known.
+  - The constant push's model (`ConstantUpload`) has its small fields ahead of its 4 KB copy; the shader record's
+    "fetch declaration built" flag sits beside its pointer.
+  - The recording threads' extents: each slot's last words and extent are checked before the 12 KB memo (a chunk change
+    marks two or three slots whose words did not change).
+  - The texture export answer's compare without a `memcmp` call.
+- `banjo_system_core_uam` (Banjo/Threads, on; the user's request 2026-10-28): with four cores granted, the uam shader
+  compile thread alone runs on the system core (core 3) at the lowest application priority, so the audio threads there
+  go first, its background compiles held to the share below by their rests. The pipeline prebuild workers stay on
+  cores 0-2 (`banjo_system_core_compiles`, off: the first four-core run had them, the compiles at a 25 % share and the
+  XMA decoder on core 3, and audio stuttered). A compile a draw waits for runs at the waiting thread's priority, above
+  the mixer's: if audio stutters again, set this key false.
+- `banjo_deko3d_background_compile_share` now 10 (was 25) and the rest after a background compile up to 30 s (was 8 s,
+  which held the share at 20 % or more for compiles of about 2 s). The c4 runs compiled run-time variants without end (50
+  and 135 a run), a quarter of core 2. Same pixels: the generic variant draws until the specialised one is in.
+
 ## Other keys
 
 Not enhancements, but they decide how the ones above run or are measured.

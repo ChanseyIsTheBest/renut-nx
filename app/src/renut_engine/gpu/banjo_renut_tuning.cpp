@@ -29,6 +29,7 @@
 
 #if REX_PLATFORM_SWITCH
 #include <pthread.h>
+#include "profiler/switch_cpu_profiler.h"  // banjo-nx (2026-10-28): the A/B halves' CPU a frame
 #endif
 
 #include <plume_render_interface.h>
@@ -62,6 +63,16 @@ REXCVAR_DEFINE_BOOL(banjo_system_core_compiles, false, "Banjo/Threads",
                     "shader compiles and the pipeline prebuild workers run there instead of on "
                     "banjo_background_compile_core (off by default: core 3 was full with them and audio stuttered). "
                     "No effect with the usual three cores")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// banjo-nx (2026-10-28, the user's request): the uam thread alone on the system core, with the background compiles held
+// to banjo_deko3d_background_compile_share (10 %) by their rests. The pipeline prebuild workers (bursts at area loads,
+// banjo_system_core_compiles) stay off it.
+REXCVAR_DEFINE_BOOL(banjo_system_core_uam, true, "Banjo/Threads",
+                    "When the process has the system core (four cores granted, banjo_system_core 1 or 2): the uam "
+                    "shader compile thread runs there (at the lowest priority an application gets, so the audio "
+                    "threads there go first; its background compiles rest to banjo_deko3d_background_compile_share of "
+                    "the core) instead of on banjo_background_compile_core, the game's core 2. The pipeline prebuild "
+                    "workers stay where banjo_system_core_compiles puts them. No effect with the usual three cores")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DECLARE(int32_t, banjo_prewarm_threads);
 // banjo-nx's renderer's NVK keys (masseffect_native_draws.cpp), applied to Renut's renderer too (ControlNvkLocked).
@@ -396,12 +407,14 @@ REXCVAR_DEFINE_INT32(banjo_deko3d_compile_priority, 0x3E, "Banjo/Enhancements",
                      "waiting for a compile lends its priority. 0: as created (any core). 2026-10-23: an application's "
                      "lowest is 0x3B, so 0x3E was refused (the thread ran at 0x3B); the lowest allowed is taken and the "
                      "log says which (banjo_deko3d_background_compile_share keeps it off the game's CPU)");
-REXCVAR_DEFINE_INT32(banjo_deko3d_background_compile_share, 25, "Banjo/Enhancements",
+REXCVAR_DEFINE_INT32(banjo_deko3d_background_compile_share, 10, "Banjo/Enhancements",
                      "deko3d renderer (2026-10-23): the share of its core (percent, 1-100) the background shader "
                      "compiles may use. The uam thread cannot run below the game's threads (0x3B is an application's "
                      "lowest priority) and took about half of core 2 from them while a backlog compiled; after each "
-                     "background compile it now rests in proportion (at most 8 s). A compile a draw waits for ends the "
-                     "rest and is never held back. 100: no rests. Same pixels (the generic variant draws meanwhile)");
+                     "background compile it now rests in proportion (at most 30 s). A compile a draw waits for ends the "
+                     "rest and is never held back. 100: no rests. Same pixels (the generic variant draws meanwhile). "
+                     "2026-10-28: 10 (was 25): the c4 console runs compiled run-time variants without end (50 and 135 "
+                     "a run, about 2.1 s each), a quarter of core 2 taken from saturated game cores");
 REXCVAR_DEFINE_BOOL(banjo_deko3d_async_cache_reads, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-23, the console's stutters on entering an area: hundreds of new pipelines, "
                     "each variant read from deko3d_shaders.bin on the card by the render thread): a variant the cache "
@@ -755,6 +768,7 @@ struct Stats {
   struct Half {
     uint64_t game_frames = 0, render_frames = 0, gpu_frames = 0;
     double render_ms = 0.0, gpu_ms = 0.0, seconds = 0.0;
+    double cpu_ms = 0.0;  // banjo-nx (2026-10-28): every registered thread's CPU time in the half (Switch)
   };
   Half total, halves[2];   // halves[1]: the part on, [0]: off
   int half = 1;            // the half now running (the render thread applies it)
@@ -763,8 +777,19 @@ struct Stats {
   Half by_target[64][2];  // banjo-nx (2026-10-27): 64 (targets 32-40 exist; AbTargets dropped them at 32)
   uint32_t cycle = 0;
   std::chrono::steady_clock::time_point half_start{};
+  uint64_t cpu_mark = 0;  // banjo-nx (2026-10-28): TotalThreadTicks at the half's start
 };
 Stats g_stats;
+
+// banjo-nx (2026-10-28, total CPU): every registered thread's CPU time so far (ms), for the A/B halves: with the three
+// game cores saturated, a half's CPU a game frame is what an item saves, wherever it runs (0 off the Switch).
+double ProcessCpuMs() {
+#if REX_PLATFORM_SWITCH
+  return double(os::switch_cpu_profiler::TotalThreadTicks()) / 19200.0;
+#else
+  return 0.0;
+#endif
+}
 
 const char *AbName(int target) {
   switch (target) {
@@ -812,6 +837,12 @@ const char *AbName(int target) {
   case 43: return "texture export checks from record-time extents (banjo_renut_record_extents)";  // banjo-nx (2026-10-27)
   case 44: return "shadow-caster culling (banjo_renut_shadow_cull_indices; set it to measure)";  // banjo-nx (2026-10-27)
   case 45: return "Phase A resource objects (banjo_renut_resource_objects)";  // banjo-nx (2026-10-27)
+  case 46: return "the replay stream (banjo_renut_replay_stream: two-line ops, prefetched ahead)";  // banjo-nx (2026-10-27)
+  case 47: return "the fetch cache (banjo_renut_fetch_cache: fetch data kept across frames)";  // banjo-nx (2026-10-27)
+  case 48: return "geometry objects (banjo_renut_geometry_objects; off half: the mesh objects)";  // banjo-nx (2026-10-27)
+  case 49: return "the replay stream's shader stages (banjo_renut_replay_stream_shaders)";  // banjo-nx (2026-10-27)
+  case 50: return "the recording's batched object lookups and device memos (banjo_renut_record_lookups)";  // 2026-10-28
+  case 51: return "a buffer's first op keeps only the constant groups set so far (banjo_renut_first_op_groups)";  // 2026-10-28
   default: return "none";
   }
 }
@@ -895,6 +926,11 @@ void StatsGameFrame() {
   g_stats.last_frame = now;
   int target = AbTargetLocked();
   if (target && std::chrono::duration<double>(now - g_stats.half_start).count() >= double(REXCVAR_GET(banjo_renut_ab_s))) {
+    // banjo-nx (2026-10-28): the ending half's CPU time (the first half's mark is taken at its first switch: none).
+    const double cpu = ProcessCpuMs();
+    if (g_stats.cpu_mark && cpu * 19200.0 > double(g_stats.cpu_mark))
+      g_stats.halves[g_stats.half].cpu_ms += cpu - double(g_stats.cpu_mark) / 19200.0;
+    g_stats.cpu_mark = uint64_t(cpu * 19200.0);
     g_stats.half ^= 1;
     g_stats.half_start = now;
     // banjo-nx (2026-10-20, banjo_renut_ab_targets): after a target's off half (on, then off), the next target, on.
@@ -908,6 +944,7 @@ void StatsGameFrame() {
         to.render_ms += from.render_ms;
         to.gpu_ms += from.gpu_ms;
         to.seconds += from.seconds;
+        to.cpu_ms += from.cpu_ms;
         g_stats.halves[h] = {};
       }
       ++g_stats.cycle;
@@ -1023,10 +1060,13 @@ void StatsGameFrame() {
   if (target && !AbTargets().empty()) {
     // banjo-nx (2026-10-20, banjo_renut_ab_targets): each listed target's whole periods so far.
     auto line = [](const Stats::Half &h) {
-      return fmt::format("{:.2f} fps, render thread {:.2f} ms a frame, GPU {:.2f} ms a frame ({:.0f} s)",
+      return fmt::format("{:.2f} fps, render thread {:.2f} ms a frame, GPU {:.2f} ms a frame ({:.0f} s){}",
                          h.seconds > 0.0 ? double(h.game_frames) / h.seconds : 0.0,
                          h.render_frames ? h.render_ms / double(h.render_frames) : 0.0,
-                         h.gpu_frames ? h.gpu_ms / double(h.gpu_frames) : 0.0, h.seconds);
+                         h.gpu_frames ? h.gpu_ms / double(h.gpu_frames) : 0.0, h.seconds,
+                         h.cpu_ms > 0.0 && h.game_frames
+                             ? fmt::format(", CPU {:.1f} ms a frame (all threads)", h.cpu_ms / double(h.game_frames))
+                             : std::string());
     };
     for (const int listed : AbTargets()) {
       const Stats::Half &on = g_stats.by_target[listed][1], &off = g_stats.by_target[listed][0];
@@ -1038,10 +1078,13 @@ void StatsGameFrame() {
   } else if (target) {
     const Stats::Half &on = g_stats.halves[1], &off = g_stats.halves[0];
     auto line = [](const Stats::Half &h) {
-      return fmt::format("{:.2f} fps, render thread {:.2f} ms a frame, GPU {:.2f} ms a frame ({:.0f} s)",
+      return fmt::format("{:.2f} fps, render thread {:.2f} ms a frame, GPU {:.2f} ms a frame ({:.0f} s){}",
                          h.seconds > 0.0 ? double(h.game_frames) / h.seconds : 0.0,
                          h.render_frames ? h.render_ms / double(h.render_frames) : 0.0,
-                         h.gpu_frames ? h.gpu_ms / double(h.gpu_frames) : 0.0, h.seconds);
+                         h.gpu_frames ? h.gpu_ms / double(h.gpu_frames) : 0.0, h.seconds,
+                         h.cpu_ms > 0.0 && h.game_frames
+                             ? fmt::format(", CPU {:.1f} ms a frame (all threads)", h.cpu_ms / double(h.game_frames))
+                             : std::string());
     };
     REXLOG_INFO("[renut A/B] {} (target {}): on {}; off {}", AbName(target), target, line(on), line(off));
     g_stats.halves[0] = g_stats.halves[1] = {};
@@ -1324,7 +1367,15 @@ static int32_t BackgroundCore() {
   }
   return REXCVAR_GET(banjo_background_compile_core);
 }
-int Deko3DCompileCore() { return BackgroundCore(); }
+int Deko3DCompileCore() {
+  // banjo-nx (2026-10-28): the uam thread on the system core when there is one (banjo_system_core_uam).
+  if (REXCVAR_GET(banjo_system_core_uam)) {
+    const int system_core = RexSwitchSystemCore();
+    if (system_core >= 0)
+      return system_core;
+  }
+  return BackgroundCore();
+}
 int Deko3DCompilePriority() { return REXCVAR_GET(banjo_deko3d_compile_priority); }
 bool Deko3DCompileWaitBoostOn() { return REXCVAR_GET(banjo_deko3d_compile_wait_boost); }
 bool Deko3DAsyncCacheReadsOn() { return REXCVAR_GET(banjo_deko3d_async_cache_reads); }

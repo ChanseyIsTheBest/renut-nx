@@ -1437,12 +1437,13 @@ namespace plume {
                 delete job;
                 // banjo-nx (2026-10-23): at most backgroundCompileShare % of the core for background compiles (the
                 // thread cannot go below the game's threads, see compileWorker): a rest in proportion to the compile,
-                // at most 8 s, ended by a compile a thread waits for (those go ahead of the background ones).
+                // at most 30 s (2026-10-28: was 8 s, which held the share at 20 % or more for 2 s compiles), ended by a
+                // compile a thread waits for (those go ahead of the background ones).
                 const int share = g_deko3dOptions.backgroundCompileShare;
                 if (share > 0 && share < 100) {
                     const uint64_t t1 = armTicksToNs(armGetSystemTick());
                     const uint64_t rest = std::min<uint64_t>((t1 - t0) * uint64_t(100 - share) / uint64_t(share),
-                                                             8000000000ull);
+                                                             30000000000ull);
                     std::unique_lock<std::mutex> lock(compileMutex);
                     compileWake.wait_for(lock, std::chrono::nanoseconds(rest), [this] {
                         return compileStop || (!compileQueue.empty() && !compileQueue.front()->async);

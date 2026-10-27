@@ -27,13 +27,16 @@ struct VertexDeclarationRecord {
   RecordKind kind = RecordKind::VertexDeclaration;
   u32 self_va = 0;
 
-  std::vector<GuestVertexElement> elements;  // without D3DDECL_END
-  HostVertexLayout layout;
+  // banjo-nx (2026-10-28, ARM audit): what a draw reads first, on the record's first line (the hash and the stream
+  // order were past the layout's 512 bytes of streams, on its ninth and tenth lines: 1.6 % of the render thread in the
+  // c4 console run at declaration changes).
   uint64_t layout_hash = 0;  // identifies the host input layout for pipeline keys
   // banjo-nx (2026-10-23, batch 6): the streams its elements read (below kMaxVertexStreams), each once, in the order of
   // their first element (render/draw.cpp DrawNeedsExportFlush walked the elements at every draw). BuildDeclarationLayout.
   u8 stream_order[kMaxVertexStreams] = {};
   u8 stream_count = 0;
+  std::vector<GuestVertexElement> elements;  // without D3DDECL_END
+  HostVertexLayout layout;
 };
 
 struct ShaderRecord {
@@ -48,6 +51,18 @@ struct ShaderRecord {
   // shader, the summary and the specialised bools were in its fourth to sixth lines, past the stride arrays). The
   // host shader is built on first use by a pipeline, under host_mutex (below).
   std::unique_ptr<plume::RenderShader> host;
+  // Vertex shaders: what D3DVertexShader_Bind bound the shader to. The bind
+  // bakes the declaration into the microcode, so a draw with no declaration
+  // set uses it; a copy, as N&B releases the declaration right after binding.
+  // Vertex shaders: the declaration the shader's own vfetches describe, for
+  // draws with neither a declaration set nor a bind (bundle meshes). Built on
+  // first use; nullptr when the shader fetches no vertex elements.
+  // banjo-nx (2026-10-28, ARM audit): both pointers on the record's first two lines (they were on its fourth, past the
+  // summary and the bool masks, which no prefetch took: a miss at most shader changes, 1 % of the render thread in the
+  // c4 console run; N&B makes a shader object per mesh). Their strides stay below.
+  std::unique_ptr<VertexDeclarationRecord> bound_declaration;
+  std::unique_ptr<VertexDeclarationRecord> fetch_declaration;
+  bool fetch_declaration_built = false;  // (2026-10-28, cache-miss audit 2: beside its pointer, from the sixth line)
   // banjo-nx (2026-10-23, render-thread round): what every draw used to look up in memos keyed by the cache entry
   // (render/draw.cpp DrawSummaryOf): the float constant groups the shader reads (GroupSummary), whether it exports
   // (GatherMemExportStreams), whether an input is fetched by another index (DescribeBoundFetches). Made at the shader's
@@ -55,15 +70,23 @@ struct ShaderRecord {
   struct DrawSummary {
     const u32 *used = nullptr;
     uint64_t groups = 0;
-    u32 valid[8] = {};
+    // banjo-nx (2026-10-27, constants): a copy of *used (the registers the shader reads) and whether its cache entry has
+    // literals, in the summary's first line: the push read both from the cache entry, a miss at most shader changes
+    // (the console's b35 profile: the push's first lines 0.9 % of the render thread).
+    u32 used_words[8] = {};
+    // banjo-nx (2026-10-23, batch 6): its literal registers as pushed (render/draw.cpp LiteralRuns), or null.
+    const void *literal_runs = nullptr;
     uint32_t bytes = 0;
     bool exports = false;
     bool bound_fetches = false;
     bool composite = false;  // banjo-nx (2026-10-23, batch 6): a pixel shader of the frame's final composite (CompositePs)
     bool skin_once = false;  // banjo-nx (2026-10-27): a vertex shader of banjo_deko3d_skin_once's (IsSkinOnceVs)
-    // banjo-nx (2026-10-23, batch 6): its literal registers as pushed (render/draw.cpp LiteralRuns), or null.
-    const void *literal_runs = nullptr;
     bool known = false;
+    bool has_literals = false;  // banjo-nx (2026-10-27): the cache entry's literalCount != 0 (known summaries)
+    // banjo-nx (2026-10-27): whether its host shader may read gl_VertexID (plume Deko3DShaderReadsVertexId: a call and
+    // a miss on the host shader at most vertex shader changes), -1 until a draw asks; the host is set once per record.
+    int8_t reads_vertex_id = -1;
+    u32 valid[8] = {};  // the groups' registers (a whole upload's 'valid'; the first upload only)
   };
   mutable DrawSummary draw_summary;
   // banjo-nx (banjo_gpu_bool_spec): the bools the shader's SPIR-V specialises (ShaderBoolSpecMask), read on the
@@ -71,19 +94,10 @@ struct ShaderRecord {
   mutable u32 bool_spec_mask[8] = {};
   mutable bool bool_spec_read = false;
 
-  // Vertex shaders: what D3DVertexShader_Bind bound the shader to. The bind
-  // bakes the declaration into the microcode, so a draw with no declaration
-  // set uses it; a copy, as N&B releases the declaration right after binding.
-  // And the per-stream strides in bytes, used where SetStreamSource was given
-  // a zero stride (keep the bound one).
-  std::unique_ptr<VertexDeclarationRecord> bound_declaration;
+  // The bound declaration's per-stream strides in bytes, used where SetStreamSource was given a zero stride (keep the
+  // bound one); the fetch declaration's.
   u32 bound_strides[d3d::kMaxStreams] = {};
-  // Vertex shaders: the declaration the shader's own vfetches describe, for
-  // draws with neither a declaration set nor a bind (bundle meshes). Built on
-  // first use; nullptr when the shader fetches no vertex elements.
-  std::unique_ptr<VertexDeclarationRecord> fetch_declaration;
   u32 fetch_strides[d3d::kMaxStreams] = {};
-  bool fetch_declaration_built = false;
 
   std::mutex host_mutex;  // building host
 
@@ -96,6 +110,8 @@ struct ShaderRecord {
 ShaderRecord *FindShaderLocked(u32 shader_va, RecordKind kind);
 // banjo-nx (2026-10-23): prefetches what FindShaderLocked will read for this shader (no other effect).
 void PrefetchShaderLocked(u32 shader_va, RecordKind kind);
+// banjo-nx (2026-10-27): the record's first lines when the memo holds the shader already (prefetches only).
+void PrefetchShaderRecordLocked(u32 shader_va, RecordKind kind);
 
 // Drops the host side of an in-place guest shader object, if it has one.
 // Requires State().mutex.

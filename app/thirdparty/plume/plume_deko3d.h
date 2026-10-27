@@ -259,51 +259,57 @@ namespace plume {
     };
 
     struct Deko3DGraphicsPipeline : Deko3DPipeline {
-        const DkShader *shaders[3] = {};  // vertex, geometry, fragment (null when absent)
+        // banjo-nx (2026-10-27, deko3d recording): what a draw's bind and draw read, first and together (three lines
+        // after the base), the fixed-function state's bulk after it. Before, these were spread before and after the
+        // blend, attribute and vertex buffer states (over a kilobyte): a new pipeline (60 % of the city's draws) cost
+        // four to five misses in setPipeline, bindGraphicsBuffers, bindTextures and Deko3DRefreshPipeline (the b35
+        // console profile's hottest plume lines). Callers prefetch these lines once they know the pipeline.
+        bool valid = false;
+        bool boundTextures = false;
+        bool textures = false;
+        bool usesBlendConstant = false;
+        bool stencilEnabled = false;
+        bool dynamicStencilReference = false;
+        bool dynamicDepthBias = false;
+        std::atomic<bool> provisional{false};  // (see pending, below)
+        DkPrimitive primitive = DkPrimitive_Triangles;
         uint32_t stageMask = 0;
         uint32_t shaderCount = 0;
-        bool valid = false;
-        DkPrimitive primitive = DkPrimitive_Triangles;
+        uint32_t blendCount = 0;
+        const DkShader *shaders[3] = {};  // vertex, geometry, fragment (null when absent)
+        // banjo-nx (2026-10-19, CPU proposal 13): the shader of each stage (vertex, geometry, fragment; null when
+        // absent), so a bind does not ask deko3d, and a hash of each group of the fixed-function state, so a bind
+        // after a pipeline of other state sends only the groups that differ (kStateGroups, Deko3DCommandList).
+        const DkShader *stageShaders[3] = {};
+        uint64_t stateHash = 0; // equal hashes: the same fixed-function state (binds skipped)
+        // UBO / SSBO slots each stage reads (vertex, geometry, fragment).
+        uint32_t uboMask[3] = {}, ssboMask[3] = {};
+        uint32_t txqMask[3] = {};  // banjo-nx (2026-10-19): Deko3DShaderUsage::txqMask of each stage
+        // banjo-nx (2026-10-27, render thread night): the 64-byte lines of the shared constants that hold its
+        // bindings' texture and sampler words (bindTextures reads only those).
+        uint32_t texLines = 0;
+        std::vector<Deko3DShaderUsage::TexBinding> texBindings[3];
+        uint64_t groupHash[9] = {};
+        // The bulk: read when the state groups differ from what is bound.
         DkRasterizerState rasterizer{};
         DkMultisampleState multisample{};
         DkColorState color{};
         DkColorWriteState colorWrite{};
         DkBlendState blend[8]{};
         uint32_t blendWords[8][7]{}; // the IndependentBlend registers written again (deko3d 0.5.0's FuncAlphaDst)
-        uint32_t blendCount = 0;
         DkDepthStencilState depthStencil{};
         uint8_t stencilReadMask = 0xFF, stencilWriteMask = 0xFF, stencilReference = 0;
-        bool stencilEnabled = false;
-        bool dynamicStencilReference = false;
         float depthBias = 0.0f, depthBiasClamp = 0.0f, slopeScaledDepthBias = 0.0f;
-        bool dynamicDepthBias = false;
         DkVtxAttribState attribs[32]{};
         uint32_t attribCount = 0;
         DkVtxBufferState vtxBuffers[16]{};
         uint32_t vtxBufferCount = 0;
-        bool usesBlendConstant = false;
-        // UBO / SSBO slots each stage reads (vertex, geometry, fragment).
-        uint32_t uboMask[3] = {}, ssboMask[3] = {};
-        std::vector<Deko3DShaderUsage::TexBinding> texBindings[3];
-        uint32_t txqMask[3] = {};  // banjo-nx (2026-10-19): Deko3DShaderUsage::txqMask of each stage
-        // banjo-nx (2026-10-27, render thread night): the 64-byte lines of the shared constants that hold its
-        // bindings' texture and sampler words (bindTextures reads only those).
-        uint32_t texLines = 0;
-        bool boundTextures = false;
-        bool textures = false;
-        uint64_t stateHash = 0; // equal hashes: the same fixed-function state (binds skipped)
-        // banjo-nx (2026-10-19, CPU proposal 13): the shader of each stage (vertex, geometry, fragment; null when
-        // absent), so a bind does not ask deko3d, and a hash of each group of the fixed-function state, so a bind
-        // after a pipeline of other state sends only the groups that differ (kStateGroups, Deko3DCommandList).
-        const DkShader *stageShaders[3] = {};
-        uint64_t groupHash[9] = {};
         // banjo-nx (2026-10-21, Deko3DOptions::asyncVariants): the stages drawn with their shader's generic variant
         // while their own is compiled in the background: what to compile (Deko3DVariantRequest: the variant's key, the
         // shared text and its defines; not the shader object, which Renut's prebuild workers destroy when a batch is
         // done); 'provisional' while any stage waits, and the device's async epoch it was last refreshed at
         // (Deko3DRefreshPipeline, which also queues a request the queue had no room for).
         Deko3DVariantRequest pending[3];
-        std::atomic<bool> provisional{false};
         uint64_t pendingEpoch = 0;
     };
 
@@ -729,8 +735,20 @@ namespace plume {
     // constants (Deko3DSetSharedWords) the renderer changed (bit i = line i).
     void Deko3DSetTextureSkip(bool on);
     void Deko3DSharedLinesWritten(RenderCommandList *commandList, uint32_t lines);
-    bool Deko3DPushUniform(RenderCommandList *commandList, uint64_t address, uint32_t uboSize, uint32_t offset,
-                           const void *data, uint32_t size);
+    bool Deko3DPushUniformSlow(RenderCommandList *commandList, uint64_t address, uint32_t uboSize, uint32_t offset,
+                               const void *data, uint32_t size);
+    // banjo-nx (2026-10-27, deko3d recording): one piece (every push the renderer makes: 64-byte constant groups and
+    // runs, the shared constants' lines) inline, straight to deko3d; longer ones in pieces (Deko3DPushUniformSlow).
+    // (The b35 profile: the call's entry 0.4 % of the render thread, at several calls a draw.)
+    inline bool Deko3DPushUniform(RenderCommandList *commandList, uint64_t address, uint32_t uboSize, uint32_t offset,
+                                  const void *data, uint32_t size) {
+        if (size - 1u < 1024u && address && commandList && offset + size <= uboSize) {
+            dkCmdBufPushConstants(static_cast<Deko3DCommandList *>(commandList)->cmd, address, uboSize, offset,
+                                  (size + 3u) & ~3u, data);
+            return true;
+        }
+        return Deko3DPushUniformSlow(commandList, address, uboSize, offset, data, size);
+    }
     bool Deko3DSetSharedWords(RenderCommandList *commandList, const void *cpu, uint32_t size);
     // banjo-nx: the queue lost (dkQueueIsInErrorState).
     bool Deko3DDeviceLost(RenderDevice *device);
@@ -749,6 +767,29 @@ namespace plume {
             !static_cast<Deko3DGraphicsPipeline *>(p)->provisional.load(std::memory_order_relaxed))
             return false;
         return Deko3DRefreshPipelineSlow(pipeline);
+    }
+    // banjo-nx (2026-10-27, deko3d recording): the lines a graphics pipeline's bind and draw read (the base, the
+    // draw-time block, the texture bindings' first entries), fetched once the caller knows it will bind it.
+    inline void Deko3DPrefetchPipeline(const RenderPipeline *pipeline) {
+        const char *p = reinterpret_cast<const char *>(pipeline);
+        if (!p)
+            return;
+        for (uint32_t line = 0; line < 4; line++)
+            __builtin_prefetch(p + line * 64);
+    }
+    // banjo-nx (2026-10-27, deko3d recording): its stages' shader objects (128 bytes each, in their variants' heap
+    // objects), which dkCmdBufBindShaders reads (the b35 profile: its hottest line, 0.7 % of the render thread). Call
+    // once the pipeline's own lines are in (some work after Deko3DPrefetchPipeline).
+    inline void Deko3DPrefetchPipelineShaders(const RenderPipeline *pipeline) {
+        const auto *p = static_cast<const Deko3DPipeline *>(pipeline);
+        if (!p || p->type != Deko3DPipeline::Type::Graphics)
+            return;
+        for (const DkShader *s : static_cast<const Deko3DGraphicsPipeline *>(p)->stageShaders) {
+            if (s) {
+                __builtin_prefetch(s);
+                __builtin_prefetch(reinterpret_cast<const char *>(s) + 64);
+            }
+        }
     }
     // banjo-nx (2026-10-21, from sa2-nx 1.0.3.1): the size the swapchain should have, the console display's (1920x1080
     // docked, 1280x720 handheld); 0 x 0 = the window's, as before. A swapchain of another size asks for a resize

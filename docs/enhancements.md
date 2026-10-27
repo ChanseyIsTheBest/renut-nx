@@ -1595,3 +1595,29 @@ Emulator title-screen runs only (b26-b32); console numbers pending.
 - **Not built**: #2 (the voice filter across voices: XAudio mixes each voice's filter output right after it, one voice
   at a time), #3 (the reverb is already NEON), the texture side of #8, the replay without the device image (it would
   cost more than the chunk copies it saves). Reasons in `docs/record-time-draw-path.md`.
+
+## Phase A, the replay stream, fetch cache and geometry objects (2026-10-27 evening)
+
+- **Phase A** (`banjo_renut_resource_objects`, A/B 45): texture objects resolved by the recording threads. Console A/B
+  45: -2.26 ms (-4.3 %), 4 of 4 pairs. Emulator verify 27.4 million answers, 0 differ.
+- **Replay stream** (`banjo_renut_replay_stream`, A/B 46): two-line, 64-aligned ops and a three-stage prefetch.
+- **Fetch cache** (`banjo_renut_fetch_cache`, A/B 47): vertex fetch data kept across frames, proven by the store cards;
+  emulator ring copies 240 -> 5-16 MB per 10 s.
+- **Geometry objects** (`banjo_renut_geometry_objects`, A/B 48): stream and index buffer objects resolved at record
+  time; replace the mesh objects.
+- Constants and deko3d recording: data the push and the pipeline bind read moved into lines already in cache, and
+  prefetched. Details: `docs/record-time-draw-path.md`; for other ports: `docs/porting-guide-renderer.md`.
+- **Not built**: Phase B (loader hooks), see the porting guide's section 1b.
+
+## Total CPU (2026-10-28)
+
+The c4 console run (four cores, static city, 19.6 fps): the three game cores about 98 % busy (render thread 47 ms,
+main thread 28, the two recording threads 47 of which about 20 ms is the recording code, others 25). The frame follows
+the total CPU on those cores, so the user chose total-CPU cuts over moving draw translation to the recording threads.
+
+- **Recording lookups** (`banjo_renut_record_lookups`, A/B 50): keys in the object tables (one line a lookup), the op's
+  lookups batched so their misses overlap, a per-device memo of the last objects. Exact.
+- **Fast pipeline entry**: the pipeline and its check on the first line, the key's draw-time fields on the second.
+- **Background compiles**: share 10 % (was 25 %), rest up to 30 s.
+- **A/B 49** (the replay stream's shader stages) off by default: +0.7 ms on the console.
+- **A/B halves** now report the CPU of all threads a frame (Switch).

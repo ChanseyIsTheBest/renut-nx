@@ -49,6 +49,21 @@ Two ideas carry most of it. **Do the work where the information appears** (a set
 recording thread knows a texture's header; the render thread should only apply). **Keep answers until something
 pushes them out** (store cards for guest memory, generations for caches) instead of checking them at every draw.
 
+## 1b. How close to Unleashed a game can get
+
+Unleashed's renderer translates each D3D call once, when the game makes it; resources are host objects from their
+creation, and a lock says when a buffer's data changes. Three things decide how much of that a ReXGlue port can copy:
+
+| Unleashed has | If your game does the same | If it does what N&B does |
+|---|---|---|
+| D3D calls translated when made | translate in the hooks (section 4.1 is the start) | N&B records 98.5 % of its draws into D3D command buffers, re-recorded every frame: record ops on the game's threads, replay them as a prefetched stream (4.6c); the translation happens once either way |
+| Resources as objects from creation | hook creation, keep a host object per resource | N&B builds most headers in its own memory (5 % of streams, 26 % of textures through creation calls): resolve the words the hardware takes at the draw to objects on the recording thread (4.6, 4.6b). The render thread then works through object pointers as Unleashed's does |
+| Lock / unlock says when data changes | invalidate on unlock | N&B writes buffers without locks: the store cards (codegen marks a byte per guest page on every store) prove copies once per kick interval. Hooking the game's loaders (Banjo's "Phase B") cannot remove these proofs; with record-time objects in place it would only move object creation earlier |
+
+Banjo did not build Phase B (loader hooks) for that reason: after 4.6 and 4.6b it would save nothing on the render
+thread, and it needs days of reverse engineering per game. A game that creates its resources through D3D should hook
+creation instead of 4.6 / 4.6b's record-time resolution.
+
 ## 2. What your game decides (census first)
 
 Measure these before porting a piece; Banjo's numbers are in brackets. The census keys print in the 10 s log.
@@ -123,6 +138,60 @@ Port: needs 4.1 (op chunks) and the texture memo (`FillTextures`) as the fallbac
 answer with the memo's and counts headers the game rewrote between recording and replay (the record follows the
 hardware: the GPU takes the fetch constants and buffer words when the draw is recorded).
 
+Results (Banjo b35, 2026-10-27): emulator verify 19.7 million object answers, 0 differences (including 4,833 headers the
+game rewrote between recording and replay, bound by both paths to the same words); console A/B 45 in a static city
+spot: render thread 52.07 -> 49.81 ms (-2.26 ms, -4.3 %), faster in 4 of 4 pairs, about +0.6 fps.
+
+### 4.6b Geometry objects (2026-10-27, `banjo_renut_geometry_objects`, A/B 48)
+The same model for vertex and index buffers. The recording thread resolves each draw's stream sources (the stream's
+fetch words, its source object, stride byte and stream, the source header's base and size) and its index buffer (the
+header's Common, Address, Size) to objects (`FindStreamObject`, `FindIndexObject`: one per buffer, a thread-safe table).
+The render thread keeps in each object the whole copy the old lookup found, and for a stream the layout, vertex shader
+and strides it was found for. A draw whose objects all answer takes their copies: a pointer and a few compares per
+buffer. Validity: an answer is void only when a cache entry may have been erased (a generation raised there), not when a
+copy is dropped (its entry stays and its proof fails). Proofs are unchanged (once per kick interval, store cards or exact
+hash). Do not key such objects by draw: Banjo's first try (mesh objects, keyed by each submesh's base, count and first
+index) made 340,000 objects per 10 s for 300,000 answers and measured -0.07 ms on the console.
+
+### 4.6c The replay as a stream (2026-10-27, `banjo_renut_replay_stream`, A/B 46)
+Unleashed's render thread takes a queue of translated commands in order. Banjo's equivalent is the recorded op list: make
+it a stream the CPU can prefetch. Ops are 64-byte aligned, and a draw's op is exactly two lines (the header with the
+dirty masks, then the call without pointers: Draw*UP data by arena offset, and the shaders' words as recorded). While op
+i is replayed, op i+2's two lines and op i+1's arena state, resource and extent records and (when it changes shaders)
+its shader lookups are prefetched, all from recorded values. Nothing is decoded ahead: Banjo's earlier look-ahead peeked
+at the next op's device words and cost +2.15 ms on the A57. (b35 profile: three loads of op lines were 4 % of the
+render thread, because a 288-byte op straddled lines.)
+
+### 4.6d The fetch cache (2026-10-27, `banjo_renut_fetch_cache`, A/B 47)
+Data vertex shaders fetch by address (bone palettes, instance data) was copied from guest memory into the upload ring at
+every kick: about 3 MB a frame in Banjo's city, the render thread's biggest memcpy. Give it the whole-buffer copies'
+rules: a range unwritten for three kicks gets a copy in the stream cache's pool, proven once per kick, dropped when it
+changes; a draw whose fetch buffers are all kept in one pool chunk binds that chunk as its fetch data. Dynamic data
+(written every frame) never gets a copy and costs one check per interval.
+
+### 4.6e Small things with large counts (2026-10-27)
+- Per-shader data the constants push reads (the registers it reads, whether it has literals) copied into the shader
+  record's draw summary, which the shader lookup already prefetches: the push read them from the shader cache entry, a
+  miss at most shader changes.
+- The pipeline object's draw-time fields together at its start (deko3d's pipeline object had them before and after a
+  kilobyte of blend and vertex state: four to five misses per pipeline bind), prefetched once the fast path knows the
+  pipeline.
+- The same for the fast path's own pipeline cache entry (2026-10-28): the pipeline pointer and the words its check
+  compares on the first line, the key's draw-time fields on the second; the key itself after them.
+
+### 4.6f The recording threads' lookups (2026-10-28, `banjo_renut_record_lookups`, A/B 50)
+Record-time objects move lookups from the render thread to the recording threads; they do not make them free. In
+Banjo's c4 console run the two recording threads spent 46 % of their op recording (about 6 ms a frame) in the object
+tables' misses: a slot's pointer, then the object's key line, one lookup after the other. Three changes, all exact:
+- Keys in the table: a slot holds the object's key words beside its number (32 bytes a slot), so a lookup reads one line.
+  Claim an empty slot with a compare-and-swap to a busy mark, write the key, publish the number with release; readers
+  pass a busy slot over (at worst a second object for the same key, which is harmless when each object is answered on
+  its own).
+- Batches: read every guest header address of the op first and prefetch them all, then build the keys and prefetch all
+  their table lines, then compare. The misses overlap instead of following each other.
+- A memo per recording device (each device is recorded by one thread): the last object of each texture slot, stream and
+  the index buffer by its key words. A chunk change marks two or three texture slots whose words did not change.
+
 ### 4.7 Record-time extents for memexport checks
 `banjo_renut_record_extents` (A/B 43). With exports pending at nearly every draw, each sampled texture's guest extent
 is worked out on the recording thread; the render thread tests it against the 1 KB export bitmap. Only for games with
@@ -149,10 +218,22 @@ most N indices into square depth targets. The user decides per game.
 - Console, stock clocks, a **static** spot (driving changes the load); `renut.toml` for 2 minutes, then
   `renut_ab.toml` (the targets of the round) for 10+ minutes. Frame rate follows 1000 / render-thread ms when the
   render thread is the limit: watch that first.
+- **Then check whether the cores are full** (Banjo, 2026-10-28). Sum the game threads' CPU a frame from the per-thread
+  report: when the game cores are all busy (Banjo's three were about 98 % at 51 ms a frame: render thread 47 ms, main
+  28, recording 47, others 25), the frame is the total divided by the cores, and a render-thread cut gives only part of
+  itself back (A/B 48: -4.6 ms render thread, about -2 ms a frame). Moving work from the render thread to the recording
+  threads is then worth nothing unless it gets cheaper on the way. Judge items by CPU a frame of all threads (the A/B
+  halves report it) and fps.
 - Emulator (patched Ryujinx): title screen only, every verify key on; it proves exactness, not speed (its GPU timer
   and timing are not the console's).
 - Profiles: `rex_profile.log`'s per-thread samples; `rt_lines` style mapping of render-thread samples to source lines
   with addr2line (keep the ELF of every package).
+- Cache-miss audit (Banjo, 2026-10-28): list the hottest sampled instructions with the one before and the source line
+  (objdump -dl). On the A57 nearly all of them are loads that missed. For each, find the structure and the field offset
+  in the load (`ldr x2, [x2, #32]`: the field 32 bytes into the object), then either move the field to a line the code
+  already fetched, or prefetch it a stage earlier where its address is known (Banjo's replay: an op's record two ahead,
+  its objects one ahead, the copies they name at the op). Banjo's first two audits found about 15 such loads at 0.2 to
+  1.5 % of the render thread each.
 
 ## 6. Pitfalls (each cost Banjo a build or a run)
 
