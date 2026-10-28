@@ -72,3 +72,34 @@ a 5-minute Ryujinx session (the user's choice) of the scripted route with every 
 `renut_gpu_profile = 0`, `banjo_renut_diag_gpu_shaders`, `banjo_renut_diag_resolve_trace`), the copies called directly
 (`banjo_hot_guard_calls = banjo_hot_guard_period = 0`). One 4.5 MB stream, 310 `.gcda` files (the shards included),
 largest arc count 1.4e9. The old profile is kept outside the repository (D:/Banjo kazooie port/pgo_profile_36t).
+
+## The third profile (per-draw night, 2026-10-28)
+
+The record-time renderer (the fast draw path, the replay stream, the record-time objects, tonight's rounds) was all
+written after the second profile, so none of it had profile data (a function new since the profile is compiled with
+GCC's guessed profile; one changed since loses its counts). Taken again from the night's source (e1-e9): instrumented
+build in app/out/switch-pgo-gen (configured as switch-dist but `BANJO_PGO=generate`, LTO off, and the dist shader
+cache source), then the same 5-minute Ryujinx session with every profiler off (scratchpad ryu/pgo_run.toml, now made
+from the current emulator base toml: the 10-22 one had `banjo_renut_record_worker = false`, which the shipped toml does
+not set), in the emulator data folder with the current shader files (banjo2). The second profile is kept outside the
+repository (D:/Banjo kazooie port/pgo_profile_36z6).
+
+Pitfall: every build folder writes the SDK's static archives to the one folder sdk/out/switch-arm64; an instrumented
+build started while the dist build linked failed on a locked archive. The SDK objects have the same flags in every
+folder (no LTO, no profile flags), so only never run two of these builds at once.
+
+Also: ninja does not see the .gcda files as inputs, so a new profile with unchanged sources rebuilds nothing.
+Apply it with a clean build of the release folder (`cmake --build <folder> --clean-first`; scratchpad
+build_dist_clean.bat).
+
+
+Later that night the profile was taken twice more, each time from the source as it then stood (cycles 3 to 5: the
+f items, then the g items), so the package's hottest code has counts from its own form. A cycle is one script run
+start to finish (instrumented build, the 380 s session, the merge, the clean release build: about 30 minutes), the
+previous profile folder moved aside first (the merge refuses a folder that already holds .gcda files). Changes made
+after a profile still build against it: GCC drops the counts of a function whose form changed (a mismatch warning,
+not an error, with the project's flags) and guesses for it.
+
+Pitfall: a background waiter that grepped the chain's output for "cycle done" matched the copy of the previous
+cycle's last lines the chain prints at its start, and started an incremental build in the release folder while the
+clean build was linking. Wait on a count of markers, or a marker only the awaited step prints.

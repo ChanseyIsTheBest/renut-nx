@@ -87,6 +87,15 @@ struct HostSurface {
   std::vector<DepthImage::View> handover_views;
   uint32_t handed = 0;
   bool stencil_used = false;
+  // banjo-nx (2026-10-28, banjo_renut_clear_repeat; from sa2-nx's sa2_renut_clear_repeat, credit sa2-nx; render/draw.cpp
+  // ClearTargets): the last whole clear's values and the image (generation) and writes it left; a whole clear of the same
+  // values while these still hold writes nothing new.
+  bool clear_known = false;
+  uint64_t clear_generation = 0, clear_writes = 0;
+  float clear_color[4] = {};
+  bool clear_depth_known = false, clear_stencil_known = false;
+  float clear_depth = 0.0f;
+  uint32_t clear_stencil = 0;
 
   // gpu_profile labels of draws with it as the first target: color only,
   // color with depth, depth only. Made on first use.
@@ -104,6 +113,9 @@ struct HostSurface {
 // and resolve destinations of another scale are rebuilt on their next use.
 RenderScale ResolutionScale();
 void LatchResolutionScaleLocked();
+// banjo-nx (2026-10-28, GPU block, banjo_renut_dynamic_height_handheld): a frame's GPU time (render thread), which
+// decides the handheld height the next LatchResolutionScaleLocked takes.
+void NoteGpuFrameForDynamicResolution(double gpu_ms);
 
 // banjo-nx (2026-10-21, internal resolution, the user's request: banjo_renut_render_height_handheld / _docked): on
 // deko3d the 3D image is drawn at the internal resolution (ResolutionScale: 648p handheld, 900p docked with the tomls'

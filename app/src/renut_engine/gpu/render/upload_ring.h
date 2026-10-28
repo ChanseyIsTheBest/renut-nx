@@ -41,7 +41,10 @@ struct UploadAllocation {
 
 class UploadRing {
 public:
-  static constexpr uint64_t kChunkSize = 32ull << 20;
+  // banjo-nx (2026-10-28, the heap): 16 MB (32 before). The first chunk of each ring stays for the whole session (64 MB
+  // for the two rings, the heap at 2.9 of 3.08 GB in the d4 city); a city frame fills a few MB with the constants
+  // pushed. A frame that needs more adds a chunk, which the trim below gives back.
+  static constexpr uint64_t kChunkSize = 16ull << 20;
   // Resets (frames of this slot) after which chunks beyond what those frames
   // used are released.
   static constexpr uint32_t kTrimResets = 300;

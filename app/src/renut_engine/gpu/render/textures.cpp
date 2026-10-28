@@ -407,6 +407,7 @@ std::vector<PendingFill> g_pending_fills;
 // Records the copies of every level into 't'. The guest data is read now, or
 // when the command list is submitted if 'defer_read'.
 bool Upload(HostTexture &t, const TextureFetch &fetch, bool defer_read) {
+  FlushResolveMipsLocked(t);  // banjo-nx (2026-10-28, banjo_renut_lazy_resolve_mips): from the level 0 the resolves left
   // banjo-nx (2026-10-19, render-thread proposal 1): the interval the guest bytes are read in: now, or at the next
   // kick's flush (FlushTextureFillsLocked, right after FlushVertexFillsLocked starts a new interval; a later one is
   // only more cautious).
@@ -630,6 +631,7 @@ void MaskedDesc(const TextureFetch &fetch, u32 out[6]) {
 }
 
 void Retire(HostTexture &t) {
+  t.mips_pending = false;  // banjo-nx (2026-10-28, banjo_renut_lazy_resolve_mips): nothing reads them now
   ++g_texture_epoch;  // banjo-nx (CPU proposal 2)
   BumpTextureBindings(t);  // banjo-nx (2026-10-27)
   DepthHandOverForgetLocked(t);  // banjo-nx (2026-10-19, banjo_deko3d_depth_handover)
@@ -740,6 +742,7 @@ uint32_t WordsViewSlot(HostTexture &t, HostTexture &source, u32 swizzle) {
 void CopyDepthWords(HostTexture &t, HostTexture &source) {
   if (t.copied_resolve == source.resolves)
     return;
+  FlushResolveMipsLocked(t);  // banjo-nx (2026-10-28, banjo_renut_lazy_resolve_mips)
   ++g_texture_epoch;  // banjo-nx (CPU proposal 2)
   plume::RenderCommandList *cmd = State().command_list;
   TransitionTextureLocked(source.words.get(), plume::RenderTextureLayout::COPY_SOURCE);
@@ -774,8 +777,11 @@ HostTexture *ResolveTarget(u32 texture_va, plume::RenderFormat format, RenderSca
   MaskedDesc(fetch, desc);
 
   auto &slot = TextureSlot(texture_va);
+  // banjo-nx (2026-10-28, night_gpu5, dynamic resolution steps): a destination of a settable code made at another
+  // height of it (render/surfaces.cpp CodeForHeightLocked) is made again: its size is the old height's.
   if (slot && (!slot->render_target || std::memcmp(slot->desc, desc, sizeof(desc)) != 0 ||
-               !slot->texture || slot->host_format != format || slot->scale != scale)) {
+               !slot->texture || slot->host_format != format || slot->scale != scale ||
+               slot->alloc_width != scale.Size(slot->width) || slot->alloc_height != scale.Size(slot->height))) {
     Retire(*slot);
     slot.reset();
   }
@@ -1178,6 +1184,7 @@ TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetc
     resolved->used_frame = g_frame;
     if (resolved->words)
       banjo::renut_gpu::CountDepthFloatSampled();  // banjo-nx (2026-10-18): a depth resolve's float target sampled
+    FlushResolveMipsLocked(*resolved);  // banjo-nx (2026-10-28, banjo_renut_lazy_resolve_mips)
     TransitionTextureLocked(resolved, plume::RenderTextureLayout::SHADER_READ);
     if (fx) {
       fx->transition[0] = resolved;
@@ -1322,6 +1329,7 @@ TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetc
                   g_frame, texture_va, t.width, t.height, u32(fetch.Format()), fetch.Tiled() ? ", tiled" : "");
     }
   }
+  FlushResolveMipsLocked(t);  // banjo-nx (2026-10-28, banjo_renut_lazy_resolve_mips)
   TransitionTextureLocked(&t, plume::RenderTextureLayout::SHADER_READ);
   if (t.words)
     banjo::renut_gpu::CountDepthFloatSampled();  // banjo-nx (2026-10-18): a depth resolve's float target sampled
@@ -1819,6 +1827,22 @@ uint32_t SamplerSlotUncached(const TextureFetch &fetch, RenderScale lod_scale) {
       fetch.MipFilter() != TextureFilter::BaseMap && fetch.MaxMipLevel() > fetch.MinMipLevel()) {
     desc.anisotropyEnabled = true;
     desc.maxAnisotropy = min_anisotropy;
+  }
+  // banjo-nx (2026-10-28, GPU block, banjo_renut_anisotropy_cap: not pixel-identical, off by default): at most the cap.
+  // The samplers made, by the game's ratio, logged now and then.
+  {
+    static uint64_t made[6] = {};  // by the fetch constant's field: 0-1 none, 2-5 2:1-16:1
+    ++made[std::min<uint32_t>(aniso, 5u)];
+    const uint64_t total = made[0] + made[1] + made[2] + made[3] + made[4] + made[5];
+    if ((total & (total - 1)) == 0 && total >= 16)
+      RGPU_INFO("[renut] samplers made: {} without anisotropy, {} at 2:1, {} at 4:1, {} at 8:1, {} at 16:1 (the game's "
+                "own; banjo_renut_anisotropy_cap {})",
+                made[0] + made[1], made[2], made[3], made[4], made[5], AnisotropyCap());
+    const uint32_t cap = AnisotropyCap();
+    if (cap && desc.anisotropyEnabled && desc.maxAnisotropy > cap) {
+      desc.maxAnisotropy = cap;
+      desc.anisotropyEnabled = cap > 1;
+    }
   }
   desc.minLOD = float(fetch.MinMipLevel());
   desc.maxLOD = fetch.MipFilter() == TextureFilter::BaseMap ? float(fetch.MinMipLevel())

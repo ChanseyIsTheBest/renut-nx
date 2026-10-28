@@ -33,6 +33,9 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_variant_log, false, "Banjo/Renut",
                     "and specialization constants (tools/deko3d_variant_cache.py builds the deko3d DKSH cache from it)");
 #include <xxhash.h>
 #include <cstdio>  // banjo-nx (2026-10-20): the pipeline list file
+#if defined(__SWITCH__)
+extern "C" char *fake_heap_end;  // banjo-nx (2026-10-28): libnx: the end of the malloc heap (ReleaseIdlePrebuiltPipelines)
+#endif
 #if defined(_WIN32)
 #include <io.h>  // _commit
 #else
@@ -566,16 +569,36 @@ std::vector<char> EncodeRecord(const PipelineKey &key, const HostVertexLayout &l
 }
 
 // A listed pipeline, as the worker threads build it.
+// banjo-nx (2026-10-28, the heap): a decoded vertex layout and the names its elements point at, one per distinct layout,
+// shared by the jobs that have it (JobLayoutFor).
+struct JobLayout {
+  HostVertexLayout layout;
+  std::deque<std::string> names;  // the elements' semantic names point here
+};
 struct Job {
   PipelineKey key{};
   uint64_t hash = 0;
-  HostVertexLayout layout;
-  std::deque<std::string> names;  // the elements' semantic names point here
+  std::shared_ptr<const JobLayout> layout;
   enum class Stage { Pending, Building, Done } stage = Stage::Pending;
   std::unique_ptr<plume::RenderPipeline> pipeline;  // Done: nullptr if taken or failed
+  // banjo-nx (2026-10-28, the heap): when its build was done (steady clock, ms), and whether its pipeline was given back
+  // unused (Pending again, in no queue: TakePrebuilt claims it, SpecialisedPipeline queues it again).
+  int64_t done_ms = 0;
+  bool released = false;
   // Its shaders the game has not made yet (PipelineShaderLoaded); queued at 0.
   u32 shaders_missing = 0;
 };
+
+// banjo-nx (2026-10-28, the heap): the shared block for a layout, by its fields as the record has them.
+std::shared_ptr<const JobLayout> JobLayoutFor(const std::string &bytes, std::unique_ptr<JobLayout> fresh) {
+  static std::mutex mutex;
+  static std::unordered_map<std::string, std::shared_ptr<const JobLayout>> layouts;
+  std::lock_guard lock(mutex);
+  auto [it, made] = layouts.try_emplace(bytes);
+  if (made)
+    it->second = std::move(fresh);
+  return it->second;
+}
 
 bool DecodeRecord(const char *data, size_t size, Job &job) {
   ByteReader r(data, size);
@@ -607,17 +630,24 @@ bool DecodeRecord(const char *data, size_t size, Job &job) {
   }
   job.key.reserved = 0;
   job.hash = HashKey(job.key);
+  // banjo-nx (2026-10-28, the heap): decoded into a fresh block, then the shared one for the same fields (JobLayoutFor).
+  auto fresh = std::make_unique<JobLayout>();
+  std::string bytes;
+  const auto put = [&bytes](const void *p, size_t n) { bytes.append(static_cast<const char *>(p), n); };
   for (u32 s = 0; s < kMaxVertexStreams; ++s) {
     u8 used;
     u32 stride;
     if (!r.Get(used) || !r.Get(stride))
       return false;
-    job.layout.streams[s].used = used != 0;
-    job.layout.streams[s].host_stride = stride;
+    fresh->layout.streams[s].used = used != 0;
+    fresh->layout.streams[s].host_stride = stride;
+    put(&used, sizeof(used));
+    put(&stride, sizeof(stride));
   }
   u32 count;
   if (!r.Get(count) || count > 64)
     return false;
+  put(&count, sizeof(count));
   for (u32 i = 0; i < count; ++i) {
     u8 length;
     std::string name;
@@ -629,10 +659,15 @@ bool DecodeRecord(const char *data, size_t size, Job &job) {
         !r.Get(slot) || !r.Get(offset)) {
       return false;
     }
-    job.names.push_back(std::move(name));
-    job.layout.input_elements.emplace_back(job.names.back().c_str(), index, location,
-                                           plume::RenderFormat(format), slot, offset);
+    put(&length, sizeof(length));
+    put(name.data(), length);
+    for (const u32 v : {index, location, format, slot, offset})
+      put(&v, sizeof(v));
+    fresh->names.push_back(std::move(name));
+    fresh->layout.input_elements.emplace_back(fresh->names.back().c_str(), index, location,
+                                              plume::RenderFormat(format), slot, offset);
   }
+  job.layout = JobLayoutFor(bytes, std::move(fresh));
   return true;
 }
 
@@ -643,70 +678,88 @@ bool DecodeRecord(const char *data, size_t size, Job &job) {
 // same pipelines (and their shader variants) were built again at every start. The file is synced to the card at most
 // once a second (kListSyncNs: the records of the last second may still be lost), not per record (a new area appends
 // hundreds).
+// banjo-nx (2026-10-28, per-draw night): written by a thread of its own (WriterLoop); the render thread only appends
+// the encoded records to 'pending'. Before, the render thread wrote and flushed each record (a call into the file
+// system service a pipeline) and synced the card (milliseconds) at most once a second while records came.
+void PipelineListWriterMain();
 struct PipelineList {
-  std::FILE *out = nullptr;
-  bool failed = false;
-  std::unordered_set<uint64_t> listed;  // key hashes in the file
-  std::chrono::steady_clock::time_point last_sync{};
-  bool unsynced = false;
+  std::FILE *out = nullptr;  // the writer's
+  std::atomic<bool> failed{false};
+  std::unordered_set<uint64_t> listed;  // key hashes in the file (render thread; the load at the start)
   static constexpr auto kListSync = std::chrono::seconds(1);
-
-  void Sync() {
-    if (!out || !unsynced)
-      return;
-    std::fflush(out);
-#if defined(_WIN32)
-    _commit(_fileno(out));
-#else
-    fsync(fileno(out));
-#endif
-    unsynced = false;
-    last_sync = std::chrono::steady_clock::now();
-  }
+  std::mutex pending_mutex;
+  std::vector<char> pending;  // records (size word, then the record) not yet written, in order
+  bool writer_started = false;  // render thread
 
   void Append(const PipelineKey &key, uint64_t hash, const HostVertexLayout &layout) {
-    if (failed || !listed.insert(hash).second)
+    if (failed.load(std::memory_order_relaxed) || !listed.insert(hash).second)
       return;
-    if (!out) {
-      const std::filesystem::path path = banjo::renut_gpu::NextToExecutable(REXCVAR_GET(renut_pipeline_list));
-      std::error_code ec;
-      const bool fresh = !std::filesystem::exists(path, ec) || std::filesystem::file_size(path, ec) == 0;
-      out = std::fopen(path.string().c_str(), "ab");
-      if (!out) {
-        failed = true;
-        RGPU_WARN("Pipeline list {} cannot be written; pipelines are not built ahead next time",
-                  path.string());
-        return;
-      }
-      if (fresh) {
-        ListHeader header{};
-        std::memcpy(header.magic, kListMagic, 4);
-        header.version = kListVersion;
-        header.key_size = sizeof(PipelineKey);
-        header.streams = kMaxVertexStreams;
-        std::fwrite(&header, sizeof(header), 1, out);
-      }
-    }
     const std::vector<char> record = EncodeRecord(key, layout);
     const u32 size = u32(record.size());
-    std::fwrite(&size, sizeof(size), 1, out);
-    std::fwrite(record.data(), 1, record.size(), out);
-    std::fflush(out);
-    unsynced = true;
-    if (std::chrono::steady_clock::now() - last_sync >= kListSync)
-      Sync();
+    {
+      std::lock_guard lock(pending_mutex);
+      const size_t at = pending.size();
+      pending.resize(at + sizeof(size) + record.size());
+      std::memcpy(pending.data() + at, &size, sizeof(size));
+      std::memcpy(pending.data() + at + sizeof(size), record.data(), record.size());
+    }
+    if (!writer_started) {
+      writer_started = true;
+      banjo::renut_gpu::StartLongLivedThread(PipelineListWriterMain, 128 * 1024);
+    }
+  }
+
+  // Every kListSync, what came since: written, flushed and synced (the file opened, with its header if new, first).
+  void WriterLoop() {
+    banjo::renut_gpu::OnBackgroundThreadStart("pipeline list writer");
+    std::vector<char> batch;
+    for (;;) {
+      std::this_thread::sleep_for(kListSync);
+      {
+        std::lock_guard lock(pending_mutex);
+        batch.swap(pending);
+      }
+      if (batch.empty())
+        continue;
+      if (!out) {
+        const std::filesystem::path path = banjo::renut_gpu::NextToExecutable(REXCVAR_GET(renut_pipeline_list));
+        std::error_code ec;
+        const bool fresh = !std::filesystem::exists(path, ec) || std::filesystem::file_size(path, ec) == 0;
+        out = std::fopen(path.string().c_str(), "ab");
+        if (!out) {
+          failed.store(true, std::memory_order_relaxed);
+          RGPU_WARN("Pipeline list {} cannot be written; pipelines are not built ahead next time",
+                    path.string());
+          return;
+        }
+        if (fresh) {
+          ListHeader header{};
+          std::memcpy(header.magic, kListMagic, 4);
+          header.version = kListVersion;
+          header.key_size = sizeof(PipelineKey);
+          header.streams = kMaxVertexStreams;
+          std::fwrite(&header, sizeof(header), 1, out);
+        }
+      }
+      std::fwrite(batch.data(), 1, batch.size(), out);
+      std::fflush(out);
+#if defined(_WIN32)
+      _commit(_fileno(out));
+#else
+      fsync(fileno(out));
+#endif
+      batch.clear();
+    }
   }
 };
 PipelineList g_list;
+void PipelineListWriterMain() { g_list.WriterLoop(); }
 
 }  // namespace
 
 // banjo-nx (2026-10-20): the list's last records synced to the card a second after they were written, if no record
-// came after them (the render thread, once a frame).
-void SyncPipelineListLocked() {
-  if (g_list.unsynced && std::chrono::steady_clock::now() - g_list.last_sync >= PipelineList::kListSync)
-    g_list.Sync();
-}
+// came after them (the render thread, once a frame). banjo-nx (2026-10-28, per-draw night): the writer thread's now.
+void SyncPipelineListLocked() {}
 
 namespace {
 
@@ -848,13 +901,16 @@ void PrebuildWorker() {
     PipelineInputs inputs;
     inputs.vertex_shader = PrebuildShader(static_cast<const ShaderCacheEntry *>(job.key.vertex_shader));
     inputs.pixel_shader = PrebuildShader(static_cast<const ShaderCacheEntry *>(job.key.pixel_shader));
-    inputs.layout = &job.layout;
+    inputs.layout = &job.layout->layout;
     const bool shaders = inputs.vertex_shader && (!job.key.pixel_shader || inputs.pixel_shader);
     lock.unlock();
     std::unique_ptr<plume::RenderPipeline> pipeline = shaders ? Build(job.key, inputs) : nullptr;
     lock.lock();
     job.pipeline = std::move(pipeline);
     job.stage = Job::Stage::Done;
+    job.done_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count();  // banjo-nx (2026-10-28)
     g_prebuild_epoch.fetch_add(1, std::memory_order_release);  // banjo-nx: g_spec_pending asks again
     if (--g_prebuild.building == 0 && g_prebuild.queue.empty())
       g_prebuild.shaders.clear();
@@ -907,8 +963,15 @@ SpecState SpecialisedPipeline(const PipelineKey &key, uint64_t hash, const HostV
   for (Job *j : jobs) {
     if (std::memcmp(&j->key, &key, sizeof(key)) != 0)
       continue;
-    if (j->stage != Job::Stage::Done)
+    if (j->stage != Job::Stage::Done) {
+      if (j->released) {  // banjo-nx (2026-10-28): given back unused before; built again (generic meanwhile)
+        j->released = false;
+        g_prebuild.queue.push_back(j);
+        StartWorkersLocked();
+        g_prebuild.work.notify_one();
+      }
       return SpecState::Pending;
+    }
     if (!j->pipeline)
       return SpecState::Failed;
     out = std::move(j->pipeline);
@@ -960,6 +1023,7 @@ plume::RenderPipeline *TakePrebuilt(const PipelineKey &key, uint64_t hash,
     return nullptr;
   if (job->stage == Job::Stage::Pending) {
     job->stage = Job::Stage::Done;  // the render thread's now
+    job->released = false;          // banjo-nx (2026-10-28): (a given-back one is built here too)
     claimed = true;
     return nullptr;
   }
@@ -1058,10 +1122,15 @@ uint64_t PipelineLookupsLocked() { return g_pipeline_lookups; }
 // lock orders the cache it reads once the epoch is seen.
 uint64_t PrebuildEpochLocked() { return g_prebuild_epoch.load(std::memory_order_relaxed); }
 
+// banjo-nx (2026-10-28, per-draw night): see render/pipeline.h.
+bool g_last_lookup_provisional = false;
+bool LastPipelineProvisionalLocked() { return g_last_lookup_provisional; }
+
 plume::RenderPipeline *GetPipelineLocked(const PipelineKey &key, const PipelineInputs &inputs) {
   ++g_pipeline_lookups;  // banjo-nx (from sa2-nx, banjo_renut_chain_reuse)
+  g_last_lookup_provisional = false;
   if (g_last_pipeline && KeyEqual(g_last_key, key))
-    return g_last_pipeline;
+    return g_last_pipeline;  // (a built one: g_last_* name built pipelines only)
   const bool memo_on = banjo::renut_gpu::PipelineMemoOn();
   const uint64_t key_hash = PipelineMemoHash(key);
   const uint32_t set = PipelineMemoSet(key_hash);
@@ -1076,6 +1145,7 @@ plume::RenderPipeline *GetPipelineLocked(const PipelineKey &key, const PipelineI
           (m.kind != 1 || m.epoch == g_prebuild_epoch.load(std::memory_order_acquire))) {
         if (m.kind)
           banjo::renut_gpu::CountBoolSpec(banjo::renut_gpu::BoolSpecEvent::kGeneric);
+        g_last_lookup_provisional = m.kind == 1;  // banjo-nx (2026-10-28)
         plume::RenderPipeline *hit = m.pipeline;
         if (w) {
           std::swap(ways[0], ways[1]);  // the most recent in way 0
@@ -1088,6 +1158,7 @@ plume::RenderPipeline *GetPipelineLocked(const PipelineKey &key, const PipelineI
   uint8_t kind = 0;
   uint64_t memo_epoch = 0;
   plume::RenderPipeline *result = GetPipelineSlow(key, inputs, kind, memo_epoch);
+  g_last_lookup_provisional = kind == 1;  // banjo-nx (2026-10-28)
   if (memo_on && result) {
     // The least recent (way 1) goes; the new one takes way 0. (GetPipelineSlow may have filled this set for a generic
     // key: both are kept.)
@@ -1235,8 +1306,50 @@ void PipelineShaderLoaded(const ShaderCacheEntry *entry) {
     g_prebuild.work.notify_all();
 }
 
+// banjo-nx (2026-10-28, the heap): see render/pipeline.h.
+std::atomic<uint64_t> g_prebuilt_released{0};
+void ReleaseIdlePrebuiltPipelines() {
+  static int64_t next_ms = 0;
+  const uint32_t limit_s = banjo::renut_gpu::PrebuildReleaseSeconds();
+  if (!limit_s)
+    return;
+  const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch())
+                          .count();
+  if (now < next_ms)
+    return;
+  next_ms = now + 20000;
+  // banjo-nx (2026-10-28, f7b): only when the heap is short: its room (what sbrk has not handed out yet, as
+  // QueryGpuMemory's budget) below 256 MB. Given back with room to spare, a scene visited again rebuilt hundreds of them
+  // at once. Off the Switch: never (no fixed heap).
+#if defined(__SWITCH__)
+  {
+    const char *top = static_cast<const char *>(sbrk(0));
+    const uint64_t room = (top && fake_heap_end > top) ? uint64_t(fake_heap_end - top) : 0;
+    if (room >= (uint64_t(256) << 20))
+      return;
+  }
+#else
+  return;
+#endif
+  std::vector<std::unique_ptr<plume::RenderPipeline>> gone;
+  {
+    std::lock_guard lock(g_prebuild.mutex);
+    for (const auto &job : g_prebuild.jobs) {
+      if (job->stage != Job::Stage::Done || !job->pipeline || now - job->done_ms < int64_t(limit_s) * 1000)
+        continue;
+      gone.push_back(std::move(job->pipeline));
+      job->stage = Job::Stage::Pending;
+      job->released = true;
+    }
+  }
+  g_prebuilt_released.fetch_add(gone.size(), std::memory_order_relaxed);
+  // (destroyed here, outside the prebuild lock: no draw ever bound them)
+}
+
 PipelineCounts PipelineCountsLocked() {
   PipelineCounts counts;
+  counts.released = size_t(g_prebuilt_released.load(std::memory_order_relaxed));  // banjo-nx (2026-10-28)
   for (const auto &[hash, bucket] : g_pipelines) {
     for (const CachedPipeline &cached : bucket)
       counts.built += cached.pipeline ? 1 : 0;

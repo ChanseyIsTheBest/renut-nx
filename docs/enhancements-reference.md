@@ -17,6 +17,37 @@ generated game code at build time have no run-time key and are on their own page
 `python tools/enhancement_keys.py --audit docs/enhancements-reference.md` checks this page against the sources (see
 "Audit" at the end).
 
+## Measured SLOWER ON THE CONSOLE (kept off)
+
+These are exact, but each made the frame slower on the console, so its key is off by default. Each keeps its A/B target
+(set the key on to measure it again). In the code each is marked `SLOWER ON THE CONSOLE` at its key and in its A/B name.
+Figures are on minus off in the city, render thread a frame unless said.
+
+| Key | A/B | Measured | Entry |
+|---|---|---|---|
+| `banjo_renut_replay_lookahead` | 29 | +2.15 ms (2026-10-27); confirmed: +2.79 ms (+3.1 / +2.2 / +3.1, night_gpu5 check) | "Render thread night and the shadow sort" |
+| `banjo_renut_shadow_sort` | 40 | +1.13 ms, GPU +0.65 ms (2026-10-27) | same section |
+| `banjo_renut_texture_slot_skip` | 53 | +0.64 ms (night_final); +0.69 ms and -0.53 fps (night_gpu5 check) | "Total CPU" |
+| `banjo_renut_inline_line_compare` | - | PushSharedConstants 2.7 -> 4.9 % of the render thread (36q); no effect since 2026-10-23 | - |
+
+Mixed between night_gpu4's two runs, to be measured again (not marked): 59 `banjo_renut_point_fast_state`, 46
+`banjo_renut_replay_stream`, 27 setters' tags apart.
+
+How sure these are (night_gpu5, 2026-10-28): A/B target 1 (`banjo_renut_precise_barriers`, Vulkan only, so nothing on
+the Switch) measured +1.8 and +1.3 ms of render thread in two 15 s pairs: that is the noise of one short pair. The
+check run (four-core, 30 s halves, three or four rounds each, target 1 as the control at +0.8 / +0.1 / -0.1 ms) gave:
+
+| A/B | Render thread (on minus off) | Verdict |
+|---|---|---|
+| 29 replay look-ahead | +2.79 ms (+3.1, +2.2, +3.1) | slower: stays off and marked |
+| 53 texture-slot skip | +0.69 ms (+1.4, +0.7, 0.0), -0.53 fps | slightly slower: stays off and marked |
+| 34 resident literals | -0.34 ms (-1.0, -0.2, +0.1) | NOT slower: mark removed, on again (`banjo_renut_literals_resident`) |
+| 57 record prefetch | -0.21 ms (-0.6, 0.0, 0.0) | no measurable effect: mark removed, stays off |
+| 65 host packets | +0.45 ms (+0.7, 0.0, +0.4, +0.7) | neutral (the 3-core run before had -0.54 in each round): OFF by default |
+
+Method for other ports: put a target that does nothing on your platform in every A/B list as the control, and use 30 s
+halves or more. 15 s pairs mark items slower (or faster) by chance.
+
 ## How a key takes effect
 
 - An enhancement is active when its own key **and** its group's master key are on (`EnhancementActive`).
@@ -1723,15 +1754,19 @@ the ones the A/B list switches have their target in brackets.
 - `banjo_deko3d_texture_skip` [39] (on): plume's bindTextures skipped for a draw whose pipeline, descriptor epoch,
   image set and shared-constant lines are those of its last whole run; the deko3d line counts "bound textures N read,
   M skipped".
-- `banjo_renut_shadow_sort` [40] (**off** since the 2026-10-27 console run: render thread +1.13 ms, GPU +0.65 ms): runs of
+- `banjo_renut_shadow_sort` [40] (**SLOWER ON THE CONSOLE, off** since the 2026-10-27 console run: render thread +1.13 ms, GPU +0.65 ms): runs of
   depth-only draws replayed sorted by shader contents, render state and texture slots; `banjo_renut_shadow_sort_verify`
   (Banjo/Debug) compares each sorted draw's whole device with its recorded op's. Set it on for A/B 40.
-- `banjo_renut_replay_lookahead` [29] (**off** since the 2026-10-27 console run: +2.15 ms): the replay prefetching the next
+- `banjo_renut_replay_lookahead` [29] (**SLOWER ON THE CONSOLE, off** since the 2026-10-27 console run: +2.15 ms): the replay prefetching the next
   op's shader lookups, guest headers and texture memo entries. Set it on for A/B 29.
 - Without a key of their own (A/B only): 28 render-state numbers by content, 30 base-vertex draws, 31 no texture or pixel
-  constant work for draws that sample nothing, 32 texture memo refresh, 34 resident literals, 35 texture epochs by page
+  constant work for draws that sample nothing, 32 texture memo refresh, 35 texture epochs by page
   and address, 36 kept fetch data, 37 kept stream sources, 38 index copies bound by pool chunk, 41 the fast path's shader
   checks by cache entry, not by shader object.
+- `banjo_renut_literals_resident` [34] (on; neutral on the console; a key of its own since h18): a shader whose literal
+  registers all still hold its values (their owner) takes them as held, not pushed again. The 2026-10-27 run had
+  -0.43 ms. night_gpu4's two 15 s samples said +2.4 / +1.7 ms, so h18 turned it off. night_gpu5's check (30 s halves,
+  a control target) said -0.34 ms (-1.0, -0.2, +0.1): the "slower" was noise, and it is on again.
 
 ### Four-core mode and mesh objects (2026-10-27 afternoon)
 
@@ -1833,6 +1868,258 @@ the CPU of all threads a frame, which each `[renut A/B]` half reports ("CPU ... 
   - The recording threads' extents: each slot's last words and extent are checked before the 12 KB memo (a chunk change
     marks two or three slots whose words did not change).
   - The texture export answer's compare without a `memcmp` call.
+- Per-draw night (2026-10-28, not keyed, exact):
+  - d5: the d4 crash fixed (an arena's doubling with the heap full): arenas grow by a quarter past 8 MB, a reused
+    buffer more than twice its last recording's size gives its memory back, spares capped at 32 MB, a retry after
+    freeing the spares; the two new prefetch helpers trimmed (objects already held, index objects two lines, cards only
+    for a copy not proven this interval).
+  - e1: the replay fetches a draw's shader records from its recorded shader words an op ahead (records sit at their
+    guest address), then their cache entries and bound declarations at the op; the stream cache's 60-frame sweep clears
+    the memos and geometry answers only when it erased entries.
+  - e2: the device declaration's record fetched an op ahead from a recorded word; the shared constants' line masks
+    without a loop and their accessor inline (the fast path's marks fold to constants); the per-shader GPU profile
+    times one frame in 8 (was 4).
+  - e5: a shader or declaration record destroyed (N&B makes and drops shader objects with its meshes every frame)
+    invalidates the fast path's state only when it holds that record (`InvalidateFastDrawForRecordLocked`; it cleared
+    it at every destruction, so the next draw took the full path), and the stream-source memos that name records.
+  - e6: the recording threads' resource lookups in two calls around the op's state copy (`PlanResources`: headers,
+    keys, memos, table-line prefetches before `CopyState` / `RecordExtents`; `FinishResources`: probes and the record
+    after), so the table misses overlap the copy; the marked chunks' shadow lines prefetched together before the
+    chunk compare (its shadow loads were 1.6 % of the recording threads in d4).
+  - e7 [54]: `DropReplacedRanges` (whole copies' replaced range copies) walks both geometry caches at most every 16
+    frames (`kWholeReplacePeriod`), not in every frame with a whole copy 4 frames old (0.8 ms a frame on the d4 render
+    thread). Memory only: the ranges it drops stay up to 16 frames longer. A/B 54 runs it every frame.
+  - e8: a constant group's two copies at a push or upload (the held model's raw bytes, the swapped lanes) from one
+    NEON load of its 64 bytes (`CopyAndSwapGroup`; the loops compiled to sixteen scalar load / REV / store triples and
+    a separate copy). A pipeline bind rebinds only the shader stages that changed (plume `setPipeline`; deko3d binds
+    each stage on its own, and a stage in the mask without a shader is disabled), the command list's first bind still
+    every stage with the whole graphics mask: fewer command words for the GPU's front end and the render thread when a
+    draw keeps its vertex shader (or, in the shadow passes, has no pixel shader).
+  - e9: a stage's texture handles bound from the first to the last that changed (`dkCmdBufBindTextures`' first id),
+    not all of the stage's handles, when its binding count is the one bound: the driver constant buffer ends with the
+    same words (each bind is a selector, a no-op and a header, then the handles).
+  - e10 [55-57]: (57's stage OFF since the night_final console A/B, +0.99 ms then; night_gpu5's check: -0.21 ms, no measurable effect; key
+    `banjo_renut_replay_record_prefetch`, false) in-run A/B targets that each drop one of the replay stream's
+    look-ahead prefetch stages (55 the next
+    op's state lines, 56 its resource objects, 57 its shader and declaration records), for the console to say which
+    pay on the A57 (the d4 profile's hottest Replay line was the state prefetch). Prefetches only.
+  - f1: the 16-bit integer vertex formats (16_16, 16_16_16_16, normalized or not, signed or not) expanded with NEON,
+    four components at a time (`Decode16x4`: the same conversions and IEEE divisions as `DecodeComponent`, the mode
+    chosen once a loop), checked once against `DecodeComponent` for every 16-bit value in every mode (`Neon16Exact`;
+    a difference keeps the scalar path). Two- and three-word elements swapped with a 64-bit NEON reverse.
+  - f2: the texture size entries a bind changes pushed as runs of consecutive entries (one push of 16 bytes an entry
+    before, 7 words of overhead each).
+  - f3 (`banjo_renut_point_fast_state` [59], on): a point-sprite draw (its constants in ring uploads) leaves the fast
+    path a state to start from; the draw after it was sent the full way ("no state": 7,900 per 10 s in the d4 city,
+    8,700 on the title screen). The fast draw already puts back what the ring draw changes (the pushed buffers'
+    bindings and shared words, its constant models compared whole, its texture slots and fetch data refilled).
+  - f4: the fast path's pipeline cache 4,096 entries (1,024 kept evicting a city frame's ~3,200 pipelines: 7.5 % of
+    the fast draws made their key again and looked it up in the main cache).
+  - f5 [60]: entries erased from the geometry caches void every geometry and mesh object's answer (`ClearWholeLast`)
+    only when a whole-buffer entry went (`CachedStream::whole`; whole index entries by their key): answers, mesh
+    objects and the last-copy pointers hold whole entries alone, a range entry is found by its key through the memos
+    (still cleared). In the d4 city every drop of replaced range copies voided every answer: 30-40 % of the draws while
+    driving missed them (192,000 per 10 s against 410,000 answered).
+  - f8 [61]: a draw whose recording changed the predication word stays on the fast path, the predication taken as one
+    of the viewport's inputs (the viewport is all that reads it). 4,092 draws per 10 s of the d4 city went the full way.
+  - f18 [63]: the fast path's pipeline cache keeps an answer across prebuild epochs unless it was provisional (a
+    specialised key's generic pipeline while its own is built). Every entry was voided whenever any prebuild job
+    finished: 20-30 % of the title screen's fast draws (scene changes queue jobs all the time) and 7.5 % of the d4
+    city's made their key and looked it up again. A built pipeline never leaves the main cache, and a failed
+    specialised key keeps its generic one: those answers hold.
+  - f15 [62]: a queued draw taken as a whole snapshot gets a chain number with every chunk and field marked changed (as
+    a replay's first draw), not none: the fast path takes it after the draw before it, working everything out again
+    from the snapshot (no replay constants: every constant group compared). "Chain break": 4,100-4,700 per 10 s on
+    the title screen (run f2), 3,300 in the d4 city.
+- The heap (the user's request, 2026-10-28; the d4 city: 2.7-2.9 GB in use of 3.08 GB, 260,000 free pieces):
+  - f6: the stream cache pool's chunks 32 MB (64): a chunk goes back only when every copy in it has gone (112 MB of
+    copies held 192 MB of chunks), and a smaller block finds room in a fragmented heap. Not smaller: a draw's fetch
+    buffers are kept together only in one chunk.
+  - f7 (`banjo_renut_prebuild_release_s`, 180): when the heap is short (its room, what sbrk has not handed out, below
+    256 MB; the d4 city ran at about 160 MB), pipelines the prebuild made from the list that no draw has taken for
+    that long go back to it (12,953 of 16,358 in the d4 city); their jobs stay, and a draw that asks later has it built
+    again (a specialised key queued for the workers again, the generic pipeline drawing meanwhile). The memory line
+    counts them ("given back unused"). Given back regardless of the room (the first form, emulator run f2), 6,588 went
+    after three minutes and the attract loop's next visit to a scene built 408 again at once (a hitch); the fast-draw
+    verify then saw generic and specialised variants swap within a draw (a race of the prebuild epoch: the same pixels).
+  - f9: the upload rings' chunks 16 MB (32): each ring's first chunk stays all session, and a city frame writes a few
+    MB with the constants pushed; a bigger frame adds a chunk, which the ring's trim gives back.
+  - f11: texture objects 32,768 (65,536; the d4 run made 1,648) and geometry objects 32,768 (16,384; the d4 city made
+    15,456 in twelve minutes, and a buffer past the last has no object: the slower lookups). Static tables come out of
+    the heap a loader gives the NRO; net about 4 MB less. Objects are still never given back: a limit for very long
+    sessions.
+  - f13: the mesh objects' 2 MB table made at its first use (the geometry objects, on by default, never use it).
+  - f16: the stream and fetch caches' idle pass drops copies no draw read for 150 frames also when the heap is short
+    (room below 256 MB, the rule of f7), not only when copies were refused at the cache's own cap; a dropped copy is
+    made again when needed.
+  - f17: the recorded command buffers' spares (up to 32 MB) go back to the heap while it is short (checked every 5 s
+    from the frame's hook); before, only once an arena's growth had failed.
+  - f14: the pipeline list's 16,358 jobs share their vertex layouts (one decoded block a distinct layout, by its
+    encoded fields): each job held its own (a 540-byte layout, its elements' vector and a deque of their names: about
+    1.5 KB and three or more allocations).
+  - g1 (`banjo_renut_heap_walk_every`, 10; Nuts&Bolts/Debug): the memory report's `mallinfo()` walked every free piece
+    of the heap (newlib's bins: 150,000-260,000 pieces over 3 GB, a cache and TLB miss each) on the render thread with
+    State().mutex and the malloc lock held. The d4 log puts 25 ms (150,000 pieces) to 46 ms (260,000) between the
+    lines before and after the walk, every 30 s (`renut_memory_report`'s default): a render-thread stall, and every
+    thread that allocated meanwhile waited too. Now every 10th report (5 minutes), its time in the line; the reports
+    between print what sbrk has handed out and what is left (O(1)). Diagnostics only. Emulator: 9-14 ms between the
+    report's two lines at every report before (run f2), under a millisecond between walks after (final run).
+- More render thread (2026-10-28, after the third profile):
+  - g5: the pipeline list's file is written by a thread of its own. The render thread wrote and flushed each new
+    pipeline's record (a call into the file system service a pipeline, hundreds in a row when a new area appends its
+    pipelines) and synced the card (an fsync: milliseconds) at most once a second while records came. Now it appends
+    the encoded record to a buffer under a small lock; the writer (a background thread's core and priority, started
+    with the first record) wakes every second and writes, flushes and syncs what came. Same records, same order, on
+    the card within about a second as before.
+  - g3 (`banjo_renut_shared_host_shaders`, on): the live shader objects of one shader share one host shader. N&B makes
+    a shader object per mesh, many alive at once with the same shader, and each made its own at its first draw on the
+    render thread (deko3d: the GLSL unpacked with zstd, copied into the shader and parsed), kept its own copy of the
+    GLSL text, and for each variant its pipelines used built the variant's text again (a copy of the whole GLSL with
+    the defines) and hashed it (FNV-1a, a byte at a time) to find the compiled variant in the device's table (the
+    host's own memo of variants is per host). The d4 city profile: zstd 0.35 ms, createShader 0.20 ms and memchr (the
+    parse's `find`) 0.40 ms a frame on the render thread. `banjo_renut_shader_reuse` gave a destroyed object's host to
+    the next object of its shader only. A host shader is made from the cache entry alone (the reuse's own rule), so a
+    shared one is what making it again gives. The record keeps a raw pointer (its lines unchanged); a registry owns
+    the hosts with a count of their records, and the last record's release hands the host to the reuse as before. The
+    log counts them ("host shaders: N made, M shared ...", at 256, 512, ...). Off: one host an object (the registry
+    keyed by the object).
+  - g4: `PagesClean` (the store cards' proof of a cached copy) takes eight pages at a time too, after the sixteen-page
+    blocks: a range's last 8-15 pages and ranges of 8-15 pages (most mesh buffers) went a page at a time. The same
+    test and exclusions as the sixteen-page block.
+- h1 (the console's out-of-memory crash, night_final package, 2026-10-28 05:43): in a new area the GPU's textures
+  reached 1.2 GB, the heap's room fell to 18-34 MB with 300 MB free in 174,000 pieces, and the process ended with no
+  crash log: deko3d takes a memory block's storage from the heap itself and aborts the process when it cannot. The
+  image heap (plume) took texture memory in 64 MB chunks and never gave a chunk back, so 1,600 evicted textures freed
+  space inside the chunks only. Now: plume tries the block's allocation first (memalign of the same size and
+  alignment, freed at once; deko3d then allocates and zeroes its own) and, when the heap has none, gives back the
+  image heap's empty chunks and the spare command buffers (a callback) and tries again; still none: a log line
+  ("memory block: ... NONE MADE") and no block (every caller has a failure path: a buffer or texture without memory)
+  instead of the abort. (The first form gave deko3d storage of its own: the emulator hung at start, since deko3d
+  zeroes only the blocks it allocates and the zero vertex buffer and command memory rely on it.) The image heap gives back a chunk once it is empty while the heap's
+  room is below 256 MB, and a new 64 MB chunk that does not fit is asked again at the image's own size.
+- h9 (the night_gpu2 console freeze, 2026-10-28 09:49): h1 turned the out-of-memory abort into a 95 s freeze at 0.1
+  fps. The heap had taken 3,076 of its 3,085 MB, with 577 MB free in 170,000 pieces and none of 32 MB; on docking the
+  stream cache's pool (127 of 128 MB) asked for a new 32 MB chunk for every new stream: 3,812 failures. Each one took
+  22 ms: the log line's `mallinfo` walked every free piece under malloc's lock (the audio threads waited in `free`),
+  then an SD card write. Now: the pool makes no new chunk for 600 frames after one fails (an 8 MB chunk is tried
+  first; a chunk released ends the wait; every caller already takes the uncached path); in `makeBlock` a request at
+  least as big as one that failed in the last 250 ms fails at once, and only the first 8 failures take the heap's
+  figures (then one line per 256, with the counts). Lesson for ports: never call `mallinfo` (or walk the heap) on a
+  path that can repeat, and give every pool that grows a back-off after a failure. The heap's fragmentation itself
+  (GPU blocks from the same newlib heap as every small allocation) is the cause left: h10.
+- h10 `banjo_deko3d_gpu_region` (on; same pixels): deko3d memory blocks of 64 KB and more come from a region of their
+  own at the heap's top (plume_deko3d.cpp, "The GPU region"; the ranges in plume_deko3d_region.h). The region grows
+  down by lowering `fake_heap_end` (devkitPro newlib's `_sbrk_r` reads it at every call: checked in the disassembly),
+  moved under `__malloc_lock` and never closer than 32 MB above newlib's break; blocks are taken from the top of the
+  highest free range that fits (64 KB grain, growth in 2 MB steps), so free space gathers at the bottom, and once 128
+  MB there is free all but 64 MB goes back to newlib. Storage handed to deko3d is zeroed and cache-flushed by plume
+  (deko3d zeroes only storage it allocates). A block the region cannot place takes the old path (newlib, with h1/h9's
+  guards). No size is fixed in advance: battd_nx's fixed GPU arena (bp_gpuarena.c, from cloverpit / pvz_fusion_nx,
+  MIT) had to be re-sized by hand from measured peaks; its other lessons are taken (no logging under the region's
+  lock, failures counted without I/O, a test of the allocator: its first version refused requests with a fitting
+  run free). tools/test_gpu_region.cpp drives the ranges against a mock heap whose break moves (40 seeds x 20,000
+  steps: merged, in bounds, no overlap, used + free = size, no refusal while a range fits or growth is allowed). The
+  memory report's "GPU region" line gives its size, blocks, free ranges, growths and give-backs.
+- Console A/B (night_final, renut_ab.toml, one 30 s half each, static city, GPU-bound at 40.6 ms): render thread with
+  the item on minus off: 54 -0.71 ms, 55 -0.62, 56 -0.43, 52 -0.23, 59 -0.20, 61 -0.20, 62 0, 60 +0.12 (a driving
+  item), 63 +0.13, 53 +0.64, 57 +0.99 (10 s windows vary by about 0.8 ms). 53 and 57 turned off (the user).
+- GPU block (2026-10-28, after the night_final console run: the GPU, 40-45 ms, now sets the city's frame rate):
+  - h4 `banjo_deko3d_depth_handover_readonly` [64] (on): a handed-over depth resolve is kept (not drawn) across a bind
+    of its target for draws that write neither depth nor stencil (`BindTargets(t, depth_writes)`; the fast path binds
+    a handed target again only for a draw that writes it). The target's `writes`, which the hand-over checks, moves
+    only for such writes, so the image is the one the resolve read. The night_final city drew all 438 handed resolves
+    a 10 s after all at such binds. Emulator title screen: none kept (its scene windows drew 264 of 264 after all for
+    another cause): the hand-over line now counts the causes (a depth-writing draw's bind, a draw sampling the texture
+    with its target bound, other).
+  - h5 `banjo_renut_anisotropy_cap` (0, off; NOT pixel-identical, the user's call): the most anisotropic filtering a
+    sampler gets. The heaviest shaders are texture-bound uber shaders (PS 9ED9E1A8 17.4 ms in the new area, the city's
+    water PS 3277104C 4.9 ms; 14-21 texture reads a pixel). The log counts the samplers made by the game's ratio.
+    renut_aniso4.toml sets 4.
+  - h7/h8 `banjo_renut_dynamic_resolution` (false in the source, true in renut.toml since night_gpu2: the user's
+    call, NOT pixel-identical), `banjo_renut_dynamic_handheld_low` / `_high` (540 / 720),
+    `banjo_renut_dynamic_docked_low` / `_high` (720 / 900), `banjo_renut_dynamic_gpu_ms` (34.5, a decimal key since
+    h11, the user's choice; 40 before),
+    `banjo_renut_dynamic_test_s` (0; alternate every N s, for tests): dynamic resolution, a range per mode. The 3D
+    image takes the low end while the GPU's time a frame (a moving average of the timestamps' busy time, about 16
+    frames) is above the budget, and returns to the high end when the high end's predicted time (the low time times
+    the pixel ratio, an overestimate) has been under 85 % of it for `banjo_renut_dynamic_up_s` in a row and that long
+    since the last change (h11: 1 s, the user's "be aggressive"; h9 tried 20 s after a loading screen's light frames
+    took the city to 720 for 12 s, each change making a set of targets: the h10 GPU region now keeps that memory
+    apart); down at least 5 s after a change; a change of mode starts at its
+    720 end (h9: docking at 900 made the biggest set of targets with the heap at its end). Each range has 720 at one end: that end draws at 1x (code 0, the game's own targets) and the other
+    end takes the mode's code (4 handheld, 6 docked), set once for the session. The shaders read both heights from
+    SharedConstants (`InternalHeightsWord`), so a change is the same switch of render targets the menus make (no
+    shader change). A range without 720 at one end is refused with a warning (the fixed height). night_gpu5 (h19,
+    the user's request): docked is 720 to 1080. An end of 1080 is code 2 (1.5x, the docked display's own size), as a
+    fixed 1080 always was: the HUD is drawn into the scene without the upscale. Back up to 1080 needs about 13 ms at
+    720 (34.5 x 0.85 / 2.25), so the busy city stays at 720 docked and lighter scenes go to 1080. The HUD stays at
+    the display's resolution.
+    Steps (night_gpu5, h19, the user's request; `banjo_renut_dynamic_steps`, 4): four heights between the ends,
+    evenly spaced and multiples of 36. Handheld: 540 576 612 648 684 720. Docked: 720 792 864 936 1008 1080. Down goes
+    to the highest step predicted to fit the budget (the average times the pixel ratio), the lowest if none. Up goes to
+    the highest step predicted under 85 % of it, once the next step has been under that for `banjo_renut_dynamic_up_s`.
+    Each is one change, with the same holds as before. The shaders know only two settable scale codes (4 and 6, whose
+    heights they read from SharedConstants), so steps other than 720 (code 0) and 1080 (code 2) take turns on those two
+    (surfaces.cpp `CodeForHeightLocked`). A height takes the code that holds it, or else the code not in use now: that
+    code's targets are retired first and built again at the new height at their next use. Its resolve destinations are
+    made again at their next resolve (textures.cpp, by their size). A resolve texture still at an old height and
+    sampled later would have to go two changes without a resolve into it. `banjo_renut_dynamic_test_s` walks the steps
+    one at a time. Deko3d only (the PC back ends keep the two ends). The thread profile behind it (night_final city, a frame of 47 ms): GPU 44.5
+    ms busy, render thread 31.7 ms of CPU, the game's main thread 27.9 ms, cores 0-2 about 82 % used: the GPU sets the
+    frame rate. With the city at 40-45 ms of GPU at 648 lines, handheld will sit at 540 there (with 34.5 ms, back to
+    720 needs the average under about 16.5 ms at 540 for 1 s; docked 720 to 900 under about 18.8 ms at 720).
+    renut_dynamic_off.toml: the fixed 648 / 864.
+    Console (night_gpu2, three cores, 2026-10-28): the city at 540: GPU 34-36 ms (42 at 648), render thread 39-43 ms,
+    21-23 fps: the render thread is the limit again. Two shaders cost the same at 540 as at 648 (PS 9ED9E1A8 17.2 /
+    17.4 ms in the new area, the water PS 3277104C 4.98 / 4.9 ms in the city): not pixel-bound (vertex work likely),
+    so resolution does not reach them.
+  - `banjo_renut_diag_push_lines` (Banjo/Debug): the pushed shared-constant lines by line and the float constant bytes
+    by stage. Emulator title: the texture and sampler index lines are 80 % of the shared pushes (real changes); the
+    whole constant stream is worth about 0.6 ms of the GPU front end a frame: not worth narrowing.
+  - Looked at and left: predicated tiling (already drawn once: D3D's per-tile replay is left out); barriers (72
+    fragment, 42 primitive, 19 full a city frame) match real read-after-write / write-after-read dependencies of about
+    25 resolves and a 20-pass post chain; the full ones are the copy engine's (26 buffer copies a frame: memexport seeds
+    and fetch data); colour resolves (the two full-scene ones are followed by more drawing into the target: a copy is
+    needed); shadow maps (the shadow sort cost +0.65 ms of GPU on 10-27: not shader changes; likely triangle setup);
+    the uber shaders (already through the exact passes; their per-pixel texel offsets from uniform sizes would need
+    the GPU's reciprocal reproduced on the CPU to stay exact); colour and depth targets are already compressed; the
+    post buffers already at the console's 8 bits (renut_post_process_precision = Game in renut.toml).
+- Parked (2026-10-28): the memexport seeds written by the CPU straight into the export buffer's fresh windows (every
+  plume deko3d buffer has a CPU address, uncached), which would drop each memexport draw's copy-engine copy and its
+  full barrier (about 19 full barriers a frame in the d4 city). The windows are also written by the GPU, and a line
+  of an earlier frame's export still in the GPU's L2 could shadow the CPU's write: the copy engine goes through the
+  GPU's memory system, a CPU write does not. Needs a hardware check of deko3d's L2 handling at submission first.
+- Also: f10, the shader record memo 4,096 sets a kind (1,024): N&B makes a shader object per mesh. f12 (GPU): a
+  command list drops only the GPU caches whose contents changed (descriptor caches when descriptors were written,
+  the shader instruction cache when code was loaded; every new texture emptied both).
+- `banjo_renut_replay_group_pointers` [52] (on), `banjo_renut_replay_group_pointers_verify` (Banjo/Debug): a replay
+  keeps a pointer to each float constant group's bytes where the op recorded them (the arena) and a draw reads its set
+  groups there (`FloatConstants::Register`); the ops no longer copy their groups into the device image (64 bytes a
+  group). A sorted run's groups go into the image and point there; a nested run gets the set groups written into the
+  image first. The verify copies them too and compares every read with the image.
+- `banjo_renut_texture_slot_skip` [53] (SLOWER ON THE CONSOLE, OFF since the night_final console A/B: render thread +0.64 ms a frame with it
+  on), `banjo_renut_texture_slot_skip_verify` (Banjo/Debug): when a draw changes
+  some texture slots, a slot whose texture object the object path answered last, with the same fetch words and the
+  same frame, binding generation and layout epoch, into the fast path's own effects array, keeps its words and effects
+  (only the depth counters count). The verify runs the object check for each kept slot and compares.
+- Diagnostics: the sampler's per-thread report lists the callers of samples in `memcpy`, `memmove` and `memset`
+  (`lrleaf image+0x... xN` lines), so the render thread's copies can be attributed. The fast-draw line splits the
+  pipeline cache's misses ("made") by what the slot held: empty, a conflict (another pipeline's answer: the table is
+  direct-mapped), provisional (this pipeline's from a past prebuild epoch) or invalidated (generation). The emulator's
+  title screen still made about 10 % after f18 (g1 verify run). In the PGO session's route (run pgo7) every miss was
+  a conflict, 2.3 % of the lookups (about 7,000 per 10 s): a two-way table would save about 0.06 ms a frame, not
+  worth a change to the fast path's hottest function. The same session: 782 host shaders made, 3,291 shared (g3).
+  ("Conflicts" counts every miss on an occupied slot, a key's first lookup included: the title screen's 10-23 % in
+  the final verify go with 1,800-2,000 new render states per 10 s, its flyover's scene changes.)
+- Final emulator verify (NRO 7c553231c275, profile from the final source, every verify key that leaves the new paths
+  on): no difference in any verify, no fast-draw pipeline warning, chain breaks 0, the heap walk 8.5 ms. With the
+  new-off keys (renut_new_off.toml) the same NRO boots and verifies clean: 1,022 host shaders made and 1,020 alive
+  with the sharing off (332 and 330 with it on).
+- Emulator verify of the g items (title screen, every verify key that leaves the new paths on, NRO 7e5bf155a682):
+  no difference in any verify; one fast-draw pipeline warning (the generic/specialised epoch race, as in run f2);
+  chain breaks 0 (f15; 2,000-4,800 per 10 s in run f2), "no state" about 200 per 10 s (f3); the heap walk 11.9 ms in
+  the emulator (66,000 pieces), the O(1) line between; host shaders 332 made and 690 shared with a live object of
+  the same shader (g3: two thirds of the makes gone, 330 alive instead of about 1,020); the list writer started.
 - `banjo_system_core_uam` (Banjo/Threads, on; the user's request 2026-10-28): with four cores granted, the uam shader
   compile thread alone runs on the system core (core 3) at the lowest application priority, so the audio threads there
   go first, its background compiles held to the share below by their rests. The pipeline prebuild workers stay on
@@ -1842,6 +2129,86 @@ the CPU of all threads a frame, which each `[renut A/B]` half reports ("CPU ... 
 - `banjo_deko3d_background_compile_share` now 10 (was 25) and the rest after a background compile up to 30 s (was 8 s,
   which held the share at 20 % or more for compiles of about 2 s). The c4 runs compiled run-time variants without end (50
   and 135 a run), a quarter of core 2. Same pixels: the generic variant draws until the specialised one is in.
+
+### Host draw packets (2026-10-28, the user's mandate; h12-h15)
+
+- `banjo_renut_host_packets` [65] (**OFF** by default, the user's call: NEUTRAL on the console. night_gpu5: render thread
+  -0.54 ms a frame in each of three city rounds, 3-core, 15 s halves; +0.45 ms in the four-core check with 30 s halves
+  and a control. The table, about 1.6 MB, takes much of the A57's 2 MB L2; exact): a replayed draw's derived state kept in a packet (render/draw.cpp `HostPacket`, 8,192 direct-mapped):
+  the shader records, host shaders and cache entries, the declaration and strides, the targets, the depth-only answer
+  and texture mask, the bools and alpha test, the viewport, the render-state words and their number. A later draw with
+  the same packet key takes them instead of deriving them again (no shader or declaration lookup, no record line read
+  for them: the records' lines are asked for at once instead). Checked besides the key: `g_packet_epoch` (raised when a
+  shader or declaration record or a host shader goes: a few times a 10 s in the city), the surfaces, the tiles and the
+  replay's predication. A packet is written only when the slot holds none current for the key.
+- The key (OpCall::state_key, guest/command_buffers.cpp): made by the recording threads as they record, the XOR of a
+  mixed 64-bit hash per 64-byte chunk the op copies, kept per device so an op hashes only its changed chunks. It covers
+  only the device WORDS the answers read (kPacketWords, from the field tables: shaders, declaration, targets, the
+  window/values/control and destination packets, bools, 0x29C0, predication; the executor's own dependency sets, which
+  its verify checks). Census (`banjo_renut_diag_packet_census`, emulator title): keying the whole device state found the
+  same state this frame or the last for 5.6 % of the draws; the field census showed why: the streams, index buffer and
+  vertex fetch constants (17-27 % recent without them, 57-62 % alone) and the texture words (76 %) change from frame to
+  frame, while each of the answers' fields alone is 99-100 % recent. With the narrow key: 64.9 %, packets found for
+  58-70 % of the draws, the key always the state's own (4.48 M draws), verify 0 differences.
+- Emulator A/B 65: no gain (the render thread 1-2 ms slower in the matched windows); the x86 JIT's caches hide the A57
+  misses packets remove, while their cost shows. The console A/B decides (renut_ab.toml). Lesson for ports: key a
+  derived-state cache by exactly the inputs of what it holds; whole-state keys miss on the parts that churn.
+- A/B targets 64 and 65 (2026-10-28): the A/B lists dropped every target from 64 on (AbTargets, Stats::by_target); the
+  limit is 128 now and a target past it is logged. night_gpu1-3's renut_ab.toml never measured 64.
+- `banjo_renut_lazy_resolve_mips` [66] (on; exact; from sa2-nx's sa2_renut_lazy_resolve_mips, credit sa2-nx): a scaled
+  colour resolve destination's host levels (HostTexture::extra_levels: docked, the 3D at 1.25x and the HUD at 1.5x)
+  were made after every resolve into it (UpdateResolveMipsLocked: a scratch draw a level, copies and barriers), sampled
+  or not. Now the resolves widen a pending region (mips_pending, mips_rect) and FlushResolveMipsLocked makes the levels
+  at the texture's first BindTextureLocked, or before an Upload or CopyDepthWords writes level 0 (Retire drops them).
+  Banjo's difference from sa2-nx: the draws that take a texture's words without BindTextureLocked hold by two kinds of
+  epoch (the lean executor's kept slots by g_texture_epoch; the texture objects, slots' last answers and memo by the
+  texture's binding buckets), so the first pending region bumps both (g_texture_epoch and BumpTextureBindings). The
+  "fast draws" 10 s line counts the levels left for their first read and those made at it. For Banjo on the console it
+  does nothing: host levels are made only at 2x or more (log2 of the scale), and Banjo's scales are 1.25x (docked 3D)
+  and 1.5x (docked HUD); the docked emulator runs made none before or after (h16: 0 verify differences). It is for
+  ports that render at 2x or more (a PC build at 4K).
+- `banjo_renut_clear_repeat` [67] (on; exact; from sa2-nx's sa2_renut_clear_repeat, credit sa2-nx; h17): a whole clear
+  of a target that holds exactly that clear already is not sent (render/draw.cpp ClearTargets). Held per HostSurface:
+  the last whole clear's values (memcmp, bit for bit; depth and stencil each known or not) and the generation and writes
+  it left. A clear repeats when the target is cleared whole again with the same values and both are unchanged. Everything
+  else about a skipped clear stays: its writes are counted, BindTargets (and so the depth hand-over) runs before the
+  check, and aliases are still cleared and lose what was known. Depth is skipped only when every plane being cleared is
+  known to hold that value. The one condition for porting: every path that writes a target's image must bump `writes`
+  or change `generation`. Banjo's writers: draws (the fast and full paths, by write mask, depth write or stencil
+  writes), clears, alias clears, SMAA's final blend and the UI upscale (colour and depth) all bump writes. A depth
+  hand-over swaps the image with its generation (SwapDepthImageLocked). A rebuild takes a new one. Every image's
+  generation comes from g_next_generation, so a swap can never bring back the one a clear recorded. There are no target
+  discards and nothing copies into a target's image. The "fast draws" 10 s line counts whole clears and those not sent.
+  sa2-nx clears its scene target whole twice a frame (27,001 skipped in a 1080p demo). Banjo, emulator title loop
+  (h17, A/B 67 at 5 s halves): 15-20 % of the whole clears repeat (about 2 a frame). All 20 captures drew correctly in
+  both halves, with 0 verify differences.
+
+### Render-thread round from the first line profile (2026-10-28 evening, h20)
+
+night_gpu5's console run was the first with line tables for Renut's files (BANJO_SWITCH_RENDERER_LINES now gives
+draw.cpp, textures.cpp, surfaces.cpp and command_buffers.cpp -g1). devkitA64's addr2line cannot read GCC's DWARF 5 line
+tables (every line ":?"); llvm-symbolizer from MSYS2 clang64 can. City, four-core: FastDrawLocked 25.5 % of the render
+thread, Replay 16, PushFloatConstants 8, FillTextures 7.5, WholeGeometryTry 4.5, memcpy 4.3; the hottest line 2 %.
+Exact items from it:
+- `banjo_deko3d_provisional_count` [68] (on): plume counts its provisional pipelines (made at creation, dropped by the
+  refresh that finds every variant or by the destructor). While the count is zero, a draw does not read its pipeline
+  object for Deko3DRefreshPipeline's check (0.9 % of the render thread, a line of the pipeline object at every draw,
+  bound or not).
+- LiteralRuns in one block (no key: a layout): the header, the runs and the values in one 64-byte aligned allocation.
+  Before, two vectors in their own allocations: the shader change's prefetch loaded the object and both vectors'
+  pointers before it could prefetch (0.49 %), and the push read three places.
+- The geometry objects' and fetch pool's stamps (`last_used`, `proven`) stored only when they change. Before, each
+  draw dirtied those lines, which were then written back to memory.
+- Host draw packets off by default (above): their key, lookup, store and prefetch lines were about 1.5 % of the
+  render thread, but they saved about as much, so the net was neutral.
+- Looked at and left:
+  - The shader record check in PrefetchShaderBehind (2 %) is the first touch of a record the draw reads anyway. Taking
+    it out moves the wait, and prefetching the record an op earlier (57) measured nothing.
+  - The fetch data memcpy is data the game rewrites each frame (bone palettes; the fetch cache already skips about
+    2 GB per 10 s of data that stays the same).
+  - The geometry proofs are already once per kick.
+- The diagnostics in renut.toml (the GPU profile by shader, the resolve trace) cost about 0.4 % of the render thread in
+  per-draw checks and counts. renut_play.toml turns them off.
 
 ## Other keys
 

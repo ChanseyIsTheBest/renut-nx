@@ -1,5 +1,7 @@
 # From GPU emulation to an API-level renderer: a conversion guide for ReXGlue ports (2026-10-16)
 
+> Status 2026-10-28: this guide is older than the current renderer. Start at `docs/porting-start-here.md` (the reading order, what is current, the method rules) and see `docs/porting-guide-renderer.md` section 6b for the items measured slower on the console. The MSAA notes here are history: MSAA is off (`disable_msaa`).
+
 For every port in this family that renders through the masseffect-derived native renderer (Banjo-Kazooie: Nuts &
 Bolts, SA2, Futari, SART, Peggle 2, Sonic Jump Fever, Mass Effect): what UnleashedRecomp and MarathonRecomp do
 instead, what our renderer still emulates, and the order in which a port can move to their model with the picture

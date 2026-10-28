@@ -54,6 +54,8 @@ void RecordResolve(u32 device_va, u32 flags, const ClearRect *source_rect, u32 d
 void RecordRun(u32 device_va, u32 command_buffer_va);
 // banjo-nx (2026-10-26, banjo_renut_diag_fast_census): replayed recordings against the frame before's; empty when none.
 std::string RepeatCensusReport();
+// banjo-nx (2026-10-28, banjo_renut_diag_packet_census): replayed draws a whole-state keyed cache would answer.
+std::string PacketCensusReport();
 std::string StateSourceReport();  // banjo-nx (2026-10-26, banjo_renut_diag_fast_census)
 
 // Copies the data of the device's recorded Begin*Vertices draw, if any. Any
@@ -66,6 +68,13 @@ void FlushRecordedVertices(u32 device_va);
 void QueueRunCommandBuffer(u32 device_va, u32 command_buffer_va);
 
 void ReleaseCommandBuffer(u32 command_buffer_va);
+
+// banjo-nx (2026-10-28, the heap): the spare buffers given back while the heap's room is below 256 MB (checked every
+// 5 s; the frame's hook calls it).
+void ReleaseSpareBuffersWhenHeapShort();
+// banjo-nx (2026-10-28, the console's OOM): the spare buffers given back now (plume's memory pressure callback: a GPU
+// memory block found no room in the heap). Any thread; takes only the spares' own lock.
+void ReleaseSpareBuffersNow();
 
 // For the memory report: the capacity of the recordings the game's command
 // buffers hold now, and of the spare recordings kept for reuse; 'live'

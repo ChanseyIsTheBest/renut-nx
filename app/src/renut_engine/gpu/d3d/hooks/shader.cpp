@@ -43,6 +43,12 @@ REXCVAR_DEFINE_INT32(banjo_renut_shader_reuse, 128, "Banjo/Enhancements",
                      "deko3d each new one unpacked and parsed its GLSL on the render thread: N&B destroys and makes "
                      "shader objects all the time while it streams the level). 0: none kept")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_shared_host_shaders, true, "Banjo/Enhancements",
+                    "Renut's renderer (2026-10-28, per-draw night): the live shader objects of one shader share one host "
+                    "shader (N&B makes a shader object per mesh, many alive at once with the same shader: each unpacked "
+                    "and parsed its GLSL on the render thread, kept its own copy of it and compiled its own variants). "
+                    "false: one host shader an object, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 namespace {
 
@@ -99,6 +105,45 @@ std::unique_ptr<plume::RenderShader> TakeKeptShader(const ShaderCacheEntry *entr
   return nullptr;
 }
 
+// banjo-nx (2026-10-28, per-draw night, banjo_renut_shared_host_shaders): the host shaders the live records use, with
+// the count of records using each, keyed by the cache entry (by the record itself with the switch off). A record's
+// 'host' points into it; its release (ReleaseHostShader) hands the last record's host to KeepShader. Its own lock (the
+// records are made and released on the render thread and on the game's threads, under State().mutex mostly).
+struct LiveHost {
+  std::unique_ptr<plume::RenderShader> shader;
+  u32 records = 0;
+};
+// Never destroyed (left at exit, after the device is gone), as g_kept_shaders.
+std::unordered_map<const void *, LiveHost> &g_live_hosts = *new std::unordered_map<const void *, LiveHost>();
+std::mutex g_live_hosts_mutex;
+uint64_t g_hosts_made = 0, g_hosts_shared = 0, g_hosts_kept = 0;
+
+bool SharedHostShadersOn() {
+  static const bool on = REXCVAR_GET(banjo_renut_shared_host_shaders);
+  return on;
+}
+const void *LiveHostKey(const ShaderRecord *record) {
+  return SharedHostShadersOn() ? static_cast<const void *>(record->entry) : static_cast<const void *>(record);
+}
+
+// The last record's host to KeepShader; the record's pointer cleared. Under the record's host_mutex.
+void ReleaseHostShader(ShaderRecord *record) {
+  if (!record || !record->host)
+    return;
+  InvalidateHostPacketsLocked();  // banjo-nx (2026-10-28, host packets): a packet may hold this host shader
+  std::unique_ptr<plume::RenderShader> last;
+  {
+    std::lock_guard lock(g_live_hosts_mutex);
+    auto it = g_live_hosts.find(LiveHostKey(record));
+    if (it != g_live_hosts.end() && it->second.shader.get() == record->host && --it->second.records == 0) {
+      last = std::move(it->second.shader);
+      g_live_hosts.erase(it);
+    }
+  }
+  record->host = nullptr;
+  KeepShader(record->entry, std::move(last));
+}
+
 // Where D3DDevice_CreateVertexShader / CreatePixelShader (0x8264E8B0 /
 // 0x8264E6A8) lay out a shader object: the container's virtual part copied
 // after the D3D header, and a pointer to its physical part (literal constants
@@ -131,7 +176,10 @@ struct ShaderMemo {
 // level (Showdown Town binds hundreds a frame) evicting each other every frame,
 // and each miss was a registry lookup and a map search.
 constexpr u32 kShaderMemoWays = 4;
-constexpr u32 kShaderMemoSetBits = 10;
+// banjo-nx (2026-10-28, per-draw night): 4,096 sets a kind (1,024): N&B makes a shader object per mesh (69-72 % of the
+// city's draws bind another address), more than the 4,096 entries a kind held; a miss is a registry lookup under its
+// lock. 512 KB of static memory, not the heap.
+constexpr u32 kShaderMemoSetBits = 12;
 struct alignas(64) ShaderMemoSet {
   ShaderMemo way[kShaderMemoWays];
 };
@@ -211,6 +259,28 @@ void PrefetchShaderRecordLocked(u32 shader_va, RecordKind kind) {
   }
 }
 
+void PrefetchShaderRecordAt(u32 shader_va) {
+  if (const char *r = GuestPtr<const char>(shader_va)) {
+    __builtin_prefetch(r);        // the cache entry, host shader, declaration pointers
+    __builtin_prefetch(r + 64);   // the draw summary
+    __builtin_prefetch(r + 128);  // (its used words, flags)
+  }
+}
+void PrefetchShaderBehind(u32 shader_va) {
+  const auto *r = GuestPtr<const ShaderRecord>(shader_va);
+  if (!r || r->self_va != shader_va)
+    return;  // not one of our records (a guest object's bytes)
+  if (const char *e = reinterpret_cast<const char *>(r->entry)) {
+    __builtin_prefetch(e);
+    __builtin_prefetch(e + 64);
+  }
+  if (const char *d = reinterpret_cast<const char *>(r->bound_declaration.get())) {
+    __builtin_prefetch(d);
+    __builtin_prefetch(d + 64);
+    __builtin_prefetch(d + 128);
+  }
+}
+
 ShaderRecord *FindShaderLocked(u32 shader_va, RecordKind kind) {
   if (!shader_va)
     return nullptr;
@@ -247,7 +317,7 @@ void ReleaseGuestShaderLocked(u32 shader_va) {
     return;
   if (ShaderRecord *record = it->second.get()) {  // banjo-nx (2026-10-23, batch 6): its host shader kept
     std::lock_guard shader_lock(record->host_mutex);
-    KeepShader(record->entry, std::move(record->host));
+    ReleaseHostShader(record);  // banjo-nx (2026-10-28)
   }
   g_guest_shaders.erase(it);
   ForgetShader(shader_va);
@@ -321,27 +391,46 @@ plume::RenderShader *GetHostShader(ShaderRecord *shader) {
     return nullptr;
   // Built already: draws call this under State().mutex, which destruction
   // (DestroyShaderRecord) takes too, and only this function sets 'host'.
-  if (plume::RenderShader *host = shader->host.get())
+  if (plume::RenderShader *host = shader->host)
     return host;
   std::lock_guard lock(shader->host_mutex);
   if (!shader->host) {
-    shader->host = TakeKeptShader(shader->entry);  // banjo-nx (2026-10-23, batch 6)
-    if (!shader->host)
-      shader->host = CreateCachedShader(Video::Device(), *shader->entry);
-    if (!shader->host) {
+    // banjo-nx (2026-10-28, per-draw night): a live record's host of the same entry first (banjo_renut_shared_host_shaders),
+    // then a destroyed one's (batch 6), then a new one.
+    std::lock_guard live_lock(g_live_hosts_mutex);
+    LiveHost &live = g_live_hosts[LiveHostKey(shader)];
+    uint64_t *count = &g_hosts_shared;
+    if (!live.shader) {
+      live.shader = TakeKeptShader(shader->entry);  // banjo-nx (2026-10-23, batch 6)
+      count = &g_hosts_kept;
+      if (!live.shader) {
+        live.shader = CreateCachedShader(Video::Device(), *shader->entry);
+        count = &g_hosts_made;
+      }
+    }
+    if (!live.shader) {
+      g_live_hosts.erase(LiveHostKey(shader));
       RGPU_ERROR("Creating shader {:016X} failed", shader->hash);
       shader->entry = nullptr;  // don't retry every draw
       return nullptr;
     }
+    ++live.records;
+    shader->host = live.shader.get();
+    ++*count;
+    const uint64_t n = g_hosts_made + g_hosts_shared + g_hosts_kept;
+    if (n >= 256 && (n & (n - 1)) == 0)
+      RGPU_INFO("[renut] host shaders: {} made, {} shared with a live object of the same shader "
+                "(banjo_renut_shared_host_shaders), {} from a destroyed one (banjo_renut_shader_reuse); {} live",
+                g_hosts_made, g_hosts_shared, g_hosts_kept, g_live_hosts.size());
   }
-  return shader->host.get();
+  return shader->host;
 }
 
 void DestroyVertexDeclarationRecord(VertexDeclarationRecord *declaration) {
   if (!declaration)
     return;
   std::lock_guard lock(State().mutex);
-  InvalidateFastDrawLocked();  // banjo-nx (2026-10-26): it may hold this record
+  InvalidateFastDrawForRecordLocked(declaration);  // banjo-nx (2026-10-28): it may hold this record
   ForgetVertexDeclarationLocked(declaration->self_va);
   DestroyRecord(declaration);
 }
@@ -353,11 +442,10 @@ void DestroyShaderRecord(ShaderRecord *shader) {
   {
     auto &s = State();
     std::lock_guard lock(s.mutex);
-    InvalidateFastDrawLocked();  // banjo-nx (2026-10-26): it may hold this record
+    InvalidateFastDrawForRecordLocked(shader);  // banjo-nx (2026-10-28): it may hold this record
     ForgetShader(shader->self_va);
     std::lock_guard shader_lock(shader->host_mutex);
-    KeepShader(shader->entry, std::move(shader->host));  // banjo-nx (2026-10-23, batch 6)
-    shader->host.reset();
+    ReleaseHostShader(shader);  // banjo-nx (2026-10-23, batch 6; 2026-10-28: the registry's)
   }
   DestroyRecord(shader);
 }
@@ -437,7 +525,7 @@ void RegisterGuestShader(u32 shader_va, u32 physical_va, bool pixel) {
     ForgetShader(shader_va);
     if (shader) {  // banjo-nx (2026-10-23, batch 6): the old one's host shader kept
       std::lock_guard shader_lock(shader->host_mutex);
-      KeepShader(shader->entry, std::move(shader->host));
+      ReleaseHostShader(shader.get());  // banjo-nx (2026-10-28)
     }
     shader = std::make_unique<ShaderRecord>();
     shader->kind = kind;
@@ -561,7 +649,7 @@ void D3DVertexShader_Bind_hook(u32 shader_va, u32 /*flags*/, u32 declaration_va,
       return;
     // banjo-nx (2026-10-27, render thread night): the fast path and its stream memo may hold the declaration this
     // replaces (freed here) and read these strides: dropped (a bind after the first draws; N&B binds at creation).
-    InvalidateFastDrawLocked();
+    InvalidateFastDrawForRecordLocked(shader);  // banjo-nx (2026-10-28): its declaration goes (held via the shader)
     shader->bound_declaration = std::make_unique<VertexDeclarationRecord>(*bound);
     for (const auto &[stream, stride] : strides)
       shader->bound_strides[stream] = stride;

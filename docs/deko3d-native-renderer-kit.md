@@ -1,5 +1,7 @@
 # A native deko3d renderer for the other ReXGlue Switch ports: the kit and the route (2026-10-19)
 
+> Status 2026-10-28: this guide is older than the current renderer. Start at `docs/porting-start-here.md` (the reading order, what is current, the method rules) and see `docs/porting-guide-renderer.md` section 6b for the items measured slower on the console. Superseded here: "MSAA off and no resolution changes" (Banjo now has internal resolution, then dynamic resolution with steps).
+
 For Futari (futari-nx), SA2 (sa2-nx), Peggle 2 (peggle2-nx) and Sonic & All-Stars Racing Transformed: how banjo-nx got
 from a PM4-emulating renderer on NVK to an API-level renderer on deko3d (no ring, no register file rebuilt from
 packets, no NVK), which of its parts you can take as they are, the order of work that kept the picture checkable at

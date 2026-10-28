@@ -8,6 +8,7 @@
 #include "renut_engine/gpu/d3d/d3d_native.h"  // banjo-nx (2026-10-26): g_touch_compare
 #include "renut_engine/gpu/backend/queued.h"
 #include "renut_engine/gpu/render/draw.h"
+#include "renut_engine/gpu/render/graphics_options.h"  // banjo-nx (2026-10-28): dynamic resolution's ranges
 #include "renut_engine/gpu/guest/command_buffers.h"  // banjo-nx (2026-10-26): TagsReport
 #include "renut_engine/gpu/banjo_renut_record.h"
 #if defined(PLUME_DEKO3D)
@@ -339,6 +340,13 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_depth_handover, true, "Banjo/Enhancements",
                     "target is bound again (then the resolve is drawn after all), and at the target's next whole clear "
                     "the texture takes that image and the target another. The shadow maps, resolved and cleared once a "
                     "frame, are never copied. The float a resolve writes is the depth it loads: same pixels");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_depth_handover_readonly, true, "Banjo/Enhancements",
+                    "deko3d renderer (2026-10-28, GPU block): a handed-over depth resolve (banjo_deko3d_depth_handover) "
+                    "is not drawn when its target is bound again for draws that write neither depth nor stencil (the "
+                    "image stays as the resolve read it); only before a draw that writes them, a draw that samples it "
+                    "with the target bound, or the target's next whole clear (the texture takes the image). The "
+                    "night_final city drew all 438 handed resolves a 10 s after all at such binds. Same pixels. "
+                    "In-run A/B target 64");
 REXCVAR_DEFINE_BOOL(banjo_deko3d_depth24, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-19, GPU): a D24S8 depth target (the shadow maps, small render-to-texture "
                     "targets) as 24-bit unorm depth with stencil, the Xenos's own format, instead of 32-bit float: half "
@@ -407,6 +415,14 @@ REXCVAR_DEFINE_INT32(banjo_deko3d_compile_priority, 0x3E, "Banjo/Enhancements",
                      "waiting for a compile lends its priority. 0: as created (any core). 2026-10-23: an application's "
                      "lowest is 0x3B, so 0x3E was refused (the thread ran at 0x3B); the lowest allowed is taken and the "
                      "log says which (banjo_deko3d_background_compile_share keeps it off the game's CPU)");
+REXCVAR_DEFINE_INT32(banjo_renut_prebuild_release_s, 180, "Banjo/Enhancements",
+                     "Renut's renderer (2026-10-28, the heap): pipelines the prebuild made from the list that no draw "
+                     "has taken for this many seconds go back to the heap (the list holds every level's pipelines: "
+                     "12,953 of 16,358 unused in the d4 city, the heap at 2.9 of 3.08 GB). Their jobs stay: a draw "
+                     "that asks later has it built again (a specialised one draws with the generic pipeline "
+                     "meanwhile: the same pixels). 0: they stay built")
+    .range(0, 100000)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(banjo_deko3d_background_compile_share, 10, "Banjo/Enhancements",
                      "deko3d renderer (2026-10-23): the share of its core (percent, 1-100) the background shader "
                      "compiles may use. The uam thread cannot run below the game's threads (0x3B is an application's "
@@ -442,6 +458,11 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_texture_skip, true, "Banjo/Enhancements",
                     "texture words (the shared constant lines its bindings read) are those of plume's last bindTextures "
                     "run binds nothing and reads no handle (each colour draw read every binding's words before). Same "
                     "bindings. Read at start");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_provisional_count, true, "Banjo/Enhancements",
+                    "deko3d renderer (2026-10-28, render-thread round, A/B 68): plume counts its provisional pipelines "
+                    "(those still waiting for a background shader variant); while there are none, a draw does not read "
+                    "its pipeline object to ask (0.9 % of the render thread in night_gpu5's profile). The same answer. "
+                    "Read at start");
 REXCVAR_DEFINE_BOOL(banjo_deko3d_vtx_dedupe, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-26, Unleashed-style step 2): a vertex buffer slot bound again with the "
                     "range it holds in the command list is not sent again (every draw bound each of its streams and the "
@@ -454,6 +475,11 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_barrier_lean, true, "Banjo/Enhancements",
 REXCVAR_DEFINE_BOOL(banjo_deko3d_zcull, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-18): hierarchical depth culling (Zcull) on the queue: tiles a draw cannot "
                     "pass the depth test in are skipped before shading. Same pixels");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_gpu_region, true, "Banjo/Enhancements",
+                    "deko3d renderer (2026-10-28, h10, after the night_gpu2 console freeze): GPU memory blocks of 64 KB "
+                    "and more from a region of their own at the heap's top, growing down as needed, not from the heap "
+                    "among every small allocation (where freed blocks were cut up: 577 MB free and no 32 MB piece). "
+                    "Same pixels");
 REXCVAR_DEFINE_BOOL(banjo_renut_cache_save_quiet, true, "Banjo/Enhancements",
                     "Renut's renderer (package 28; as Unleashed saves its pipeline cache at loading screens): the "
                     "pipeline cache is saved once no pipeline was built for 15 s (and at most once a minute; after "
@@ -540,7 +566,7 @@ REXCVAR_DEFINE_INT32(banjo_renut_ab_target, 0, "Banjo",
                      "banjo_renut_smaa (2026-10-21; was banjo_late_input_gpu until 36s). The part is "
                      "switched off and on every banjo_renut_ab_s seconds; the \"[renut A/B]\" line every 10 s gives "
                      "both halves' frame rate, render thread and GPU time")
-    .range(0, 63);  // banjo-nx (2026-10-27): was 19, which refused every target from 20 on
+    .range(0, 127);  // banjo-nx (2026-10-27): was 19, which refused every target from 20 on; 2026-10-28: 127 (64, 65)
 REXCVAR_DEFINE_INT32(banjo_renut_ab_s, 4, "Banjo", "Renut's renderer: the half-period of banjo_renut_ab_target, in seconds")
     .range(1, 60);
 REXCVAR_DEFINE_STRING(banjo_renut_ab_targets, "", "Banjo",
@@ -672,7 +698,8 @@ std::atomic<uint64_t> g_ui_upscales[2]{};    // internal resolution (2026-10-21)
 std::atomic<uint64_t> g_ui_depth[2]{};       // internal resolution: UI depth targets filled, draws kept a smaller one
 std::atomic<uint64_t> g_resolves_skipped[2];  // banjo_renut_resolve_skip (2026-10-19): colour, depth
 std::atomic<uint64_t> g_words_lazy[3];  // banjo_renut_depth_words_lazy: not written, written late, read stale
-std::atomic<uint64_t> g_handover[6];    // banjo_deko3d_depth_handover (CountHandOver)
+std::atomic<uint64_t> g_handover[10];   // banjo_deko3d_depth_handover (CountHandOver); [6] h4's binds that kept it,
+                                        // [7-9] drawn after all by: a depth-writing draw's bind, a sample while bound, other
 std::atomic<uint64_t> g_fetch_misaligned[2];  // 2026-10-20: draws checked, draws off 16 bytes (CountFetchAlignment)
 std::atomic<uint64_t> g_device_swizzle[2];  // 2026-10-20: binds through the device's swizzle, frames with one
 std::atomic<uint32_t> g_device_swizzle_frame{0};
@@ -774,7 +801,9 @@ struct Stats {
   int half = 1;            // the half now running (the render thread applies it)
   int applied = -1;        // the half the render thread applied last (2026-10-20: target * 2 + half)
   // banjo-nx (2026-10-20, banjo_renut_ab_targets): the list's halves by target, and the place in it.
-  Half by_target[64][2];  // banjo-nx (2026-10-27): 64 (targets 32-40 exist; AbTargets dropped them at 32)
+  // banjo-nx (2026-10-27): 64 (targets 32-40 exist; AbTargets dropped them at 32). 2026-10-28: 128 (target 64, A/B of the
+  // night_gpu packages' renut_ab.toml, was dropped silently at 64: the same trap again; 65 the host packets).
+  Half by_target[128][2];
   uint32_t cycle = 0;
   std::chrono::steady_clock::time_point half_start{};
   uint64_t cpu_mark = 0;  // banjo-nx (2026-10-28): TotalThreadTicks at the half's start
@@ -820,18 +849,18 @@ const char *AbName(int target) {
   case 26: return "banjo_renut_touch_compare (setters mark only changed values)";  // banjo-nx (2026-10-26, setter rewrite)
   case 27: return "banjo_renut_tags_apart (setters' tags out of the recording devices)";  // banjo-nx (2026-10-26)
   case 28: return "render-state numbers by content (the fast path's pipeline cache)";  // banjo-nx (2026-10-27)
-  case 29: return "the replay's look-ahead prefetches (banjo_renut_replay_lookahead, off by default: set it on to measure)";  // banjo-nx (2026-10-27)
+  case 29: return "the replay's look-ahead prefetches (banjo_renut_replay_lookahead; SLOWER ON THE CONSOLE, off by default: set it on to measure)";  // banjo-nx (2026-10-27)
   case 30: return "base-vertex draws for vertex shaders without gl_VertexID";  // banjo-nx (2026-10-27)
   case 31: return "draws sampling nothing / without a pixel shader skip the texture refill and pixel constants";
   case 32: return "texture memo entries of an earlier frame refreshed by the frame's check only";  // banjo-nx (2026-10-27)
   case 33: return "banjo_renut_merge_draws (a draw takes the unchanged draws of the next indices)";  // banjo-nx (2026-10-27)
-  case 34: return "literal registers still holding a shader's values not pushed again";  // banjo-nx (2026-10-27)
+  case 34: return "literal registers still holding a shader's values not pushed again (banjo_renut_literals_resident; neutral on the console, on)";  // banjo-nx (2026-10-27)
   case 35: return "texture memo validity by page and address epochs, not the global one";  // banjo-nx (2026-10-27)
   case 36: return "fetch data of the draw before kept (same shader, fetch constants, chunk and kick)";  // banjo-nx (2026-10-27)
   case 37: return "stream sources of the draw before kept (no guest buffer header read)";  // banjo-nx (2026-10-27)
   case 38: return "whole index copies bound by their pool chunk (the copy's place as the first index)";  // banjo-nx (2026-10-27)
   case 39: return "bound textures not read again for a draw whose pipeline, descriptors and texture words are the last run's";  // banjo-nx (2026-10-27)
-  case 40: return "depth-only runs replayed sorted by shader (banjo_renut_shadow_sort, off by default: set it on to measure)";  // banjo-nx (2026-10-27)
+  case 40: return "depth-only runs replayed sorted by shader (banjo_renut_shadow_sort; SLOWER ON THE CONSOLE, off by default: set it on to measure)";  // banjo-nx (2026-10-27)
   case 41: return "the fast path's pipeline kept across shader objects of the same contents";  // banjo-nx (2026-10-27)
   case 42: return "mesh objects (banjo_renut_mesh_objects)";  // banjo-nx (2026-10-27, #8)
   case 43: return "texture export checks from record-time extents (banjo_renut_record_extents)";  // banjo-nx (2026-10-27)
@@ -843,6 +872,22 @@ const char *AbName(int target) {
   case 49: return "the replay stream's shader stages (banjo_renut_replay_stream_shaders)";  // banjo-nx (2026-10-27)
   case 50: return "the recording's batched object lookups and device memos (banjo_renut_record_lookups)";  // 2026-10-28
   case 51: return "a buffer's first op keeps only the constant groups set so far (banjo_renut_first_op_groups)";  // 2026-10-28
+  case 52: return "a replay's constant groups read where the ops recorded them (banjo_renut_replay_group_pointers)";  // 2026-10-28
+  case 53: return "texture slots kept when their object's answer holds (banjo_renut_texture_slot_skip; SLOWER ON THE CONSOLE, off by default: set it on to measure)";  // 2026-10-28
+  case 54: return "replaced range copies dropped every 16 frames, not every frame (kWholeReplacePeriod)";  // 2026-10-28
+  case 55: return "the replay's prefetch of the next op's state lines (off half: none)";  // 2026-10-28
+  case 56: return "the replay's prefetch of the next op's resource objects (off half: none)";  // 2026-10-28
+  case 57: return "the replay's prefetch of the next op's shader and declaration records (banjo_renut_replay_record_prefetch; no measurable effect, off by default: set it on to measure)";  // 2026-10-28
+  case 59: return "a point-sprite draw leaves the fast path a state (banjo_renut_point_fast_state)";  // 2026-10-28
+  case 60: return "erased range copies leave the geometry answers (off half: every erase voids them)";  // 2026-10-28
+  case 61: return "a predication change kept on the fast path as a viewport input";  // 2026-10-28
+  case 62: return "a queued whole-snapshot draw gets a chain number (the fast path may take it)";  // 2026-10-28
+  case 63: return "the fast pipeline cache keeps final answers across prebuild epochs";  // 2026-10-28
+  case 64: return "a handed-over depth resolve kept across binds for draws that write no depth (banjo_deko3d_depth_handover_readonly)";  // 2026-10-28
+  case 65: return "host draw packets (banjo_renut_host_packets: made and taken)";  // 2026-10-28
+  case 66: return "resolve host levels made at their first read (banjo_renut_lazy_resolve_mips, from sa2-nx)";  // 2026-10-28
+  case 67: return "whole clears of a target holding that clear already not sent (banjo_renut_clear_repeat, from sa2-nx)";
+  case 68: return "no pipeline read for the provisional check while none is provisional (banjo_deko3d_provisional_count)";
   default: return "none";
   }
 }
@@ -867,8 +912,10 @@ const std::vector<int> &AbTargets() {
         n = n * 10 + (c - '0');
         digit = true;
       } else {
-        if (digit && n > 0 && n < 64)  // banjo-nx (2026-10-27): was 32, which dropped targets 32-40 silently
+        if (digit && n > 0 && n < 128)  // banjo-nx (2026-10-27): was 32, which dropped targets 32-40 silently; 128 now
           v.push_back(n);
+        else if (digit && n >= 128)
+          REXLOG_WARN("[renut] banjo_renut_ab_targets: target {} is past the last one (127): left out", n);
         n = 0;
         digit = false;
       }
@@ -895,6 +942,8 @@ void AbApply(int target, bool on) {
 #if defined(PLUME_DEKO3D)
   if (target == 39)  // banjo-nx (2026-10-27): plume's flag
     plume::Deko3DSetTextureSkip(on && REXCVAR_GET(banjo_deko3d_texture_skip));
+  if (target == 68)  // banjo-nx (2026-10-28): plume's flag
+    plume::Deko3DSetProvisionalCount(on && REXCVAR_GET(banjo_deko3d_provisional_count));
 #endif
   if (target == 1) {
     plume::SetVulkanPreciseBarriers(on && g_precise_barriers_on);
@@ -1019,6 +1068,8 @@ void StatsGameFrame() {
     REXLOG_INFO("[renut] {}", ss);
   if (const std::string rc = ::renut::gpu::RepeatCensusReport(); !rc.empty())  // banjo-nx (2026-10-26)
     REXLOG_INFO("[renut] {}", rc);
+  if (const std::string pc = ::renut::gpu::PacketCensusReport(); !pc.empty())  // banjo-nx (2026-10-28)
+    REXLOG_INFO("[renut] {}", pc);
   if (const std::string fc = ::renut::gpu::FastCensusReport(); !fc.empty())  // banjo-nx (2026-10-26)
     REXLOG_INFO("[renut] {}", fc);
   if (const std::string uc = ::renut::gpu::UnleashedCensusReport(); !uc.empty())  // banjo-nx (2026-10-26)
@@ -1125,11 +1176,19 @@ void StatsGameFrame() {
     const uint64_t full = g_ui_upscales[1].exchange(0, std::memory_order_relaxed);
     const uint64_t depth = g_ui_depth[0].exchange(0, std::memory_order_relaxed);
     const uint64_t kept = g_ui_depth[1].exchange(0, std::memory_order_relaxed);
+    // banjo-nx (2026-10-28): with dynamic resolution on, its ranges (the fixed-height keys are not used then).
+    const std::string heights =
+        ::renut::gpu::DynamicResolutionOn()
+            ? fmt::format("dynamic: handheld {}-{}, docked {}-{}, {} steps between", ::renut::gpu::DynamicHeight(false, false),
+                          ::renut::gpu::DynamicHeight(false, true), ::renut::gpu::DynamicHeight(true, false),
+                          ::renut::gpu::DynamicHeight(true, true), ::renut::gpu::DynamicSteps())
+            : fmt::format("banjo_renut_render_height_handheld {}, _docked {}", RenderHeightHandheld(),
+                          RenderHeightDocked());
     if (scaled || RenderHeightHandheld() != 720 || RenderHeightDocked() != 720)
-      REXLOG_INFO("[renut] internal resolution (banjo_renut_render_height_handheld {}, _docked {}, display docked {}, "
+      REXLOG_INFO("[renut] internal resolution ({}, display docked {}, "
                   "{} upscale, not exact): {} composites scaled up for the HUD, {} drawn at the display's resolution, "
                   "{} depth targets scaled up for 3D drawn after the composite, {} draws testing a smaller depth "
-                  "target", RenderHeightHandheld(), RenderHeightDocked(), DisplayHeightDocked(),
+                  "target", heights, DisplayHeightDocked(),
                   UpscaleFilter() ? "bicubic" : "bilinear", scaled, full, depth, kept);
   }
   if (PushConstantsOn()) {
@@ -1222,10 +1281,15 @@ void StatsGameFrame() {
   }
   if (DepthHandOverOn()) {
     REXLOG_INFO("[renut] depth hand-over (banjo_deko3d_depth_handover): {} resolves not drawn, {} binds of a target's "
-                "image, {} images taken at a whole clear; {} drawn after all ({} from a taken image); {} lost",
+                "image, {} images taken at a whole clear; {} drawn after all ({} from a taken image); {} lost; {} binds "
+                "for draws writing no depth or stencil that kept it (banjo_deko3d_depth_handover_readonly); drawn "
+                "after all for: a draw writing depth or stencil {}, a draw sampling it with its target bound {}, "
+                "other {}",
                 g_handover[0].exchange(0, std::memory_order_relaxed), g_handover[1].exchange(0, std::memory_order_relaxed),
                 g_handover[2].exchange(0, std::memory_order_relaxed), g_handover[3].exchange(0, std::memory_order_relaxed),
-                g_handover[4].exchange(0, std::memory_order_relaxed), g_handover[5].exchange(0, std::memory_order_relaxed));
+                g_handover[4].exchange(0, std::memory_order_relaxed), g_handover[5].exchange(0, std::memory_order_relaxed),
+                g_handover[6].exchange(0, std::memory_order_relaxed), g_handover[7].exchange(0, std::memory_order_relaxed),
+                g_handover[8].exchange(0, std::memory_order_relaxed), g_handover[9].exchange(0, std::memory_order_relaxed));
   }
   // The generated code's self-checks (their "[verify]" line and any DIFFERENCE): banjo-nx's renderer reports them
   // in its own 10 s report; with Renut's renderer nobody did (package 27).
@@ -1286,10 +1350,12 @@ bool RecordWorkerAbOn() {
 
 bool Deko3DDepthCompressionOn() { return REXCVAR_GET(banjo_deko3d_depth_compression); }
 bool Deko3DZcullOn() { return REXCVAR_GET(banjo_deko3d_zcull); }
+bool Deko3DGpuRegionOn() { return REXCVAR_GET(banjo_deko3d_gpu_region); }
 bool Deko3DBarrierMergeOn() { return REXCVAR_GET(banjo_deko3d_barrier_merge); }
 bool Deko3DBarrierLeanOn() { return REXCVAR_GET(banjo_deko3d_barrier_lean); }
 bool Deko3DVtxDedupeOn() { return REXCVAR_GET(banjo_deko3d_vtx_dedupe); }
 bool Deko3DTextureSkipOn() { return REXCVAR_GET(banjo_deko3d_texture_skip); }  // banjo-nx (2026-10-27)
+bool Deko3DProvisionalCountOn() { return REXCVAR_GET(banjo_deko3d_provisional_count); }  // banjo-nx (2026-10-28)
 bool Deko3DAsyncVariantsOn() { return REXCVAR_GET(banjo_deko3d_async_variants); }
 bool Deko3DVsOutputsOn() { return REXCVAR_GET(banjo_deko3d_vs_outputs); }
 bool Deko3DUamPrmtOn() { return REXCVAR_GET(banjo_deko3d_uam_prmt); }
@@ -1440,6 +1506,11 @@ void CountDeviceSwizzle(uint32_t frame) {
   Bump(g_device_swizzle[0], 1);
   if (g_device_swizzle_frame.exchange(frame, std::memory_order_relaxed) != frame)
     Bump(g_device_swizzle[1], 1);
+}
+
+bool DepthHandOverReadOnlyOn() {
+  static const bool on = REXCVAR_GET(banjo_deko3d_depth_handover_readonly);
+  return on && g_ab_off.load(std::memory_order_relaxed) != 64;
 }
 
 void CountHandOver(int what) {
@@ -1806,6 +1877,11 @@ void OnBackgroundThreadStart(const char *what) {
 
 void OnPrebuildWorkerStart() {
   OnBackgroundThreadStart("pipeline prebuild worker");
+}
+
+uint32_t PrebuildReleaseSeconds() {
+  static const uint32_t s = uint32_t(std::max(0, int(REXCVAR_GET(banjo_renut_prebuild_release_s))));
+  return s;
 }
 
 uint32_t PrebuildWorkers(uint32_t renut_count) {

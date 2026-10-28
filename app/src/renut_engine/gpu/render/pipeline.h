@@ -135,7 +135,14 @@ struct PipelineCounts {
   size_t prebuilt_unused = 0;
   size_t waiting = 0;
   size_t listed = 0;
+  size_t released = 0;  // banjo-nx (2026-10-28): prebuilt ones given back unused so far (ReleaseIdlePrebuiltPipelines)
 };
 PipelineCounts PipelineCountsLocked();
+// banjo-nx (2026-10-28, per-draw night): whether the last GetPipelineLocked answer was provisional (a specialised key's
+// generic pipeline while its own is built: the answer changes with the prebuild epoch). Render thread.
+bool LastPipelineProvisionalLocked();
+// banjo-nx (2026-10-28, the heap): the prebuilt pipelines no draw has taken for banjo_renut_prebuild_release_s go
+// back to the heap (their jobs stay: built again if a draw asks). Render thread, once a frame (checks every 20 s).
+void ReleaseIdlePrebuiltPipelines();
 
 } // namespace renut::gpu

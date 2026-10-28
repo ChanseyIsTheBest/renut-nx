@@ -45,5 +45,14 @@ plume::RenderFormat SurfaceColorFormat(const d3d::SurfaceDesc &desc);
 
 // The anisotropy linear minification gets at least (1 = the game's own).
 uint32_t MinAnisotropy();
+// banjo-nx (2026-10-28, GPU block): banjo_renut_anisotropy_cap (0: the game's own).
+uint32_t AnisotropyCap();
+// banjo-nx (2026-10-28, GPU block): dynamic resolution's keys (render/surfaces.cpp).
+bool DynamicResolutionOn();
+int32_t DynamicHeight(bool docked, bool high);  // the range's ends, as set (not rounded)
+double DynamicGpuMs();  // banjo-nx (2026-10-28): a decimal key (34.5)
+double DynamicUpSeconds();  // banjo-nx (2026-10-28): banjo_renut_dynamic_up_s (1 s)
+int32_t DynamicTestSeconds();
+int32_t DynamicSteps();  // banjo-nx (2026-10-28, night_gpu5): banjo_renut_dynamic_steps, the heights between the ends
 
 } // namespace renut::gpu

@@ -1,5 +1,7 @@
 # Renut's renderer in banjo-nx: the port (2026-10-16/17)
 
+> Status 2026-10-28: this guide is older than the current renderer. Start at `docs/porting-start-here.md` (the reading order, what is current, the method rules) and see `docs/porting-guide-renderer.md` section 6b for the items measured slower on the console. The MSAA notes here are history: MSAA is off (`disable_msaa`).
+
 banjo-nx now carries two renderers in one NRO, chosen at boot:
 
 | `banjo_renderer` | Renderer | What it is |

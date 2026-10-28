@@ -30,6 +30,10 @@
 #include <xxhash.h>
 
 #include <rex/system/xmemory.h>
+#if defined(__SWITCH__)
+#include <unistd.h>  // banjo-nx (2026-10-28): sbrk (the heap's room, AdvanceStreamCacheFrameLocked)
+extern "C" char *fake_heap_end;  // libnx: the end of the malloc heap
+#endif
 
 #include "renut_engine/gpu/backend/backend.h"
 #include "renut_engine/gpu/backend/gpu_profile.h"
@@ -82,6 +86,8 @@ REXCVAR_DEFINE_BOOL(banjo_renut_chain_reuse_verify, false, "Banjo/Enhancements",
                     "Tests (banjo_renut_chain_reuse): the key is made anyway and compared with the one taken; a "
                     "difference is logged and the made one used")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// SLOWER ON THE CONSOLE when it had an effect (package 36q: PushSharedConstants 2.7 -> 4.9 % of the render thread); no
+// effect since 2026-10-23.
 REXCVAR_DEFINE_BOOL(banjo_renut_inline_line_compare, false, "Banjo/Enhancements",
                     "No effect since 2026-10-23: the pushed shared constants are compared as one mask of their lines "
                     "(line_compare.h Lines64DifferMask), neither a memcmp nor a branch per line. Before: OFF by default since package 36r: the console's 36q profile had PushSharedConstants 2.7 -> 4.9 % of "
@@ -144,6 +150,11 @@ REXCVAR_DEFINE_INT32(banjo_renut_shadow_cull_indices, 0, "Banjo/Enhancements",
                      "those draws. 0 = off (every shadow drawn). The 10 s line counts the draws skipped")
     .range(0, 1000000)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_diag_push_lines, false, "Banjo/Debug",
+                    "Diagnostic (2026-10-28, GPU block): the 10 s fast-draw line also counts the shared constants' "
+                    "64-byte lines pushed, by line, and the float constant bytes pushed for vertex and pixel shaders "
+                    "(the vertex ones of draws without a pixel shader beside the groups their shaders read)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_diag_shadow_census, false, "Banjo/Debug",
                     "Diagnostic: the fast path's depth-only draws by depth target (its size, whether colour targets are "
                     "bound) and by index count, in the 10 s report")
@@ -177,6 +188,27 @@ REXCVAR_DEFINE_BOOL(banjo_renut_geometry_objects, true, "Banjo/Enhancements",
                     "render thread keeps each object's whole copy (for the layout and shader it was found for) and a "
                     "draw reads one object a buffer instead of finding its source, key, memo slot and entry. Replaces "
                     "the per-mesh objects (banjo_renut_mesh_objects) while on. Exact. In-run A/B target 48")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_point_fast_state, true, "Banjo/Enhancements",
+                    "Renut's renderer: a point-sprite draw (its constants in ring uploads, not pushed) leaves the fast "
+                    "path a state to start from, so the draw after it is not sent the full way; the fast draw puts "
+                    "back the pushed buffers' bindings, compares its constant models whole and refills its texture "
+                    "slots and fetch data. Exact. In-run A/B target 59")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// SLOWER ON THE CONSOLE (A/B 53, night_final city: render thread +0.64 ms a frame; night_gpu5's check, 30 s halves:
+// +0.69 ms, +1.4 / +0.7 / 0.0, -0.53 fps): off by default.
+REXCVAR_DEFINE_BOOL(banjo_renut_texture_slot_skip, false, "Banjo/Enhancements",
+                    "SLOWER ON THE CONSOLE, OFF by default (2026-10-28 console A/B, night_final, target 53: render thread +0.64 ms a frame "
+                    "with it on, static city). Renut's renderer (2026-10-28, per-draw night): a draw that changes some of its texture slots no "
+                    "longer takes the others the whole way through FillTextures: a slot whose texture object the object "
+                    "path answered last, with the same fetch words and nothing that answer read changed since (frame, "
+                    "binding generation, layout epoch), keeps its words and effects. The same words. In-run A/B "
+                    "target 53")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_texture_slot_skip_verify, false, "Banjo/Debug",
+                    "Debug (banjo_renut_texture_slot_skip): each kept slot is checked as the object path would answer "
+                    "it (the object still holds, nothing refreshed or transitioned, the same effects, the block's "
+                    "words the object's); the 10 s texture slots line counts those that differ")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_record_lookups, true, "Banjo/Enhancements",
                     "Renut's renderer (2026-10-28, total CPU): the recording threads find an op's texture, stream and "
@@ -229,10 +261,46 @@ REXCVAR_DEFINE_BOOL(banjo_renut_merge_draws, false, "Banjo/Enhancements",
                     "one host draw of the same primitives in the same order (the shadow maps' parts of one model). Not "
                     "for shaders that export, skin once, draw fur or the composite. A/B 33. Off: one host draw each")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_diag_terrain, false, "Banjo/Diagnostics",
+                    "2026-10-28 (the tessellated terrain, PS 9ED9E1A8 with VS F09B139E / 8EDDB323): the 10 s line counts "
+                    "its draws, vertices a draw, and how many draws of a frame have exactly the vertex inputs of an "
+                    "earlier one (the draw and tessellation counts, the float constants and textures the vertex shader "
+                    "reads, the control points by their bytes, the boolean and tessellation shared words), and which of "
+                    "those differ from the terrain draw before. Decides whether the terrain can be evaluated once a "
+                    "frame for its layers (as the fur is skinned once)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_fast_draw_verify, false, "Banjo/Diagnostics",
                     "Tests (banjo_renut_fast_draw): each part a fast draw kept (texture words, bools and alpha test, "
                     "viewport, pipeline key) derived again and compared; a difference is logged and the derived value "
                     "used")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_lazy_resolve_mips, true, "Banjo/Enhancements",
+                    "Renut's renderer (2026-10-28, from sa2-nx): a scaled colour resolve destination's host mip levels "
+                    "(docked) made when a draw first samples it, not after every resolve into it. Same pixels")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// banjo-nx (2026-10-28): NOT slower after all. night_gpu4's +2.4 / +1.7 ms were 15 s samples inside the noise (A/B 1, a
+// no-op on the Switch, measured +1.8 / +1.3 ms in night_gpu5's first run). night_gpu5's check (four-core, 30 s halves,
+// the control at +0.3 ms): -0.34 ms (-1.0, -0.2, +0.1). On by default again.
+REXCVAR_DEFINE_BOOL(banjo_renut_literals_resident, true, "Banjo/Enhancements",
+                    "Renut's renderer (2026-10-27): a shader whose literal registers all still hold its values (their "
+                    "owner) takes them as held instead of pushing them again. Console (night_gpu5 check, 30 s halves): "
+                    "render thread -0.34 ms a frame, within the noise; night_gpu4's 'slower' was noise. In-run A/B 34. "
+                    "Same pixels either way")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_clear_repeat, true, "Banjo/Enhancements",
+                    "Renut's renderer (2026-10-28, from sa2-nx): a whole clear of a target that holds exactly that clear "
+                    "already (its last whole clear had the same values, and no draw, clear, hand-over or rebuild since) "
+                    "is not sent. Same pixels. A/B 67")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// banjo-nx (2026-10-28): OFF by default, the user's call after night_gpu5's console runs: neutral (A/B 65: -0.54 ms a
+// frame in each of three rounds, 3-core, 15 s halves; +0.45 ms, four-core, 30 s halves with a control at +0.3). The
+// packet table (8,192 entries, about 1.6 MB) takes much of the A57's 2 MB L2 for what it saves.
+REXCVAR_DEFINE_BOOL(banjo_renut_host_packets, false, "Banjo/Enhancements",
+                    "OFF by default: neutral on the console (night_gpu5, A/B 65: -0.54 ms and +0.45 ms a frame in two runs). "
+                    "Renut's renderer (2026-10-28, the user's mandate): host draw packets. A replayed draw's derived state "
+                    "(shaders, declaration, targets, textures' words, bools, viewport, pipeline) kept by the draw's whole "
+                    "device state (a key the recording threads make as they record); a later draw of the same state "
+                    "takes it instead of deriving it again. Exact: the same state, and every epoch the answers depend on")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_diag_fast_census, false, "Banjo/Diagnostics",
                     "Renut's renderer (2026-10-26, the record-time draw path's stage 1): every 10 s, what changed from "
@@ -882,9 +950,21 @@ public:
       if (PoolSpan span = Take(i, need); span)
         return span;
     }
-    const u32 index = AddChunk(need);
-    if (index == UINT32_MAX)
+    // banjo-nx (2026-10-28, night_gpu2 console freeze): no new chunk for kNoChunkFrames after one could not be made
+    // (every caller then takes the uncached path). The heap had 577 MB free in 170,000 pieces and no 32 MB one, and the
+    // pool asked again for every new stream: 3,812 failures of 22 ms each, 0.1 fps for 95 s.
+    if (g_stream_cache_frame < no_chunk_until_)
       return {};
+    u32 index = AddChunk(need);
+    if (index == UINT32_MAX && need <= kSmallChunkSize)
+      index = AddChunk(0, kSmallChunkSize);  // a smaller chunk may still fit in a fragmented heap
+    if (index == UINT32_MAX) {
+      no_chunk_until_ = g_stream_cache_frame + kNoChunkFrames;
+      if (chunk_failures_++ < 4)
+        RGPU_WARN("[renut] stream cache: no new chunk for {} KB: copies made only in the chunks there are for {} frames",
+                  need >> 10, kNoChunkFrames);
+      return {};
+    }
     return Take(index, need);
   }
 
@@ -905,6 +985,7 @@ public:
         chunk.cpu = nullptr;
         chunk.free.clear();
         chunk.size = 0;
+        no_chunk_until_ = 0;  // banjo-nx (2026-10-28): its memory goes back: a new chunk may fit again
       }
     }
     deferred_[slot].clear();
@@ -922,8 +1003,15 @@ public:
   }
 
 private:
-  static constexpr uint64_t kChunkSize = 64ull << 20;
+  // banjo-nx (2026-10-28, per-draw night, the heap): 32 MB chunks (64 before). A chunk goes back to the heap only when
+  // every copy in it has gone, and the d4 city held 112 MB of copies in 192 MB of chunks with the heap at 2.9 of
+  // 3.08 GB in 260,000 free pieces: smaller chunks leave less slack and find room in a fragmented heap. (A draw's
+  // fetch buffers are kept together only in one chunk: not smaller than this.)
+  static constexpr uint64_t kChunkSize = 32ull << 20;
   static constexpr uint64_t kAlign = 256;
+  // banjo-nx (2026-10-28, night_gpu2 console freeze): see Allocate.
+  static constexpr uint64_t kSmallChunkSize = 8ull << 20;
+  static constexpr uint64_t kNoChunkFrames = 600;
 
   struct Chunk {
     std::unique_ptr<plume::RenderBuffer> buffer;  // null once released
@@ -932,9 +1020,9 @@ private:
     std::map<uint64_t, uint64_t> free;  // offset -> size, adjacent ranges merged
   };
 
-  // The index of a new chunk of at least 'min_size' bytes, or UINT32_MAX.
-  u32 AddChunk(uint64_t min_size) {
-    const uint64_t size = std::max(kChunkSize, min_size);
+  // The index of a new chunk of at least 'min_size' bytes (and 'chunk_size'), or UINT32_MAX.
+  u32 AddChunk(uint64_t min_size, uint64_t chunk_size = kChunkSize) {
+    const uint64_t size = std::max(chunk_size, min_size);
     auto buffer = State().device->createBuffer(plume::RenderBufferDesc::UploadBuffer(
         size, plume::RenderBufferFlag::VERTEX | plume::RenderBufferFlag::INDEX));
     void *mapped = buffer ? buffer->map() : nullptr;
@@ -994,6 +1082,8 @@ private:
 
   std::vector<Chunk> chunks_;
   std::vector<PoolSpan> deferred_[kFramesInFlight];
+  uint64_t no_chunk_until_ = 0;  // banjo-nx (2026-10-28): g_stream_cache_frame
+  uint32_t chunk_failures_ = 0;
 };
 CopyPool g_copy_pool;
 
@@ -1064,6 +1154,7 @@ struct CachedStream {
   u32 stable = 0;     // flushes in a row that converted the same bytes
   u32 drops = 0;      // copies dropped because the guest bytes changed
   bool dynamic = false;
+  bool whole = false;  // banjo-nx (2026-10-28): a whole buffer's entry (WholeStreamCopy): objects and memos may hold it
   PoolSpan copy;
   u32 bytes = 0;
   uint64_t last_used = 0;               // g_stream_cache_frame
@@ -1191,6 +1282,22 @@ bool PagesClean(const u8 *data, size_t bytes, uint64_t proven) {
         if (vmaxvq_u32(newer) != 0)
           clean = false;
         page += 15;  // the loop's ++page makes 16
+        continue;
+      }
+    }
+    // banjo-nx (2026-10-28, per-draw night): eight at a time the same way (a range's last 8-15 pages, and ranges of
+    // 8-15 pages, went a page at a time).
+    if (!diag && page != 0 && last - page >= 7 && (page + 8 <= 0x1000u || page >= 0x1000u)) {
+      const uint8x8_t ca = vld1_u8(cards + 0xA0000u + page), cc = vld1_u8(cards + 0xC0000u + page);
+      const uint8x8_t ce = vld1_u8(cards + 0xE0000u + page - 1);
+      const uint8x8_t cf = page < 0x1000u ? vld1_u8(cards + 0x7F000u + page) : ca;
+      if (vminv_u8(vmin_u8(vmin_u8(ca, cc), vmin_u8(ce, cf))) != 0) {
+        const uint32x4_t p = vdupq_n_u32(u32(proven));
+        const u32 *serials = g_page_serial + page;
+        const uint32x4_t newer = vorrq_u32(vcgeq_u32(vld1q_u32(serials), p), vcgeq_u32(vld1q_u32(serials + 4), p));
+        if (vmaxvq_u32(newer) != 0)
+          clean = false;
+        page += 7;  // the loop's ++page makes 8
         continue;
       }
     }
@@ -1505,6 +1612,9 @@ struct Targets {
 // before a depth target is bound again.
 const Targets *g_handover_targets = nullptr;
 void DepthHandOverBeforeBindLocked(HostSurface *surface, const plume::RenderRect *clear_rect, u32 clear_flags);
+// banjo-nx (2026-10-28, GPU block, diagnostic): why the next MaterialiseLocked draws (the hand-over line's causes): 7 a
+// bind for a draw writing depth or stencil, 8 a draw sampling it with its target bound, 9 other.
+int g_materialise_cause = 9;
 
 // A rect in guest pixels as host pixels of targets 'scale' times the size.
 plume::RenderRect ScaleRect(const plume::RenderRect &rect, RenderScale scale) {
@@ -1630,9 +1740,19 @@ uint32_t ShaderProfileLabel(const Targets &t, const ShaderRecord *ps, const Pipe
   return label;
 }
 
-bool BindTargets(const Targets &t) {
-  if (t.depth && t.depth->handed)
-    DepthHandOverBeforeBindLocked(t.depth, nullptr, 0);  // banjo-nx (2026-10-19, banjo_deko3d_depth_handover)
+// banjo-nx (2026-10-28, GPU block): 'depth_writes': the draw it binds for writes depth or stencil (a clear's binds do).
+bool BindTargets(const Targets &t, bool depth_writes = true) {
+  if (t.depth && t.depth->handed) {
+    // banjo-nx (2026-10-28, banjo_deko3d_depth_handover_readonly): a draw that writes neither leaves the image as the
+    // resolve read it ('writes', which the hand-over checks, moves only for those): the resolve stays left out.
+    if (!depth_writes && banjo::renut_gpu::DepthHandOverReadOnlyOn()) {
+      banjo::renut_gpu::CountHandOver(6);
+    } else {
+      g_materialise_cause = depth_writes ? 7 : 9;  // banjo-nx (2026-10-28, diagnostic)
+      DepthHandOverBeforeBindLocked(t.depth, nullptr, 0);  // banjo-nx (2026-10-19, banjo_deko3d_depth_handover)
+      g_materialise_cause = 9;
+    }
+  }
   // banjo-nx: with banjo_renut_diag_gpu_shaders the draw marks its own label (ShaderProfileLabel), the pass's name
   // in it, which saves a timestamp a draw.
   if (!banjo::renut_gpu::DiagGpuShadersOn() && gpu_profile::Timed())
@@ -1928,10 +2048,23 @@ struct FloatConstants {
   u32 offset = 0;  // of VertexShaderF or PixelShaderF in the device layout
   uint64_t *dirty = nullptr;    // ReplayConstants::vs_dirty / ps_dirty
   uint64_t replay = 0;
+  const u8 *const *groups = nullptr;  // banjo-nx (2026-10-28): the stage's 64 (ReplayConstants::groups), or null
 
   const u8 *Register(u32 r) const {
     const bool own = !running || ((set >> (63 - r / 4)) & 1);
-    return (own ? state : running) + offset + r * 16;
+    if (!own)
+      return running + offset + r * 16;
+    // banjo-nx (2026-10-28, banjo_renut_replay_group_pointers): a set group's bytes where its op recorded them.
+    if (groups) {
+      if (const u8 *g = groups[r / 4]) {
+        if (g_group_pointers_verify) [[unlikely]] {
+          ++g_group_pointer_reads;
+          g_group_pointer_differ += std::memcmp(g + (r % 4) * 16, state + offset + r * 16, 16) != 0;
+        }
+        return g + (r % 4) * 16;
+      }
+    }
+    return state + offset + r * 16;
   }
 };
 
@@ -1945,6 +2078,7 @@ FloatConstants DrawFloatConstants(const u8 *state, const ReplayConstants *replay
     c.set = pixel ? replay->ps_set : replay->vs_set;
     c.dirty = pixel ? replay->ps_dirty : replay->vs_dirty;
     c.replay = c.dirty ? replay->replay : 0;
+    c.groups = replay->groups ? replay->groups + (pixel ? 64 : 0) : nullptr;
   }
   return c;
 }
@@ -1954,6 +2088,32 @@ FloatConstants DrawFloatConstants(const u8 *state, const ReplayConstants *replay
 // running device (FloatConstants::Register), so a group's bytes are contiguous.
 // Bit 63 - group, as in m_Pending.
 constexpr u32 kConstantGroupBytes = 4 * 16;
+
+// banjo-nx (2026-10-28, per-draw night): a group's 64 guest bytes to 'held' as they are and to 'swapped' with each word's
+// bytes swapped (the host's little-endian lanes), from one load: four 16-byte loads, four stores, four REV32s and four
+// stores on the A57 (the loops before compiled to sixteen scalar load / REV / store triples and a separate copy). The
+// same bytes.
+[[gnu::always_inline]] inline void CopyAndSwapGroup(const u8 *guest, u8 *held, u8 *swapped) {
+  static_assert(kConstantGroupBytes == 64);
+#if defined(__aarch64__)
+  const uint8x16_t a = vld1q_u8(guest), b = vld1q_u8(guest + 16), c = vld1q_u8(guest + 32), d = vld1q_u8(guest + 48);
+  vst1q_u8(held, a);
+  vst1q_u8(held + 16, b);
+  vst1q_u8(held + 32, c);
+  vst1q_u8(held + 48, d);
+  vst1q_u8(swapped, vrev32q_u8(a));
+  vst1q_u8(swapped + 16, vrev32q_u8(b));
+  vst1q_u8(swapped + 32, vrev32q_u8(c));
+  vst1q_u8(swapped + 48, vrev32q_u8(d));
+#else
+  u32 lanes[kConstantGroupBytes / 4];
+  std::memcpy(lanes, guest, kConstantGroupBytes);
+  std::memcpy(held, lanes, kConstantGroupBytes);
+  for (u32 &lane : lanes)
+    lane = std::byteswap(lane);
+  std::memcpy(swapped, lanes, kConstantGroupBytes);
+#endif
+}
 
 // The groups holding a register the shader reads.
 constexpr uint64_t UsedGroups(const u32 used[8]) {
@@ -2014,37 +2174,68 @@ const GroupSummary &SummaryOf(const u32 used[8]) {
 // consecutive registers in the list's order (an entry at 256 or above skipped, not ending a run), their values in one
 // block, and the registers as a 'valid' mask. Made once per cache entry (the list is the entry's, fixed); the push made
 // them from the list at every draw that needed them.
+// banjo-nx (2026-10-28, render-thread round): one block, 64-byte aligned: this header, then the runs, then the values
+// (from 16 bytes on). Before, two vectors in their own allocations: the draw's prefetch of them loaded the object and
+// both vectors' pointers first (draw.cpp's 0.49 % line in night_gpu5's profile), and the push read three places.
 struct LiteralRuns {
   struct Run {
     u32 first, count, value_word;
   };
-  std::vector<Run> runs;
-  std::vector<u32> values;  // four words a register
+  struct RunRange {
+    const Run *b, *e;
+    const Run *begin() const { return b; }
+    const Run *end() const { return e; }
+    bool empty() const { return b == e; }
+  };
   u32 mask[8] = {};
+  u32 run_count = 0;
+  u32 value_offset = 0;  // bytes from the block's start to the values (four words a register)
+  RunRange runs() const {
+    const Run *r = reinterpret_cast<const Run *>(this + 1);
+    return {r, r + run_count};
+  }
+  const u32 *values() const {
+    return reinterpret_cast<const u32 *>(reinterpret_cast<const char *>(this) + value_offset);
+  }
 };
 
 uint64_t g_literals_resident = 0;  // banjo-nx (2026-10-27): literal pushes not made (A/B 34), the 10 s line's
 const LiteralRuns *LiteralRunsOf(const ShaderCacheEntry *entry) {
-  static std::unordered_map<const ShaderCacheEntry *, std::unique_ptr<LiteralRuns>> &made =
-      *new std::unordered_map<const ShaderCacheEntry *, std::unique_ptr<LiteralRuns>>();
-  auto &slot = made[entry];
+  // Made once per cache entry and kept for the session (as before: the map was never emptied).
+  static std::unordered_map<const ShaderCacheEntry *, LiteralRuns *> &made =
+      *new std::unordered_map<const ShaderCacheEntry *, LiteralRuns *>();
+  LiteralRuns *&slot = made[entry];
   if (!slot) {
-    slot = std::make_unique<LiteralRuns>();
-    LiteralRuns &lr = *slot;
+    std::vector<LiteralRuns::Run> runs;
+    std::vector<u32> values;
+    u32 mask[8] = {};
     for (u32 i = 0; i < entry->literalCount; ++i) {
       const ShaderLiteral &l = g_activeShaderLiterals[entry->literalOffset + i];
       if (l.reg >= 256)
         continue;
-      if (lr.runs.empty() || l.reg != lr.runs.back().first + lr.runs.back().count)
-        lr.runs.push_back({l.reg, 0, u32(lr.values.size())});
-      ++lr.runs.back().count;
+      if (runs.empty() || l.reg != runs.back().first + runs.back().count)
+        runs.push_back({l.reg, 0, u32(values.size())});
+      ++runs.back().count;
       u32 words[4];
       std::memcpy(words, l.value, 16);
-      lr.values.insert(lr.values.end(), words, words + 4);
-      lr.mask[l.reg / 32] |= 1u << (l.reg % 32);
+      values.insert(values.end(), words, words + 4);
+      mask[l.reg / 32] |= 1u << (l.reg % 32);
     }
+    const size_t runs_end = sizeof(LiteralRuns) + runs.size() * sizeof(LiteralRuns::Run);
+    const size_t value_offset = (runs_end + 15) & ~size_t(15);
+    const size_t bytes = value_offset + values.size() * sizeof(u32);
+    void *block = ::operator new(bytes, std::align_val_t(64));
+    LiteralRuns *lr = new (block) LiteralRuns();
+    std::memcpy(lr->mask, mask, sizeof(mask));
+    lr->run_count = u32(runs.size());
+    lr->value_offset = u32(value_offset);
+    if (!runs.empty())
+      std::memcpy(static_cast<char *>(block) + sizeof(LiteralRuns), runs.data(), runs.size() * sizeof(LiteralRuns::Run));
+    if (!values.empty())
+      std::memcpy(static_cast<char *>(block) + value_offset, values.data(), values.size() * sizeof(u32));
+    slot = lr;
   }
-  return slot.get();
+  return slot;
 }
 
 // banjo-nx (2026-10-23, render-thread round): a shader record's draw summary (ShaderRecord::DrawSummary), made at its
@@ -2159,12 +2350,8 @@ UploadAllocation UploadFloatConstants(const FloatConstants &constants, const u32
   for (uint64_t remaining = groups; remaining;) {
     const u32 group = u32(std::countl_zero(remaining));
     remaining &= ~(uint64_t(1) << (63 - group));
-    u32 lanes[kConstantGroupBytes / 4];
-    std::memcpy(lanes, constants.Register(group * 4), kConstantGroupBytes);
-    std::memcpy(last.bytes + group * kConstantGroupBytes, lanes, kConstantGroupBytes);
-    for (u32 &lane : lanes)
-      lane = std::byteswap(lane);
-    std::memcpy(out + group * kConstantGroupBytes, lanes, kConstantGroupBytes);
+    CopyAndSwapGroup(constants.Register(group * 4), last.bytes + group * kConstantGroupBytes,
+                     out + group * kConstantGroupBytes);  // banjo-nx (2026-10-28)
   }
   // Every register of those groups is in the upload, with the bytes it has
   // now.
@@ -2279,6 +2466,23 @@ static_assert([] {
   return true;
 }(), "RegisterGroups is UsedGroups");
 
+// banjo-nx (2026-10-28, GPU block): banjo_renut_diag_push_lines' counts (see the key).
+uint64_t g_diag_push_lines[22] = {};
+uint64_t g_diag_push_float[4] = {};  // [0] VS bytes, [1] PS bytes, [2] VS bytes of draws without a PS, [3] their read groups' bytes
+// banjo-nx (2026-10-28, census for a record-time compare of constants): the written groups PushFloatConstants compared
+// with the pushed bytes, and those the same (the game set them again unchanged: copied by the recording, pointed at by
+// the replay and compared here for nothing).
+uint64_t g_const_compared = 0, g_const_same = 0;
+bool g_diag_draw_no_ps = false;
+inline bool DiagPushOn() {
+  static const bool on = REXCVAR_GET(banjo_renut_diag_push_lines);
+  return on;
+}
+inline void DiagPushLines(u32 first, u32 run) {
+  if (DiagPushOn()) [[unlikely]]
+    for (u32 l = first; l < first + run && l < 22; ++l)
+      ++g_diag_push_lines[l];
+}
 // One stage's float constants (see above); 'ubo' its buffer's address.
 void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &constants, const u32 used[8],
                         ConstantUpload &last, const ShaderCacheEntry *entry, uint64_t ubo, const GroupSummary &summary) {
@@ -2291,11 +2495,13 @@ void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &con
     used = summary.used_words;
   // banjo-nx (2026-10-27, A/B 34): its literal registers all still holding its values (lit_owner): they are its again.
   // Their 'valid' bits were cleared when they were pushed, and only a group update (which clears the owner) sets them.
-  if (literals && last.literals != literals && summary.literal_runs &&
+  // 2026-10-28: banjo_renut_literals_resident, off (the console: the check cost more than the pushes it saved).
+  static const bool literals_resident = REXCVAR_GET(banjo_renut_literals_resident);
+  if (literals_resident && literals && last.literals != literals && summary.literal_runs &&
       banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 34) {
     const auto *lr = static_cast<const LiteralRuns *>(summary.literal_runs);
-    bool resident = !lr->runs.empty();
-    for (const LiteralRuns::Run &run : lr->runs) {
+    bool resident = !lr->runs().empty();
+    for (const LiteralRuns::Run &run : lr->runs()) {
       for (u32 k = 0; k < run.count && resident; ++k)
         resident = run.first + k < 256 && last.lit_owner[run.first + k] == literals;
       if (!resident)
@@ -2348,6 +2554,8 @@ void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &con
       std::memcpy(b, guest + i * 16, 16);
       diff |= (a[0] ^ b[0]) | (a[1] ^ b[1]);
     }
+    ++g_const_compared;
+    g_const_same += diff == 0;
     if (diff)
       push |= uint64_t(1) << bit;
   }
@@ -2362,15 +2570,10 @@ void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &con
     alignas(16) u32 lanes[64 * kConstantGroupBytes / 4];
     for (u32 k = 0; k < count; ++k) {
       const u32 group = first + k;
-      const u8 *guest = constants.Register(group * 4);
-      std::memcpy(last.bytes + group * kConstantGroupBytes, guest, kConstantGroupBytes);
-      // banjo-nx (2026-10-27, render thread night): swapped on the way (a separate pass over the run before).
-      u32 *to = lanes + k * (kConstantGroupBytes / 4);
-      for (u32 w = 0; w < kConstantGroupBytes / 4; ++w) {
-        u32 v;
-        std::memcpy(&v, guest + w * 4, 4);
-        to[w] = std::byteswap(v);
-      }
+      // banjo-nx (2026-10-27, render thread night): swapped on the way (a separate pass over the run before);
+      // banjo-nx (2026-10-28): both copies from one NEON load (CopyAndSwapGroup).
+      CopyAndSwapGroup(constants.Register(group * 4), last.bytes + group * kConstantGroupBytes,
+                       reinterpret_cast<u8 *>(lanes + k * (kConstantGroupBytes / 4)));
       last.valid[group / 8] |= 0xFu << (group % 8 * 4);
       for (u32 q = 0; q < 4; ++q)
         last.lit_owner[group * 4 + q] = nullptr;  // banjo-nx (2026-10-27): the device's bytes now
@@ -2397,8 +2600,8 @@ void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &con
     // banjo-nx (2026-10-23, batch 6): the runs made once for the shader (LiteralRuns), pushed as the loop below
     // would push them, and its registers' mask words.
     if (const auto *lr = static_cast<const LiteralRuns *>(summary.literal_runs)) {
-      for (const LiteralRuns::Run &run : lr->runs) {
-        plume::Deko3DPushUniform(cmd, ubo, kFloatConstantsUboBytes, run.first * 16, lr->values.data() + run.value_word,
+      for (const LiteralRuns::Run &run : lr->runs()) {
+        plume::Deko3DPushUniform(cmd, ubo, kFloatConstantsUboBytes, run.first * 16, lr->values() + run.value_word,
                                  run.count * 16);
         pushed_bytes += run.count * 16;
         for (u32 k = 0; k < run.count && run.first + k < 256; ++k)
@@ -2460,6 +2663,14 @@ void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &con
     last.replay = 0;
   }
   banjo::renut_gpu::CountPushedConstants(pushed_bytes, 0);
+  if (DiagPushOn()) [[unlikely]] {  // banjo-nx (2026-10-28, diagnostic)
+    const bool vs_stage = ubo == g_pushed_buffers.address;
+    g_diag_push_float[vs_stage ? 0 : 1] += pushed_bytes;
+    if (vs_stage && g_diag_draw_no_ps) {
+      g_diag_push_float[2] += pushed_bytes;
+      g_diag_push_float[3] += uint64_t(std::popcount(summary.groups)) * kConstantGroupBytes;
+    }
+  }
   if (banjo::renut_gpu::PushConstantsVerifyOn()) {
     bool ok = true;
     const u32 *literal_regs = literals && last.literals == literals ? last.literal_regs : nullptr;
@@ -2523,12 +2734,16 @@ constexpr u32 kSharedLines = (u32(sizeof(SharedConstants)) + 63) / 64;
 constexpr u32 kAllSharedLines = (1u << kSharedLines) - 1;
 static_assert(kSharedLines == 22);
 u32 g_sc_dirty = kAllSharedLines;
+// banjo-nx (2026-10-28, per-draw night): the lines from the first to the last as one mask (a loop a line before, run at
+// every mark the compiler could not fold: FillTextures' slot words, the fields of a block passed by reference).
 constexpr u32 SharedLinesOf(size_t offset, size_t size) {
-  u32 lines = 0;
-  for (size_t line = offset / 64; line * 64 < offset + size; ++line)
-    lines |= 1u << line;
-  return lines;
+  if (!size)
+    return 0;
+  const u32 first = u32(offset / 64), last = u32((offset + size - 1) / 64);
+  return ((2u << last) - 1u) & ~((1u << first) - 1u);
 }
+static_assert(SharedLinesOf(0, 1) == 1u && SharedLinesOf(60, 8) == 3u && SharedLinesOf(64, 64) == 2u &&
+              SharedLinesOf(1344, 16) == (1u << 21) && SharedLinesOf(100, 300) == 0x7Eu, "SharedLinesOf");
 inline void MarkShared(const SharedConstants &sc, const void *p, size_t size) {
   if (&sc == &g_draw_sc)
     g_sc_dirty |= SharedLinesOf(size_t(static_cast<const u8 *>(p) - reinterpret_cast<const u8 *>(&sc)), size);
@@ -2564,6 +2779,7 @@ void PushSharedConstants(plume::RenderCommandList *cmd, const SharedConstants &s
   // since its last push (g_sc_dirty), the held copy being the block in every other line.
   const bool tracked = &sc == &g_draw_sc;
   if (!g_bound.pushed_shared_valid) {
+    DiagPushLines(0, 22);  // banjo-nx (2026-10-28, diagnostic)
     plume::Deko3DPushUniform(cmd, ubo, kSize, 0, now, kSize);
     std::memcpy(held, now, kSize);
 #if defined(PLUME_DEKO3D)
@@ -2584,6 +2800,7 @@ void PushSharedConstants(plume::RenderCommandList *cmd, const SharedConstants &s
       const u32 first = u32(std::countr_zero(differ));
       const u32 run = u32(std::countr_one(differ >> first));
       const u32 at = first * kLine, end = std::min((first + run) * kLine, kSize);
+      DiagPushLines(first, run);  // banjo-nx (2026-10-28, diagnostic)
       plume::Deko3DPushUniform(cmd, ubo, kSize, at, now + at, end - at);
       u32 off = at;
       for (; off + kLine <= end; off += kLine)
@@ -2693,7 +2910,9 @@ struct alignas(64) GeometryObject {
 };
 static_assert(sizeof(GeometryAnswer) == 64 && sizeof(GeometryObject) == 192);
 namespace {
-constexpr u32 kTextureObjects = 65536, kTextureObjectSlots = 131072;  // 12 MB of objects, 4 MB of table
+// banjo-nx (2026-10-28, the heap): 32,768 (65,536): the d4 console run made 1,648 in twelve minutes of title and city,
+// and static tables come out of the heap a loader gives the NRO; the geometry objects below took the room.
+constexpr u32 kTextureObjects = 32768, kTextureObjectSlots = 65536;  // 6 MB of objects, 2 MB of table
 TextureObject g_texture_objects[kTextureObjects];
 std::atomic<u32> g_texture_objects_made{0};
 // banjo-nx (2026-10-28, total CPU: the recording threads' lookups, banjo_renut_record_lookups): a table slot holds its
@@ -2710,7 +2929,9 @@ struct alignas(32) TextureSlot {
 static_assert(sizeof(TextureSlot) == 32);
 TextureSlot g_texture_slots[kTextureObjectSlots];
 // banjo-nx (2026-10-27, geometry objects): 3 MB of objects; the recording threads' tables (streams, index buffers).
-constexpr u32 kGeometryObjects = 16384, kStreamObjectSlots = 32768, kIndexObjectSlots = 16384;
+// banjo-nx (2026-10-28): 32,768 (16,384): objects are never given back, and the d4 city made 15,456 in twelve minutes
+// (a buffer past the last has no object: the slower lookups). Still a limit for very long sessions.
+constexpr u32 kGeometryObjects = 32768, kStreamObjectSlots = 65536, kIndexObjectSlots = 32768;
 GeometryObject g_geometry_objects[kGeometryObjects];
 std::atomic<u32> g_geometry_objects_made{0};
 template <u32 kWords>
@@ -2801,8 +3022,29 @@ struct SlotLast {
   BindEffects fx;
   uint64_t layout_epoch = 0;  // banjo-nx (2026-10-26, round 4): g_layout_epoch when the slot's transitions last held
   const TextureObject *obj = nullptr;  // banjo-nx (2026-10-27, Phase A): the object whose answer its words are
+  // banjo-nx (2026-10-28, per-draw night, banjo_renut_texture_slot_skip): set only by the object path's answer: the
+  // caller's effects array it stored the object's effects into, and the binding generation, frame and layout epoch it
+  // answered at (null: no skip; every other writer of the slot clears it).
+  const BindEffects *obj_fx = nullptr;
+  uint64_t obj_gen = 0, obj_frame = 0, obj_layout = 0;
 };
 SlotLast g_slot_last[d3d::kTextureFetchSlots];
+uint64_t g_tex_slot_skips = 0;  // the 10 s line's (TextureAnswersReport)
+uint64_t g_tex_slot_skip_checked = 0, g_tex_slot_skip_differ = 0, g_tex_slot_skip_unheld = 0;  // (its verify)
+// The fast path's effects array (FastState::fx, set by FastDrawLocked): the only caller array the skip trusts (another
+// caller's stack array can sit at the same address on a later call with other contents).
+const BindEffects *g_skip_fx = nullptr;
+// banjo-nx (2026-10-28, per-draw night): banjo_renut_point_fast_state (A/B 59).
+inline bool PointFastStateOn() {
+  static const bool on = REXCVAR_GET(banjo_renut_point_fast_state);
+  return on && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 59;
+}
+// banjo-nx (2026-10-28): OFF by default: it HURT on the console (A/B 53, night_final: render thread +0.64 ms a frame
+// with it on in the static city); kept for measuring again.
+inline bool TextureSlotSkipOn() {
+  static const bool on = REXCVAR_GET(banjo_renut_texture_slot_skip);
+  return on && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 53;
+}
 
 // banjo-nx (2026-10-27, Phase A): an object's answer for this draw: the same fetch words, an epoch check at this binding
 // generation (else the buckets, as BindingEpoch), the frame's content check done (else RefreshBindingLocked, as the
@@ -2881,6 +3123,12 @@ std::string TextureAnswersReportLocal() {
                                 g_tex_miss_epoch, g_tex_miss_depth, g_tex_miss_words);
   g_tex_last = g_tex_memo = g_tex_bind = g_tex_refresh = 0;
   g_tex_miss_other = g_tex_miss_frame = g_tex_miss_epoch = g_tex_miss_depth = g_tex_miss_words = 0;
+  if (g_tex_slot_skips)  // banjo-nx (2026-10-28)
+    out += fmt::format("; {} object slots kept (banjo_renut_texture_slot_skip)", std::exchange(g_tex_slot_skips, 0));
+  if (g_tex_slot_skip_checked)
+    out += fmt::format("; slot skip verify: {} checked, {} differ, {} with the object answering other words since",
+                       std::exchange(g_tex_slot_skip_checked, 0), std::exchange(g_tex_slot_skip_differ, 0),
+                       std::exchange(g_tex_slot_skip_unheld, 0));
   return out;
 }
 // A bind's slot words (dimension, texture index word, sampler word): FillTextures' bind path and Phase A's verify.
@@ -2950,6 +3198,7 @@ void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc
       SetSlotDefaults(sc, u32(std::countr_zero(bits)));
       g_slot_last[std::countr_zero(bits)].valid = false;
       g_slot_last[std::countr_zero(bits)].obj = nullptr;  // banjo-nx (2026-10-27, Phase A)
+      g_slot_last[std::countr_zero(bits)].obj_fx = nullptr;  // banjo-nx (2026-10-28)
     }
     g_draw_sc_track.texture_slots = fetch_mask;
   }
@@ -2963,6 +3212,9 @@ void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc
   // by g_texture_epoch, not the buckets the objects check).
   static const bool objects_verify = REXCVAR_GET(banjo_renut_resource_objects_verify);
   const DrawResources *const objs = memo_on_objects(g_draw_resources);
+  // banjo-nx (2026-10-28): banjo_renut_texture_slot_skip, not in the verify forms (they compare the whole way's words).
+  const bool slot_skip = slot_fx && slot_fx == g_skip_fx && TextureSlotSkipOn() && !objects_verify &&
+                         !PersistentSharedVerifyOn();
   for (u32 bits = fetch_mask; bits; bits &= bits - 1) {
     const u32 r = u32(std::countr_zero(bits));
     if (!draw_fetches)
@@ -2996,6 +3248,37 @@ void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc
     // (The record made it from this slot's address word, which the op's chunks give the device here: its identity line
     // is not read on this path, only in verify.)
     TextureObject *const obj = objs && ((objs->mask >> r) & 1) ? objs->slot[r] : nullptr;
+    // banjo-nx (2026-10-28, per-draw night, banjo_renut_texture_slot_skip / A/B 53): the slot's object as this path last
+    // answered it, for the same fetch words, in the same frame, binding generation and layout epoch, into the same
+    // caller's effects array: the object path below would find the same answer (TextureObjectHolds: the epoch and the
+    // frame's content check held then and nothing they read changed), apply no transition (the layout epoch is the
+    // same), write no word (the block holds this object's words) and store the same effects. Only the depth counters
+    // count again. A draw changing one texture slot made every other slot of its mask go the whole way.
+    if (obj && memo && persistent && slot_skip && last.obj == obj && last.obj_fx == slot_fx &&
+        last.obj_gen == g_texture_bind_gen && last.obj_frame == TextureFrameLocked() &&
+        last.obj_layout == g_layout_epoch && last.va == texture_va && SameBytes<24>(last.device, fetch.dword)) {
+      static const bool skip_verify = REXCVAR_GET(banjo_renut_texture_slot_skip_verify);
+      if (skip_verify) [[unlikely]] {
+        ++g_tex_slot_skip_checked;
+        bool refreshed = false;
+        if (TextureObjectHolds(*obj, fetch, texture_va, refreshed)) {
+          bool same = !refreshed && obj->layout_epoch == g_layout_epoch &&
+                      SameBytes<sizeof(BindEffects)>(&obj->fx, &slot_fx[r]) && sc.sampler_indices[r] == obj->sampler;
+          for (u32 d = 0; d < 3; ++d)
+            same = same && sc.texture_indices[d][r] == (d == obj->dim ? obj->index : kDefaultTextureWords[d]);
+          g_tex_slot_skip_differ += !same;
+        } else {
+          ++g_tex_slot_skip_unheld;  // (the object answered other fetch words since: this slot's words stay right)
+        }
+      }
+      if (slot_fx[r].float_sampled)
+        banjo::renut_gpu::CountDepthFloatSampled();
+      if (slot_fx[r].words_viewed)
+        banjo::renut_gpu::CountDepthWords(true);
+      ++g_tex_obj;
+      ++g_tex_slot_skips;
+      continue;
+    }
     if (obj && memo) {
       bool refreshed = false;
       if (TextureObjectHolds(*obj, fetch, texture_va, refreshed)) {
@@ -3056,6 +3339,10 @@ void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc
           last.obj = obj;
           last.va = texture_va;
           std::memcpy(last.device, fetch.dword, sizeof(last.device));
+          last.obj_fx = slot_fx;  // banjo-nx (2026-10-28): what the skip above needs
+          last.obj_gen = g_texture_bind_gen;
+          last.obj_frame = TextureFrameLocked();
+          last.obj_layout = g_layout_epoch;
         }
         ++g_tex_obj;
         g_tex_obj_refresh += refreshed;
@@ -3087,6 +3374,7 @@ void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc
         StoreTextureObject(*obj, fetch, texture_va, last_dim(sc, r), sc.texture_indices[last_dim(sc, r)][r],
                            sc.sampler_indices[r], last.fx, last.frame);
         last.obj = obj;
+        last.obj_fx = nullptr;  // banjo-nx (2026-10-28)
       }
       if (PersistentSharedVerifyOn()) {  // the memo's answer, when it has one, is the block's words
         const TextureSlotMemo &vm = TextureMemoSlot(texture_va, fetch);
@@ -3115,6 +3403,7 @@ void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc
       last.fx = from.fx;
       last.layout_epoch = g_layout_epoch;  // its transitions were just applied (round 4)
       last.obj = nullptr;
+      last.obj_fx = nullptr;  // banjo-nx (2026-10-28)
       // banjo-nx (2026-10-27, Phase A): the answer into the slot's texture object too (when its header is the one the
       // answer was made from).
       if (obj && memo && SameBytes<24>(obj->header, from.header)) {
@@ -3206,6 +3495,7 @@ void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc
     } else if (persistent) {
       last.valid = false;
       last.obj = nullptr;  // banjo-nx (2026-10-27, Phase A)
+      last.obj_fx = nullptr;  // banjo-nx (2026-10-28)
     }
   }
   // banjo-nx (2026-10-23, batch 6): see same_as_last. The slots outside the mask hold the defaults in both.
@@ -3233,16 +3523,21 @@ inline u32 last_dim(const SharedConstants &sc, u32 r) {
 }
 
 // banjo-nx (2026-10-26, banjo_renut_persistent_shared): the persistent block, made at the first draw as a new one.
-SharedConstants &DrawSharedLocked() {
-  if (!g_draw_sc_track.ready) {
-    std::memset(&g_draw_sc, 0, sizeof(g_draw_sc));
-    for (u32 r = 0; r < 32; ++r)
-      SetSlotDefaults(g_draw_sc, r);
-    g_draw_sc.flt_max = std::numeric_limits<float>::max();
-    g_draw_sc_track = {};
-    g_draw_sc_track.ready = true;
-    g_sc_dirty = kAllSharedLines;
-  }
+// banjo-nx (2026-10-28, per-draw night): the test inline and the set-up out of line: a call at every draw before, and,
+// the block coming back by reference from a call, every mark of its fields worked its offset and lines out at run time
+// (inline, the fast path's marks are constants).
+[[gnu::cold, gnu::noinline]] void InitDrawSharedLocked() {
+  std::memset(&g_draw_sc, 0, sizeof(g_draw_sc));
+  for (u32 r = 0; r < 32; ++r)
+    SetSlotDefaults(g_draw_sc, r);
+  g_draw_sc.flt_max = std::numeric_limits<float>::max();
+  g_draw_sc_track = {};
+  g_draw_sc_track.ready = true;
+  g_sc_dirty = kAllSharedLines;
+}
+[[gnu::always_inline]] inline SharedConstants &DrawSharedLocked() {
+  if (!g_draw_sc_track.ready) [[unlikely]]
+    InitDrawSharedLocked();
   return g_draw_sc;
 }
 
@@ -4174,7 +4469,8 @@ const FetchPoolEntry *FetchPoolCopy(const u8 *src, u32 size) {
     e.src = src;
     e.size = size;
   }
-  e.last_used = g_stream_cache_frame;
+  if (e.last_used != g_stream_cache_frame)  // banjo-nx (2026-10-28, render-thread round): only when it changes
+    e.last_used = g_stream_cache_frame;
   if (e.copy) {
     if (e.proven_flush == g_flush_serial)
       return &e;
@@ -4258,6 +4554,10 @@ struct WholeSpan {
 std::vector<WholeSpan> g_whole_spans;
 uint64_t g_whole_bytes = 0, g_replaced_bytes = 0;  // the 10 s line's: whole copies made, range copies dropped
 constexpr uint64_t kWholeReplaceFrames = 4;
+// banjo-nx (2026-10-28, per-draw night): DropReplacedRanges' pass at most every kWholeReplacePeriod frames (it walks
+// every node of both caches: 0.8 ms a frame on the console's render thread in the d4 profile, as whole copies are made
+// in most frames). The ranges it drops stay up to that much longer (memory only: what a draw reads does not change).
+constexpr uint64_t kWholeReplacePeriod = 16;
 
 // banjo-nx (2026-10-27, A/B 37): WholeGeometryTry's last source per stream slot and what it was made of.
 struct LastStreamSource {
@@ -4294,6 +4594,7 @@ CachedStream *WholeStreamCopy(const StreamKey &key, const HostVertexStream &hs) 
     last = {key, &g_stream_memo.Get(g_stream_cache, key, true)->second};
   CachedStream &c = *last.c;
   c.last_used = g_stream_cache_frame;
+  c.whole = true;  // banjo-nx (2026-10-28): the answers, mesh objects and last pointers that may hold it
   if (c.copy)
     return ProveStreamCopy(key, c) ? &c : WholeMiss<CachedStream>(kWhyStreamDropped);
   if (c.dynamic || !banjo::renut_gpu::StoreCardsOn() || !banjo::renut_gpu::ExactStreamsOn())
@@ -4426,7 +4727,8 @@ struct alignas(64) MeshObject {
 };
 static_assert(sizeof(MeshObject) == 256 && offsetof(MeshObject, words) == 64 && offsetof(MeshObject, gen) == 128 &&
               offsetof(MeshObject, guest) == 192);
-MeshObject g_mesh_objects[kMeshEntries];
+// banjo-nx (2026-10-28, the heap): made at the first probe (2 MB that the geometry objects, on by default, never use).
+MeshObject *g_mesh_objects = nullptr;
 uint64_t g_mesh_hits = 0, g_mesh_reproved = 0, g_mesh_kept = 0, g_mesh_stale = 0, g_mesh_misses = 0;
 
 // The probe's inputs, read once: the key's words, its hash and the entry they name.
@@ -4476,6 +4778,8 @@ bool MeshProbeMake(const GuestDevice &device, const DrawCall &call, const Shader
     p.streams[p.count++] = u8(stream);
   }
   // The entry's lines, while the index buffer's header comes in.
+  if (!g_mesh_objects) [[unlikely]]
+    g_mesh_objects = new MeshObject[kMeshEntries]();
   p.entry = &g_mesh_objects[(h * 0x9E3779B97F4A7C15ull) >> 51];
   static_assert(kMeshEntries == 1u << 13);
   for (u32 line = 0; line < sizeof(MeshObject); line += 64)
@@ -4670,10 +4974,14 @@ bool GeometryObjectsHit(const DrawCall &call, const ShaderRecord &vs, const u32 
         return false;
     }
     CachedStream &c = *static_cast<CachedStream *>(const_cast<void *>(a->copy));
-    c.last_used = g_stream_cache_frame;
+    // banjo-nx (2026-10-28, render-thread round): stamps stored only when they change (each store dirtied the entry's
+    // and the answer's lines at every draw, written back later).
+    if (c.last_used != g_stream_cache_frame)
+      c.last_used = g_stream_cache_frame;
     if (!ProveCopyRange(a->guest, a->bytes, c))
       return false;
-    const_cast<GeometryAnswer *>(a)->proven = u32(g_flush_serial);  // (PrefetchGeometryCopies' cards)
+    if (a->proven != u32(g_flush_serial))
+      const_cast<GeometryAnswer *>(a)->proven = u32(g_flush_serial);  // (PrefetchGeometryCopies' cards)
     copies[stream] = &c;
     __builtin_prefetch(&c.copy);  // BindWholeStreams reads the copy's span
   }
@@ -4687,10 +4995,12 @@ bool GeometryObjectsHit(const DrawCall &call, const ShaderRecord &vs, const u32 
     if (exports_pending && PendingExportSlotsMemo(kExportAnswerIndex, o->key[1], o->key[2]))
       return false;
     CachedIndices &ci = *static_cast<CachedIndices *>(const_cast<void *>(a->copy));
-    ci.last_used = g_stream_cache_frame;
+    if (ci.last_used != g_stream_cache_frame)  // banjo-nx (2026-10-28): only when it changes
+      ci.last_used = g_stream_cache_frame;
     if (!ProveCopyRange(a->guest, a->bytes, ci))
       return false;
-    const_cast<GeometryAnswer *>(a)->proven = u32(g_flush_serial);
+    if (a->proven != u32(g_flush_serial))
+      const_cast<GeometryAnswer *>(a)->proven = u32(g_flush_serial);
     g.indexed = true;
     g.index_count = call.count;
     g.first_index = call.start_index;
@@ -7510,6 +7820,53 @@ uint64_t RenderStateIdLocked(const u32 rs[20], const Targets &t) {
 }
 FastState g_fast;
 
+// banjo-nx (2026-10-28, host packets, banjo_renut_host_packets; the user's mandate): a replayed draw's derived state kept
+// by its packet key (ChainHint::packet_key: the device words these answers read, guest/command_buffers.cpp
+// kPacketWords, made by the recording threads as they record, with the call's primitive kind), so a later draw with the
+// same words takes its answers instead of deriving them again:
+// the shaders' records, host shaders and cache entries, the declaration and strides (no shader or declaration lookup and
+// no record line read for them), the targets, the depth-only answer and texture mask, the bools and alpha test, the
+// viewport, and the render-state words and their number. Each is derived from those words alone (the executor's own
+// dependency sets, which its verify checks); what it reads besides is checked: the records and host shaders (g_packet_epoch, raised
+// whenever a record or a host shader goes), the surfaces (the targets and what reads them), the tiles and the replay's
+// predication (the viewport). banjo_renut_fast_draw_verify compares the outcome with the whole way's, as for every fast
+// draw. A/B 65's off half: no packet taken (they are still made).
+uint64_t g_packet_epoch = 1;
+uint64_t g_packet_hits = 0, g_packet_misses = 0, g_packet_stale = 0, g_packet_made = 0;  // the 10 s line's
+struct alignas(64) HostPacket {
+  // Line 0: the check and the shaders.
+  uint64_t key = 0, epoch = 0;
+  ShaderRecord *vs = nullptr, *ps = nullptr;  // ps: the device's (before the depth-only answer)
+  plume::RenderShader *host_vs = nullptr, *host_ps = nullptr;
+  const VertexDeclarationRecord *declaration = nullptr;
+  const u32 *shader_strides = nullptr;
+  // Line 1: the answers' scalars.
+  const ShaderCacheEntry *vs_entry = nullptr, *ps_entry = nullptr;
+  uint64_t surface_epoch = 0, rs_epoch = 0;
+  u32 viewport_tiles = 0, viewport_predication = 0;
+  u32 texture_mask = 0, alpha_test_func = 7;
+  float alpha_threshold = 0.0f;
+  bool declaration_from_va = false, depth_only = false;
+  // Then the rest.
+  u32 booleans[8] = {};
+  u32 rs[20] = {};
+  Targets targets;
+  ViewportState viewport;
+};
+constexpr u32 kHostPacketBits = 13;  // 8,192 packets, direct-mapped (a city frame draws ~4,800 states)
+HostPacket *g_host_packets = nullptr;
+inline bool HostPacketsOn() {
+  static const bool on = REXCVAR_GET(banjo_renut_host_packets);
+  return on;
+}
+inline u32 HostPacketIndex(uint64_t key) { return u32((key * 0x9E3779B97F4A7C15ull) >> (64 - kHostPacketBits)); }
+// The slot of a key (the table made at first use).
+inline HostPacket &HostPacketSlot(uint64_t key) {
+  if (!g_host_packets) [[unlikely]]
+    g_host_packets = new HostPacket[size_t(1) << kHostPacketBits];
+  return g_host_packets[HostPacketIndex(key)];
+}
+
 // banjo-nx (2026-10-26, the record-time draw path): MakeKey's device inputs besides the shaders, the declaration's
 // layout, the targets, the primitive, the instancing and the alpha test: the four blend controls, the colour mask, the
 // depth control, both stencil reference/mask words, the mode control, the colour control's alpha-to-coverage bit, the
@@ -7540,20 +7897,24 @@ struct FastPipeline {
   const ShaderCacheEntry *vs = nullptr, *ps = nullptr;
   u32 misc = 0;
   bool blend_used = true;  // banjo-nx (2026-10-27): BlendConstantUsed(key)
+  bool provisional = true;  // banjo-nx (2026-10-28): the answer holds only for its prebuild epoch (LastPipelineProvisional)
   KeyHot hot;
   PipelineKey key{};
 };
 static_assert(offsetof(FastPipeline, hot) == 64, "FastPipeline: line 0 the check, line 1 the key's draw-time fields");
 // banjo-nx (2026-10-27): 1,024 entries (512 before): with numbers by content the frame's pipelines are found again
 // from one frame to the next, and they are more than 512.
-FastPipeline g_fast_pipelines[1024];
+// banjo-nx (2026-10-28, per-draw night): 4,096 (1,024 kept evicting a city frame's ~3,200 pipelines: 7.5 % of the fast
+// draws made their key again in d4; 1.3 MB, kept at that for the heap's sake).
+constexpr u32 kFastPipelines = 4096;
+FastPipeline g_fast_pipelines[kFastPipelines];
 inline u32 FastPipelineIndex(uint64_t rs_epoch, const ShaderCacheEntry *vs, const ShaderCacheEntry *ps,
                              uint64_t layout_hash, u32 misc) {
   uint64_t h = rs_epoch * 0x9E3779B97F4A7C15ull;
   h ^= (uint64_t(reinterpret_cast<uintptr_t>(vs)) >> 4) * 0xFF51AFD7ED558CCDull;
   h ^= (uint64_t(reinterpret_cast<uintptr_t>(ps)) >> 4) * 0xC4CEB9FE1A85EC53ull;
   h ^= layout_hash + misc;
-  return u32(h ^ (h >> 29)) & 1023u;
+  return u32(h ^ (h >> 29)) & (kFastPipelines - 1);
 }
 // banjo-nx (2026-10-27, banjo_renut_diag_draw_kinds): the last draw's kind, fields and path, set by FastDrawLocked and
 // StoreFastStateLocked for NoteDrawKind.
@@ -7569,7 +7930,12 @@ inline u32 DrawKindOf(const Targets &t, const ShaderRecord *ps) {
   return ps ? 2u : (t.color_count == 0 && t.depth ? 0u : 1u);
 }
 uint64_t g_fast_pipeline_generation = 1;  // raised by InvalidateFastDrawLocked
+uint64_t g_fast_record_drops = 0;  // banjo-nx (2026-10-28): InvalidateFastDrawForRecordLocked's calls
 uint64_t g_fast_pipeline_hits = 0, g_fast_pipeline_misses = 0;  // the 10 s line's
+// banjo-nx (2026-10-28, per-draw night): the misses by what the slot held: [0] nothing, [1] another pipeline's answer
+// (a conflict: the table is direct-mapped), [2] this one's from a past prebuild epoch (provisional), [3] this one's
+// from before an invalidation (generation).
+uint64_t g_fast_pipeline_miss_why[4] = {};
 uint64_t g_fast_draws = 0, g_full_draws = 0, g_fast_why[16] = {};  // the 10 s line's
 
 // The reasons a draw went to DrawStateLocked, by the first met (the 10 s line).
@@ -7594,11 +7960,67 @@ void PrefetchTextureMemoLocked(u32 va, const d3d::TextureFetchConstant &fetch) {
   __builtin_prefetch(reinterpret_cast<const char *>(&m) + 64);
 }
 
+// banjo-nx (2026-10-28, host packets): draw.h.
+void PrefetchHostPacket(uint64_t key) {
+  if (!key || !g_host_packets || !HostPacketsOn())
+    return;
+  const char *p = reinterpret_cast<const char *>(&g_host_packets[HostPacketIndex(key)]);
+  __builtin_prefetch(p);
+  __builtin_prefetch(p + 64);
+}
+void InvalidateHostPacketsLocked() { ++g_packet_epoch; }
+
+// banjo-nx (2026-10-28, banjo_renut_lazy_resolve_mips; from sa2-nx's sa2_renut_lazy_resolve_mips, credit sa2-nx): a scaled
+// colour resolve destination's host levels (docked: 3D at 1.25x, the HUD at 1.5x) were made after every resolve into it
+// (UpdateResolveMipsLocked: a scratch draw a level and copies, barriers around them), sampled or not. Now when a draw
+// first samples it, or before its level 0 is written another way. A/B 66's off half: after every resolve, as before.
+uint64_t g_lazy_mips_deferred = 0, g_lazy_mips_made = 0;  // the 10 s line's
+bool LazyResolveMipsOn() {
+  static const bool on = REXCVAR_GET(banjo_renut_lazy_resolve_mips);
+  return on && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 66;
+}
+// banjo-nx (2026-10-28, banjo_renut_clear_repeat; from sa2-nx's sa2_renut_clear_repeat, credit sa2-nx): ClearTargets.
+// A/B 67's off half sends every clear (what the targets hold is still followed).
+uint64_t g_clear_repeats = 0, g_clears_whole = 0;  // the 10 s line's
+bool ClearRepeatOn() {
+  static const bool on = REXCVAR_GET(banjo_renut_clear_repeat);
+  return on && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 67;
+}
+// The levels the resolves since the last ones left, from level 0 as it is now: the same as at those resolves (only
+// resolves, each widening the region, wrote level 0 since; anything else that writes it flushes first). Outside the
+// resolves' rectangles level 0 is unchanged since the levels there were made, so those come out as they were.
+void FlushResolveMipsLocked(HostTexture &t) {
+  if (!t.mips_pending)
+    return;
+  t.mips_pending = false;
+  ++g_lazy_mips_made;
+  UpdateResolveMipsLocked(&t, t.mips_rect);
+  // The draw path binds its own targets, layout, pipeline and viewport again.
+  g_bound.framebuffer = nullptr;
+  g_bound.pipeline = nullptr;
+  g_bound.layout = false;
+  g_bound.viewport_set = false;
+}
+
 void InvalidateFastDrawLocked() {
   g_fast.valid = false;
   ++g_fast_pipeline_generation;
+  ++g_packet_epoch;  // banjo-nx (2026-10-28, host packets)
   for (LastStreamSource &l : g_last_stream_sources)  // banjo-nx (2026-10-27): they name the shader record
     l.valid = false;
+}
+// banjo-nx (2026-10-28, per-draw night, render/draw.h). The fast state names records by its shader pointers, its
+// declaration (a vertex shader's bound or fetch declaration is inside that shader's record's ownership) and its
+// strides (inside the vertex shader's record); the pipeline cache's entries name cache entries and pipelines only.
+// Every record a frame destroyed cleared both (N&B makes and drops shader objects with its meshes): the next draws took
+// the full path and made their pipeline keys again.
+void InvalidateFastDrawForRecordLocked(const void *record) {
+  if (g_fast.vs == record || g_fast.ps == record || g_fast.declaration == record)
+    g_fast.valid = false;
+  for (LastStreamSource &l : g_last_stream_sources)
+    l.valid = false;
+  ++g_fast_record_drops;
+  ++g_packet_epoch;  // banjo-nx (2026-10-28, host packets): a packet may name the record (a few a 10 s in the city)
 }
 
 namespace {
@@ -7771,6 +8193,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     return c;
   }();
   FastState &f = g_fast;
+  g_skip_fx = f.fx;  // banjo-nx (2026-10-28): banjo_renut_texture_slot_skip's array
   // banjo-nx (2026-10-27, render thread night): the A/B half read once (it changes between frames, on this thread).
   const int ab = banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed);
   if (!cfg.on || !IsDeko3D() || ab == 25)
@@ -7784,7 +8207,9 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   if (call.tessellation || call.primitive == kPointList)
     return FastMiss(kFastCall);
   const u32 fields = chain.fields;
-  if (fields & kFieldPredication)
+  // banjo-nx (2026-10-28, per-draw night): the predication is one of the viewport's inputs below (the viewport is all
+  // that reads it); A/B 61's off half sends the draw the full way as before.
+  if ((fields & kFieldPredication) && ab == 61)
     return FastMiss(kFastFields);
   // The targets gathered again (stage 2) when their words changed, a target was built, retired or rebound since
   // (the surface epoch), or the draw before's depth target was left out (DropSmallerDepth, which reads the depth
@@ -7799,12 +8224,43 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   if (!device.valid())
     return FastMiss(kFastNoState);
 
+  // banjo-nx (2026-10-28, host packets): this state's packet, when one holds (its first lines came an op ago). The slot
+  // gets this draw's answers at the end when it has none for this state, or stale ones. A/B 65's off half neither takes
+  // nor makes any (the whole cost against the whole gain; the emulator's x86 caches hide the misses packets remove).
+  HostPacket *pk_slot = nullptr, *pk = nullptr;
+  if (HostPacketsOn() && chain.packet_key && ab != 65) {
+    pk_slot = &HostPacketSlot(chain.packet_key);
+    if (pk_slot->key == chain.packet_key && pk_slot->epoch == g_packet_epoch) {
+      ++g_packet_hits;
+      pk = pk_slot;
+    } else {
+      ++(pk_slot->key == chain.packet_key ? g_packet_stale : g_packet_misses);
+    }
+  }
+  // The answers that read the targets hold while the surfaces are as they were.
+  const bool pk_targets = pk && pk->surface_epoch == SurfaceEpochLocked();
+
   // The shaders and the declaration.
   ShaderRecord *vs = f.vs, *device_ps = f.ps;
   plume::RenderShader *host_vs = f.host_vs, *host_ps = f.host_ps;
   const VertexDeclarationRecord *declaration = f.declaration;
   const bool shaders_changed = (fields & kFieldShaders) != 0;
-  if (shaders_changed) {
+  if (shaders_changed && pk) {
+    // banjo-nx (2026-10-28, host packets): the records, host shaders and declaration of this state, without a lookup or
+    // a record line read; the lines of the records the draw reads further down (their draw summaries) asked for now.
+    vs = pk->vs;
+    device_ps = pk->ps;
+    host_vs = pk->host_vs;
+    host_ps = pk->host_ps;
+    for (const ShaderRecord *r : {vs, device_ps}) {
+      if (const char *p = reinterpret_cast<const char *>(r)) {
+        __builtin_prefetch(p);
+        __builtin_prefetch(p + 64);
+        __builtin_prefetch(p + 128);
+        __builtin_prefetch(p + 192);
+      }
+    }
+  } else if (shaders_changed) {
     vs = FindShaderLocked(device.U32(d3d::kDeviceOffsetVertexShader), RecordKind::VertexShader);
     device_ps = FindShaderLocked(device.U32(d3d::kDeviceOffsetPixelShader), RecordKind::PixelShader);
     if (!vs)
@@ -7833,7 +8289,11 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   // else the shader's own fetches', else none; again when the shaders or the device's word changed.
   const u32 *shader_strides = f.shader_strides;  // null for a device declaration
   bool declaration_from_va = f.declaration_from_va;
-  if (shaders_changed || (fields & kFieldDecl)) {
+  if ((shaders_changed || (fields & kFieldDecl)) && pk) {
+    declaration = pk->declaration;  // banjo-nx (2026-10-28, host packets)
+    shader_strides = pk->shader_strides;
+    declaration_from_va = pk->declaration_from_va;
+  } else if (shaders_changed || (fields & kFieldDecl)) {
     const u32 declaration_va = device.U32(d3d::kDeviceOffsetVertexDeclaration);
     shader_strides = nullptr;
     declaration_from_va = declaration_va != 0;
@@ -7856,7 +8316,8 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
       return FastMiss(kFastDecl);
   }
   // The shaders' own cases, looked at when they change (round 4: the kept shaders' answer otherwise).
-  if (shaders_changed) {
+  // banjo-nx (2026-10-28, host packets): a packet is made only by a draw whose shaders passed them.
+  if (shaders_changed && !pk) {
     if (DrawSummaryOf(*vs).exports || (device_ps && DrawSummaryOf(*device_ps).exports))
       return FastMiss(kFastExports);
     if ((device_ps && DrawSummaryOf(*device_ps).composite) || DrawSummaryOf(*vs).skin_once)
@@ -7883,19 +8344,22 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   // their cache entries only (the depth-only answer, the texture mask, the texture slots, the export reads, the fetch
   // data's mask, the bools' answer, the pipeline key); the declaration, which may come with the object, is compared
   // where it is read.
+  // banjo-nx (2026-10-28, host packets): the entries as the packet holds them (no record read for them).
+  const ShaderCacheEntry *const vs_entry_now = pk ? pk->vs_entry : vs->entry;
+  const ShaderCacheEntry *const ps_entry_now = pk ? pk->ps_entry : (device_ps ? device_ps->entry : nullptr);
   const bool entries_changed =
-      shaders_changed && (ab == 41 || !f.vs || vs->entry != f.vs->entry ||
-                          (device_ps ? device_ps->entry : nullptr) != (f.ps ? f.ps->entry : nullptr));
+      shaders_changed && (ab == 41 || !f.vs || vs_entry_now != f.vs->entry ||
+                          ps_entry_now != (f.ps ? f.ps->entry : nullptr));
   // banjo-nx (round 4, ARM): the shader entries' lines (the texture masks, the constant summaries, the key's inputs),
   // fetched now and read after the geometry's work.
   if (shaders_changed) {
-    if (vs->entry) {
-      __builtin_prefetch(vs->entry);
-      __builtin_prefetch(reinterpret_cast<const char *>(vs->entry) + 64);
+    if (vs_entry_now) {
+      __builtin_prefetch(vs_entry_now);
+      __builtin_prefetch(reinterpret_cast<const char *>(vs_entry_now) + 64);
     }
-    if (device_ps && device_ps->entry) {
-      __builtin_prefetch(device_ps->entry);
-      __builtin_prefetch(reinterpret_cast<const char *>(device_ps->entry) + 64);
+    if (ps_entry_now) {
+      __builtin_prefetch(ps_entry_now);
+      __builtin_prefetch(reinterpret_cast<const char *>(ps_entry_now) + 64);
     }
   }
   // The geometry first: whole-buffer copies, or (stage 2) the ranges the draw reads, as DrawStateLocked converts them
@@ -7932,7 +8396,9 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   // The targets: the draw before's, or gathered again as DrawStateLocked gathers them (with the smaller depth target
   // left out for a draw that does not use it).
   Targets gathered;
-  if (targets_changed) {
+  if (targets_changed && pk_targets) {
+    gathered = pk->targets;  // banjo-nx (2026-10-28, host packets): the same state and surfaces, the same targets
+  } else if (targets_changed) {
     if (!GatherTargets(device, gathered))
       return FastMiss(kFastFields);
     if (gathered.depth && gathered.color_count && gathered.depth->scale != gathered.scale)
@@ -7947,7 +8413,9 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
 
   // The depth-only answer (DrawsWithoutPixelShader reads the shader, the targets and the colour mask and control).
   bool depth_only = f.depth_only;
-  if (entries_changed || (fields & kFieldViewPackets) || targets_changed)
+  if ((entries_changed || (fields & kFieldViewPackets) || targets_changed) && pk_targets)
+    depth_only = pk->depth_only;  // banjo-nx (2026-10-28, host packets): the same shader, targets and state
+  else if (entries_changed || (fields & kFieldViewPackets) || targets_changed)
     depth_only = device_ps && DrawsWithoutPixelShader(device, targets, *device_ps);
   ShaderRecord *ps = depth_only ? nullptr : device_ps;
   plume::RenderShader *draw_host_ps = depth_only ? nullptr : host_ps;
@@ -7957,10 +8425,12 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
       ShadowCensusNote(targets, call);
   }
   // Round 4: the shaders' masks read only when the shaders or the depth-only answer changed.
+  // banjo-nx (2026-10-28, host packets): the packet's mask when its depth-only answer is this one (the same entries).
   const u32 texture_mask =
-      entries_changed || depth_only != f.depth_only
-          ? (vs->entry ? vs->entry->textureFetchMask : 0) | (ps && ps->entry ? ps->entry->textureFetchMask : 0)
-          : f.draw_texture_mask;
+      !(entries_changed || depth_only != f.depth_only) ? f.draw_texture_mask
+      : pk && depth_only == pk->depth_only
+          ? pk->texture_mask
+          : (vs->entry ? vs->entry->textureFetchMask : 0) | (ps && ps->entry ? ps->entry->textureFetchMask : 0);
 
   // The texture fetches the draw binds, converted when something they come from changed (storage only: the mask's
   // slots are written).
@@ -8192,8 +8662,16 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
 
   // The bools and the alpha test (the alpha-to-mask test depends on the pixel shader drawn and the first target).
   u32 alpha_test_func = f.alpha_test_func;
-  if ((fields & (kFieldBools | kFieldViewPackets)) || entries_changed || depth_only != f.depth_only ||
-      targets_changed || verify) {
+  if (((fields & (kFieldBools | kFieldViewPackets)) || entries_changed || depth_only != f.depth_only ||
+       targets_changed) &&
+      pk_targets && !verify) {
+    // banjo-nx (2026-10-28, host packets): the same state, pixel shader drawn and first target: the same words.
+    SetShared(sc, sc.booleans, pk->booleans);
+    SetShared(sc, sc.alpha_test_func, pk->alpha_test_func);
+    SetShared(sc, sc.alpha_threshold, pk->alpha_threshold);
+    alpha_test_func = pk->alpha_test_func;
+  } else if ((fields & (kFieldBools | kFieldViewPackets)) || entries_changed || depth_only != f.depth_only ||
+             targets_changed || verify) {
     const u8 *bools = reinterpret_cast<const u8 *>(&dev.m_Constants.VertexShaderB[0]);
     u32 booleans[8];
     for (u32 i = 0; i < 8; ++i) {
@@ -8226,10 +8704,14 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   }
 
   // The viewport.
-  const bool viewport_inputs = (fields & (kFieldViewPackets | kField29C0)) || f.viewport_tiles != g_tiles.size() ||
+  const bool viewport_inputs = (fields & (kFieldViewPackets | kField29C0 | kFieldPredication)) ||
+                               f.viewport_tiles != g_tiles.size() ||
                                f.viewport_predication != g_replay_predication || targets_changed;
   if (viewport_inputs || verify) {
-    const ViewportState viewport = ComputeViewport(device, targets);
+    // banjo-nx (2026-10-28, host packets): the packet's, for the same state, targets, tiles and predication.
+    const bool from_packet = pk_targets && !verify && pk->viewport_tiles == u32(g_tiles.size()) &&
+                             pk->viewport_predication == g_replay_predication;
+    const ViewportState viewport = from_packet ? pk->viewport : ComputeViewport(device, targets);
     if (!viewport_inputs && std::memcmp(&viewport, &f.viewport, sizeof(viewport)) != 0) {
       static uint32_t logged = 0;
       if (logged++ < 8)
@@ -8350,14 +8832,18 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   if (shaders_changed) {
     for (const ShaderRecord *r : {vs, ps}) {
       if (const auto *lr = r ? static_cast<const LiteralRuns *>(DrawSummaryOf(*r).literal_runs) : nullptr) {
-        __builtin_prefetch(lr->runs.data());
-        __builtin_prefetch(lr->values.data());
+        // banjo-nx (2026-10-28): one block now: its first lines, with no load of the object first.
+        const char *b = reinterpret_cast<const char *>(lr);
+        __builtin_prefetch(b);
+        __builtin_prefetch(b + 64);
+        __builtin_prefetch(b + 128);
       }
     }
   }
   const FloatConstants vs_constants = DrawFloatConstants(device_state, replay, false);
   const FloatConstants ps_constants = DrawFloatConstants(device_state, replay, true);
 #if defined(PLUME_DEKO3D)
+  g_diag_draw_no_ps = !ps;  // banjo-nx (2026-10-28, diagnostic)
   PushFloatConstants(cmd, vs_constants, vs_used, g_bound.pushed_vs, vs->entry, g_pushed_buffers.address,
                      DrawSummaryOf(*vs));
   // banjo-nx (2026-10-27, render thread night, A/B 31): no pixel shader, no pixel constants to push. The replay's pixel
@@ -8391,7 +8877,10 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   bool rs_new = targets_changed;  // the key reads the targets' formats and samples
   if ((fields & (kFieldBools | kFieldDest | kFieldViewPackets)) || !f.rs_valid) {
     u32 rs[20];
-    FastRenderState(dev, sc.booleans, rs);
+    if (pk)
+      std::memcpy(rs, pk->rs, sizeof(rs));  // banjo-nx (2026-10-28, host packets): the same state's words
+    else
+      FastRenderState(dev, sc.booleans, rs);
     if (!f.rs_valid || !SameBytes<80>(rs, f.rs)) {
       std::memcpy(f.rs, rs, sizeof(rs));
       f.rs_valid = true;
@@ -8399,8 +8888,12 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     }
   }
   // banjo-nx (2026-10-27): the content's number (A/B 28: a new number at every change, as before).
+  // banjo-nx (2026-10-28, host packets): the packet's number for the same words and targets (a number is never given to
+  // two contents, so one the table has given this content again since still names it alone).
   if (rs_new)
-    f.rs_epoch = ab_off == 28 ? g_rs_next_id++ + (uint64_t(1) << 62) : RenderStateIdLocked(f.rs, targets);
+    f.rs_epoch = ab_off == 28                                     ? g_rs_next_id++ + (uint64_t(1) << 62)
+                 : pk_targets && SameBytes<80>(f.rs, pk->rs) ? pk->rs_epoch
+                                                                  : RenderStateIdLocked(f.rs, targets);
   const uint64_t prebuild_epoch = PrebuildEpochLocked();
   const u32 misc = call.primitive | u32(geometry.per_instance) << 8 | alpha_test_func << 9 | u32(ab_off) << 16;
   const ShaderCacheEntry *const ps_entry = ps ? ps->entry : nullptr;
@@ -8415,8 +8908,10 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   if (key_inputs) {
     FastPipeline &c = g_fast_pipelines[FastPipelineIndex(f.rs_epoch, vs->entry, ps_entry, declaration->layout_hash,
                                                          misc)];
+    // banjo-nx (2026-10-28, per-draw night, A/B 63): the prebuild epoch only for a provisional answer.
     if (c.pipeline && c.rs_epoch == f.rs_epoch && c.vs == vs->entry && c.ps == ps_entry &&
-        c.layout_hash == declaration->layout_hash && c.misc == misc && c.prebuild_epoch == prebuild_epoch &&
+        c.layout_hash == declaration->layout_hash && c.misc == misc &&
+        (c.prebuild_epoch == prebuild_epoch || (!c.provisional && ab_off != 63)) &&
         c.generation == g_fast_pipeline_generation) {
       ++g_fast_pipeline_hits;
       f.kp = &c.key;
@@ -8425,6 +8920,12 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
       f.pipeline = c.pipeline;
     } else {
       ++g_fast_pipeline_misses;
+      ++g_fast_pipeline_miss_why[!c.pipeline                                                     ? 0
+                                 : c.rs_epoch != f.rs_epoch || c.vs != vs->entry || c.ps != ps_entry ||
+                                           c.layout_hash != declaration->layout_hash || c.misc != misc
+                                     ? 1
+                                 : c.generation == g_fast_pipeline_generation ? 2
+                                                                              : 3];
       c.key = MakeKey(device, vs, ps, declaration, targets, call.primitive, geometry.per_instance, sc.booleans,
                       sc.alpha_test_func);
       c.blend_used = BlendConstantUsed(c.key);
@@ -8433,6 +8934,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
       f.kp_hot = c.hot;
       f.blend_used = c.blend_used;
       f.pipeline = GetPipelineLocked(c.key, {host_vs, draw_host_ps, &declaration->layout});
+      c.provisional = LastPipelineProvisionalLocked();  // banjo-nx (2026-10-28)
       c.rs_epoch = f.rs_epoch;
       c.vs = vs->entry;
       c.ps = ps_entry;
@@ -8474,11 +8976,16 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   // Round 4: the targets bound again only when something BindTargets reads could have changed: other targets, another
   // framebuffer bound since (copies, resolves and new lists unbind it), a layout change (a target's transitions), a
   // framebuffer retired, a depth target handed over, or the GPU profile's per-target marks.
+  // banjo-nx (2026-10-28, banjo_deko3d_depth_handover_readonly): a handed-over depth target bound again only for a draw
+  // that writes its depth or stencil (BindTargets then draws the resolve first).
+  const u32 fast_dc = f.kp_hot.depth_control;
+  const bool fast_depth_writes = ((fast_dc & 2) && (fast_dc & 4)) ||
+                                 ((fast_dc & 1) && ((f.kp_hot.stencil_ref_mask >> 16) & 0xFF) != 0);
   if (targets_changed || !g_bound.framebuffer || g_bound.framebuffer != f.bound_framebuffer ||
       f.bind_layout_epoch != g_layout_epoch || f.framebuffer_epoch != FramebufferEpochLocked() ||
-      (targets.depth && targets.depth->handed) ||
+      (targets.depth && targets.depth->handed && (fast_depth_writes || !banjo::renut_gpu::DepthHandOverReadOnlyOn())) ||
       (gpu_profile::Timed() && !banjo::renut_gpu::DiagGpuShadersOn())) {
-    if (!BindTargets(targets))
+    if (!BindTargets(targets, fast_depth_writes))
       return -1;
     f.bound_framebuffer = g_bound.framebuffer;
     f.bind_layout_epoch = g_layout_epoch;
@@ -8598,6 +9105,42 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   f.alpha_test_func = alpha_test_func;
   f.shaders_fast = true;  // they passed the shaders' cases (now or when they came)
   f.draw_texture_mask = texture_mask;
+  // banjo-nx (2026-10-28, host packets): this state's answers into its slot when it holds none, or ones made with other
+  // surfaces, tiles or predication (taken whole or not at all, so a packet is one draw's answers). A packet taken whole
+  // and still current is left as it is: nothing written at a steady state's draws.
+  if (pk_slot) {
+    const bool current = pk_slot->key == chain.packet_key && pk_slot->epoch == g_packet_epoch &&
+                         pk_slot->surface_epoch == SurfaceEpochLocked() &&
+                         pk_slot->viewport_tiles == u32(g_tiles.size()) &&
+                         pk_slot->viewport_predication == g_replay_predication;
+    if (!current) {
+      HostPacket &e = *pk_slot;
+      e.key = chain.packet_key;
+      e.epoch = g_packet_epoch;
+      e.vs = vs;
+      e.ps = device_ps;
+      e.host_vs = host_vs;
+      e.host_ps = host_ps;
+      e.declaration = declaration;
+      e.shader_strides = shader_strides;
+      e.vs_entry = vs->entry;
+      e.ps_entry = device_ps ? device_ps->entry : nullptr;
+      e.surface_epoch = SurfaceEpochLocked();
+      e.rs_epoch = f.rs_epoch;
+      e.viewport_tiles = u32(g_tiles.size());
+      e.viewport_predication = g_replay_predication;
+      e.texture_mask = texture_mask;
+      e.alpha_test_func = alpha_test_func;
+      e.alpha_threshold = sc.alpha_threshold;
+      e.declaration_from_va = declaration_from_va;
+      e.depth_only = depth_only;
+      std::memcpy(e.booleans, sc.booleans, sizeof(e.booleans));
+      std::memcpy(e.rs, f.rs, sizeof(e.rs));
+      e.targets = targets;
+      e.viewport = f.viewport;
+      ++g_packet_made;
+    }
+  }
   if (exports_pending) {
     f.export_generation = g_export_generation;
     f.export_none = true;
@@ -8806,6 +9349,103 @@ std::string DrawKindsReport() {
 std::string TextureAnswersReport() { return TextureAnswersReportLocal(); }
 
 // banjo-nx (2026-10-26): the 10 s line.
+// banjo-nx (2026-10-28, banjo_renut_diag_terrain): see the key. Render thread only (DrawStateLocked: tessellated draws
+// never take the fast path).
+struct TerrainDiag {
+  uint64_t frame = UINT64_MAX;
+  std::vector<uint64_t> seen;  // this frame's input keys
+  uint64_t last[6] = {};
+  uint64_t frames = 0, draws = 0, repeats = 0, vertices = 0, max_draws = 0, frame_draws = 0;
+  uint64_t differ[6] = {};  // against the terrain draw before: geometry, VS constants, VS textures, fetch data, shared
+                            // words, vertex shader
+  // Within a frame, against the frame's first terrain draw: its component hashes, its shared words v[32-33] and
+  // v[65-81] (76 words) and its VS constant registers' hashes; how many later draws, which components, words and
+  // registers differed.
+  uint64_t first[6] = {};
+  u32 first_words[76] = {};
+  uint64_t first_regs[256] = {};
+  uint64_t later = 0, later_differ[6] = {};
+  uint32_t word_differ[76] = {};
+  uint32_t reg_differ[256] = {};
+};
+TerrainDiag g_terrain_diag;
+bool TerrainDiagOn() {
+  static const bool on = REXCVAR_GET(banjo_renut_diag_terrain);
+  return on;
+}
+inline bool IsTerrainVs(uint64_t hash) { return hash == 0xF09B139EE9188255ull || hash == 0x8EDDB32357201CD0ull; }
+[[gnu::cold, gnu::noinline]] void NoteTerrainDraw(const ShaderRecord &vs, const DrawCall &call, const Geometry &g,
+                                                  const FloatConstants &vsc, const TextureFetch *fetches,
+                                                  const SharedConstants &sc) {
+  using banjo::renut_gpu::ContentHash64;
+  TerrainDiag &d = g_terrain_diag;
+  if (d.frame != g_stream_cache_frame) {
+    if (d.frame != UINT64_MAX) {
+      ++d.frames;
+      d.max_draws = std::max(d.max_draws, d.frame_draws);
+    }
+    d.frame = g_stream_cache_frame;
+    d.seen.clear();
+    d.frame_draws = 0;
+  }
+  const auto mix = [](uint64_t h, uint64_t v) { return (h ^ v) * 0x100000001B3ull + 0x9E3779B97F4A7C15ull; };
+  uint64_t c[6] = {};
+  const u32 geo[10] = {u32(call.tessellation), u32(call.indexed), call.count, call.start_index, call.start_vertex,
+                       u32(call.base_vertex), g.instance_count, g.vertex_count, g.index_count, g.first_index};
+  c[0] = ContentHash64(geo, sizeof(geo));
+  static constexpr u32 kAll[8] = {~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u};
+  const u32 *used = vs.entry ? vs.entry->floatConstants : kAll;
+  uint64_t regs[256] = {};
+  for (u32 w = 0; w < 8; ++w)
+    for (u32 bits = used[w]; bits; bits &= bits - 1) {
+      const u32 r = w * 32 + u32(std::countr_zero(bits));
+      regs[r] = ContentHash64(vsc.Register(r), 16);
+      c[1] = mix(c[1], regs[r]);
+    }
+  for (u32 bits = vs.entry ? vs.entry->textureFetchMask : 0u; bits; bits &= bits - 1)
+    c[2] = mix(c[2], ContentHash64(fetches[std::countr_zero(bits)].dword, sizeof(fetches[0].dword)));
+  for (u32 i = 0; i < g_fetch_record.count && i < 32; ++i) {
+    const FetchRecordCopy &f = g_fetch_record.copies[i];
+    const u32 head[3] = {f.index, f.size, f.endian};
+    c[3] = mix(c[3], ContentHash64(head, sizeof(head)));
+    if (f.src && f.size)
+      c[3] = mix(c[3], ContentHash64(f.src, f.size));
+  }
+  const u8 *s = reinterpret_cast<const u8 *>(&sc);
+  c[4] = mix(ContentHash64(s + 32 * 16, 2 * 16), ContentHash64(s + 65 * 16, 17 * 16));  // v[32-33], v[65-81]
+  c[5] = vs.hash;
+  uint64_t key = 0;
+  for (uint64_t v : c)
+    key = mix(key, v);
+  ++d.draws;
+  ++d.frame_draws;
+  d.vertices += uint64_t(g.instance_count) * (g.index_count ? g.index_count : g.vertex_count);
+  if (std::find(d.seen.begin(), d.seen.end(), key) != d.seen.end())
+    ++d.repeats;
+  else
+    d.seen.push_back(key);
+  if (d.draws > 1)
+    for (u32 i = 0; i < 6; ++i)
+      d.differ[i] += c[i] != d.last[i];
+  std::copy(std::begin(c), std::end(c), d.last);
+  u32 words[76];
+  std::memcpy(words, s + 32 * 16, 2 * 16);
+  std::memcpy(words + 8, s + 65 * 16, 17 * 16);
+  if (d.frame_draws == 1) {
+    std::copy(std::begin(c), std::end(c), d.first);
+    std::memcpy(d.first_words, words, sizeof(words));
+    std::copy(std::begin(regs), std::end(regs), d.first_regs);
+  } else {
+    ++d.later;
+    for (u32 i = 0; i < 6; ++i)
+      d.later_differ[i] += c[i] != d.first[i];
+    for (u32 i = 0; i < 76; ++i)
+      d.word_differ[i] += words[i] != d.first_words[i];
+    for (u32 r = 0; r < 256; ++r)
+      d.reg_differ[r] += regs[r] != d.first_regs[r];
+  }
+}
+
 std::string FastDrawReport() {
   if (!g_fast_draws && !g_full_draws)
     return {};
@@ -8814,12 +9454,25 @@ std::string FastDrawReport() {
                                                       "own exports", "fur/skin/composite", "range geometry",
                                                       "export read", "no pushed constants", "smaller depth"};
   std::string out = fmt::format("fast draws (banjo_renut_fast_draw): {} fast, {} full ({:.1f} % fast); pipeline "
-                                "cache {} hits, {} made (render states: {} found by content, {} new); to the full path "
-                                "because:",
+                                "cache {} hits, {} made ({} empty, {} conflicts, {} provisional, {} invalidated; render "
+                                "states: {} found by content, {} new); to the full path because:",
                                 g_fast_draws, g_full_draws,
                                 100.0 * double(g_fast_draws) / double(g_fast_draws + g_full_draws),
-                                g_fast_pipeline_hits, g_fast_pipeline_misses, g_rs_id_hits, g_rs_id_new);
+                                g_fast_pipeline_hits, g_fast_pipeline_misses, g_fast_pipeline_miss_why[0],
+                                g_fast_pipeline_miss_why[1], g_fast_pipeline_miss_why[2], g_fast_pipeline_miss_why[3],
+                                g_rs_id_hits, g_rs_id_new);
   g_fast_pipeline_hits = g_fast_pipeline_misses = 0;
+  std::fill(std::begin(g_fast_pipeline_miss_why), std::end(g_fast_pipeline_miss_why), 0);
+  if (DiagPushOn()) {  // banjo-nx (2026-10-28, diagnostic)
+    out += " [push diag: shared lines";
+    for (u32 l = 0; l < 22; ++l)
+      out += fmt::format(" {}", g_diag_push_lines[l]);
+    out += fmt::format("; float KB: VS {:.1f}, PS {:.1f}, VS of draws without a PS {:.1f} (their read groups {:.1f} KB)]",
+                       double(g_diag_push_float[0]) / 1024.0, double(g_diag_push_float[1]) / 1024.0,
+                       double(g_diag_push_float[2]) / 1024.0, double(g_diag_push_float[3]) / 1024.0);
+    std::fill(std::begin(g_diag_push_lines), std::end(g_diag_push_lines), 0);
+    std::fill(std::begin(g_diag_push_float), std::end(g_diag_push_float), 0);
+  }
   g_rs_id_hits = g_rs_id_new = 0;
   for (u32 i = 0; i < kFastWhyCount; ++i) {
     if (g_fast_why[i])
@@ -8827,6 +9480,65 @@ std::string FastDrawReport() {
     g_fast_why[i] = 0;
   }
   g_fast_draws = g_full_draws = 0;
+  if (g_fast_record_drops)  // banjo-nx (2026-10-28)
+    out += fmt::format(" records dropped {} (the fast state kept unless it held them),", std::exchange(g_fast_record_drops, 0));
+  if (TerrainDiagOn() && g_terrain_diag.draws) {  // banjo-nx (2026-10-28, banjo_renut_diag_terrain)
+    TerrainDiag &d = g_terrain_diag;
+    out += fmt::format(" terrain (banjo_renut_diag_terrain): {} draws in {} frames (at most {} a frame), {:.0f} vertices "
+                       "a draw, {} with the vertex inputs of an earlier draw of their frame; against the terrain draw "
+                       "before, differing: geometry {}, VS constants {}, VS textures {}, fetch data {}, shared words {}, "
+                       "vertex shader {},",
+                       d.draws, d.frames, d.max_draws, double(d.vertices) / double(d.draws), d.repeats, d.differ[0],
+                       d.differ[1], d.differ[2], d.differ[3], d.differ[4], d.differ[5]);
+    // Within a frame, against its first terrain draw: the components, then the shared words (v[i].c) and the VS
+    // constant registers (cN) that differed, the most often first.
+    out += fmt::format(" within a frame, {} later draws against the frame's first: geometry {}, VS constants {}, VS "
+                       "textures {}, fetch data {}, shared words {}, vertex shader {}; shared words differing:",
+                       d.later, d.later_differ[0], d.later_differ[1], d.later_differ[2], d.later_differ[3],
+                       d.later_differ[4], d.later_differ[5]);
+    static const char kComp[] = "xyzw";
+    for (u32 n = 0; n < 8; ++n) {
+      u32 best = 0;
+      for (u32 i = 1; i < 76; ++i)
+        best = d.word_differ[i] > d.word_differ[best] ? i : best;
+      if (!d.word_differ[best])
+        break;
+      const u32 vec = best < 8 ? 32 + best / 4 : 65 + (best - 8) / 4;
+      out += fmt::format(" v[{}].{} {}", vec, kComp[best % 4], d.word_differ[best]);
+      d.word_differ[best] = 0;
+    }
+    out += "; VS constants differing:";
+    for (u32 n = 0; n < 8; ++n) {
+      u32 best = 0;
+      for (u32 r = 1; r < 256; ++r)
+        best = d.reg_differ[r] > d.reg_differ[best] ? r : best;
+      if (!d.reg_differ[best])
+        break;
+      out += fmt::format(" c{} {}", best, d.reg_differ[best]);
+      d.reg_differ[best] = 0;
+    }
+    out += ",";
+    d.draws = d.repeats = d.vertices = d.frames = d.max_draws = d.later = 0;
+    std::fill(std::begin(d.differ), std::end(d.differ), 0);
+    std::fill(std::begin(d.later_differ), std::end(d.later_differ), 0);
+    std::fill(std::begin(d.word_differ), std::end(d.word_differ), 0);
+    std::fill(std::begin(d.reg_differ), std::end(d.reg_differ), 0);
+  }
+  if (g_clears_whole)  // banjo-nx (2026-10-28, banjo_renut_clear_repeat)
+    out += fmt::format(" whole clears {}, of a target holding that clear already (not sent) {},",
+                       std::exchange(g_clears_whole, 0), std::exchange(g_clear_repeats, 0));
+  if (g_lazy_mips_deferred || g_lazy_mips_made)  // banjo-nx (2026-10-28, banjo_renut_lazy_resolve_mips)
+    out += fmt::format(" resolve host levels: {} left for their first read, {} made at it (the rest never read),",
+                       std::exchange(g_lazy_mips_deferred, 0), std::exchange(g_lazy_mips_made, 0));
+  if (g_const_compared) {  // banjo-nx (2026-10-28)
+    const uint64_t compared = std::exchange(g_const_compared, 0), same = std::exchange(g_const_same, 0);
+    out += fmt::format(" written constant groups compared with the pushed {}, the same {:.1f} %,", compared,
+                       100.0 * double(same) / double(compared));
+  }
+  if (HostPacketsOn())  // banjo-nx (2026-10-28, host packets)
+    out += fmt::format(" host packets (banjo_renut_host_packets): {} found, {} not, {} stale, {} made,",
+                       std::exchange(g_packet_hits, 0), std::exchange(g_packet_misses, 0),
+                       std::exchange(g_packet_stale, 0), std::exchange(g_packet_made, 0));
   return out;
 }
 
@@ -9349,6 +10061,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
         for (SlotLast &l : g_slot_last) {
           l.valid = false;  // the words are the made ones now
           l.obj = nullptr;  // banjo-nx (2026-10-27, Phase A)
+          l.obj_fx = nullptr;  // banjo-nx (2026-10-28)
         }
       }
     }
@@ -9630,6 +10343,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   if (pushed) {
 #if defined(PLUME_DEKO3D)
     plume::RenderCommandList *cmd = s.command_list;
+    g_diag_draw_no_ps = !ps;  // banjo-nx (2026-10-28, diagnostic)
     // banjo-nx (2026-10-23): the shaders' summaries from their records (DrawSummaryOf), not a memo per draw.
     PushFloatConstants(cmd, vs_constants, vs_used, g_bound.pushed_vs, vs->entry, g_pushed_buffers.address,
                        DrawSummaryOf(*vs));
@@ -9857,7 +10571,10 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   // the targets are bound.
   __builtin_prefetch(pipeline);
   __builtin_prefetch(reinterpret_cast<const char *>(pipeline) + 64);
-  if (!pipeline || !BindTargets(targets))
+  // banjo-nx (2026-10-28, banjo_deko3d_depth_handover_readonly): whether this draw writes depth or stencil.
+  const bool draw_depth_writes = ((key.depth_control & 2) && (key.depth_control & 4)) ||
+                                 ((key.depth_control & 1) && ((key.stencil_ref_mask >> 16) & 0xFF) != 0);
+  if (!pipeline || !BindTargets(targets, draw_depth_writes))
     return false;
 #if defined(PLUME_DEKO3D)
   // banjo-nx (2026-10-21, banjo_deko3d_async_variants): a pipeline drawing a shader's generic variant while its own was
@@ -9965,6 +10682,8 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     }
   }
 #endif
+  if (TerrainDiagOn() && IsTerrainVs(vs->hash)) [[unlikely]]  // banjo-nx (2026-10-28, banjo_renut_diag_terrain)
+    NoteTerrainDraw(*vs, call, geometry, vs_constants, draw_fetches.f, sc);
   if (gpu_profile::Timed()) {
     // banjo-nx (package 28b): the GPU profile's draws a frame, and with banjo_renut_diag_gpu_shaders its label.
     // banjo-nx (2026-10-19, render-thread proposal 7): only in the frames the profile times.
@@ -10027,7 +10746,11 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   // that leaves something the next one undoes (the skin mode, points, memexport) or that the fast path never draws.
   // (2026-10-26, v2: also after Draw*UP, tessellated, range, point, memexport and skinned draws: the fast path puts
   // back what they leave in the block, and binds its own streams, index buffer and fetch data.)
-  const bool fast_usable = pushed && persistent_sc && !(ps && DrawSummaryOf(*ps).composite);
+  // banjo-nx (2026-10-28, per-draw night, banjo_renut_point_fast_state / A/B 59): a point-sprite draw's ring uploads
+  // too (the only draws not pushed when pushing is on).
+  const bool point_ring = !pushed && call.primitive == kPointList && s.point_sprite_gs && IsDeko3D() &&
+                          banjo::renut_gpu::PushConstantsOn() && PointFastStateOn();
+  const bool fast_usable = (pushed || point_ring) && persistent_sc && !(ps && DrawSummaryOf(*ps).composite);
   StoreFastStateLocked(call, vs, store_device_ps, store_depth_only, declaration, shader_strides, declaration_va != 0,
                        targets, viewport, key, pipeline, texture_mask, nullptr, sc.alpha_test_func,
                        geometry.per_instance, fast_usable);
@@ -10388,6 +11111,8 @@ void ForgetVertexDeclarationLocked(u32 declaration_va) {
 void DropReplacedRanges() {
   if (g_whole_spans.empty() || g_stream_cache_frame - g_whole_spans.front().frame < kWholeReplaceFrames)
     return;
+  if (g_stream_cache_frame % kWholeReplacePeriod && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 54)
+    return;  // banjo-nx (2026-10-28): kWholeReplacePeriod (A/B 54: every frame, as before)
   const auto ready = std::find_if(g_whole_spans.begin(), g_whole_spans.end(), [](const WholeSpan &w) {
     return g_stream_cache_frame - w.frame < kWholeReplaceFrames;
   });
@@ -10407,12 +11132,14 @@ void DropReplacedRanges() {
   };
   uint64_t dropped = 0;
   const uint64_t frame = g_stream_cache_frame;
+  bool whole_gone = false;  // banjo-nx (2026-10-28): a whole entry among them (index ones never are: excluded below)
   const size_t streams = std::erase_if(g_stream_cache, [&](auto &entry) {
     const StreamKey &k = entry.first;
     if (frame - entry.second.last_used < kWholeReplaceFrames ||
         !held(k.guest, k.guest + size_t(k.count) * k.stride, k.layout_hash, k.stream, k.stride))
       return false;
     dropped += entry.second.bytes;
+    whole_gone |= entry.second.whole;
     DropCachedCopy(entry.second);
     return true;
   });
@@ -10429,7 +11156,10 @@ void DropReplacedRanges() {
   if (streams || indices) {
     g_stream_memo.Clear();  // they may hold the entries dropped
     g_index_memo.Clear();
-    ClearWholeLast();
+    // banjo-nx (2026-10-28, per-draw night): every answer voided only when a whole entry went (answers, mesh objects
+    // and the last pointers hold whole entries alone).
+    if (whole_gone || banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) == 60)
+      ClearWholeLast();
   }
   g_replaced_bytes += dropped;
 }
@@ -10517,31 +11247,50 @@ void AdvanceStreamCacheFrameLocked() {
   DropReplacedRanges();
   if (++g_stream_cache_frame % 60)
     return;
-  // The memos may hold entries about to go.
-  g_stream_memo.Clear();
-  g_index_memo.Clear();
-  ClearWholeLast();
   // banjo-nx: banjo_renut_memory_policy's idle time (Renut's kStreamCacheIdleFrames without it), or under pressure
   // (copies refused at the cap since the last pass, banjo_renut_stream_cache_pressure) kPressureIdleFrames.
   uint64_t idle_frames = banjo::renut_gpu::StreamCacheIdleFrames(kStreamCacheIdleFrames);
   const uint64_t refused = g_stream_cache_refused;
   g_stream_cache_refused = 0;
-  const bool pressure = refused && banjo::renut_gpu::StreamCachePressureOn() && idle_frames > kPressureIdleFrames;
+  // banjo-nx (2026-10-28, the heap): also when the heap is short (its room below 256 MB, as the prebuilt pipelines'
+  // rule): copies made again when needed are better than a heap that runs out (the d4 crash).
+  bool heap_short = false;
+#if defined(__SWITCH__)
+  {
+    const char *top = static_cast<const char *>(sbrk(0));
+    const uint64_t room = (top && fake_heap_end > top) ? uint64_t(fake_heap_end - top) : 0;
+    heap_short = room < (uint64_t(256) << 20);
+  }
+#endif
+  const bool pressure =
+      (refused || heap_short) && banjo::renut_gpu::StreamCachePressureOn() && idle_frames > kPressureIdleFrames;
   const uint64_t bytes_before = g_stream_cache_bytes;
   if (pressure)
     idle_frames = kPressureIdleFrames;
-  std::erase_if(g_stream_cache, [idle_frames](auto &entry) {
+  bool whole_gone = false;  // banjo-nx (2026-10-28): a whole entry among them (see DropReplacedRanges)
+  const size_t streams_gone = std::erase_if(g_stream_cache, [idle_frames, &whole_gone](auto &entry) {
     if (g_stream_cache_frame - entry.second.last_used < idle_frames)
       return false;
+    whole_gone |= entry.second.whole;
     DropCachedCopy(entry.second);
     return true;
   });
-  std::erase_if(g_index_cache, [idle_frames](auto &entry) {
+  const size_t indices_gone = std::erase_if(g_index_cache, [idle_frames, &whole_gone](auto &entry) {
     if (g_stream_cache_frame - entry.second.last_used < idle_frames)
       return false;
+    whole_gone |= entry.first.primitive == kWholeIndexPrimitive;
     DropCachedIndices(entry.second);
     return true;
   });
+  // The memos, the last-copy pointers and every mesh and geometry object's answer name entries: cleared when entries
+  // went. banjo-nx (2026-10-28, per-draw night): only then (they were cleared at every pass, before it: the frame after
+  // each pass, a frame in sixty, took every draw's geometry the full way). Nothing reads them in between.
+  if (streams_gone || indices_gone) {
+    g_stream_memo.Clear();
+    g_index_memo.Clear();
+    if (whole_gone || banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) == 60)  // banjo-nx (2026-10-28)
+      ClearWholeLast();
+  }
   DropIdleFetchCopies(idle_frames);  // banjo-nx (2026-10-27, banjo_renut_fetch_cache)
   banjo::renut_gpu::CountStreamCachePressure(refused, pressure ? bytes_before - g_stream_cache_bytes : 0);
 }
@@ -10608,11 +11357,33 @@ void ClearTargets(const Targets &t, u32 flags, const plume::RenderRect &rect, co
   static std::vector<HostSurface *> aliases;
   static std::vector<HostSurface *> found;
   aliases.clear();
+  // banjo-nx (2026-10-28, banjo_renut_clear_repeat; from sa2-nx's sa2_renut_clear_repeat, credit sa2-nx): a whole clear
+  // of a target that holds exactly that clear already (its last whole clear had the same values, bit for bit, and neither
+  // a write nor another image since: writes and generation as that clear left them) is not sent; everything else about
+  // it is as before (its writes counted, the targets bound, the aliases cleared). What writes a target's image: draws
+  // and clears (writes), SMAA and the UI scale (writes), a depth hand-over or a rebuild (generation: every image has its
+  // own, g_next_generation).
+  const bool repeat_on = ClearRepeatOn();
+  const auto whole = [&](const HostSurface *s) {
+    return rect.left <= 0 && rect.top <= 0 && rect.right >= int32_t(s->width) && rect.bottom >= int32_t(s->height);
+  };
   for (uint32_t i = 0; i < t.color_count; ++i) {
     if (!(flags & (1u << i)))
       continue;
-    ++t.colors[i]->writes;  // banjo-nx (banjo_renut_resolve_skip)
-    cmd->clearColor(i, clear_color, &host_rect, 1);
+    HostSurface *c = t.colors[i];
+    const bool is_whole = whole(c);
+    const bool repeat = repeat_on && is_whole && c->clear_known && c->clear_generation == c->generation &&
+                        c->clear_writes == c->writes && std::memcmp(c->clear_color, color, sizeof(c->clear_color)) == 0;
+    ++c->writes;  // banjo-nx (banjo_renut_resolve_skip)
+    g_clears_whole += is_whole;
+    if (repeat)
+      ++g_clear_repeats;
+    else
+      cmd->clearColor(i, clear_color, &host_rect, 1);
+    c->clear_known = is_whole;
+    c->clear_generation = c->generation;
+    c->clear_writes = c->writes;
+    std::memcpy(c->clear_color, color, sizeof(c->clear_color));
     ColorAliasesLocked(t.colors[i], found);
     for (HostSurface *alias : found) {
       if (std::find(aliases.begin(), aliases.end(), alias) == aliases.end() &&
@@ -10621,9 +11392,38 @@ void ClearTargets(const Targets &t, u32 flags, const plume::RenderRect &rect, co
     }
   }
   if (t.depth && (flags & 0x30)) {
-    ++t.depth->writes;  // banjo-nx (banjo_renut_resolve_skip)
-    cmd->clearDepthStencil((flags & 0x10) != 0, (flags & 0x20) != 0, depth, stencil & 0xFF,
-                           &host_rect, 1);
+    HostSurface *d = t.depth;
+    const bool zc = (flags & 0x10) != 0, sc = (flags & 0x20) != 0;
+    const bool is_whole = whole(d);
+    const bool same = is_whole && d->clear_generation == d->generation && d->clear_writes == d->writes;
+    // Only when every plane cleared (depth and/or stencil) is known to hold that value.
+    const bool repeat = repeat_on && same &&
+                        (!zc || (d->clear_depth_known && std::memcmp(&d->clear_depth, &depth, sizeof(depth)) == 0)) &&
+                        (!sc || (d->clear_stencil_known && d->clear_stencil == (stencil & 0xFF)));
+    ++d->writes;  // banjo-nx (banjo_renut_resolve_skip)
+    g_clears_whole += is_whole;
+    if (repeat)
+      ++g_clear_repeats;
+    else
+      cmd->clearDepthStencil(zc, sc, depth, stencil & 0xFF, &host_rect, 1);
+    // banjo-nx (banjo_renut_clear_repeat): what the target holds now; a plane this clear left alone keeps what was known
+    // of it only while the image and its writes are the ones that knowledge was of.
+    if (!is_whole) {
+      d->clear_depth_known = d->clear_stencil_known = false;
+    } else {
+      if (!same)
+        d->clear_depth_known = d->clear_stencil_known = false;
+      if (zc) {
+        d->clear_depth_known = true;
+        d->clear_depth = depth;
+      }
+      if (sc) {
+        d->clear_stencil_known = true;
+        d->clear_stencil = stencil & 0xFF;
+      }
+    }
+    d->clear_generation = d->generation;
+    d->clear_writes = d->writes;
   }
   for (HostSurface *alias : aliases) {
     Targets a;
@@ -10638,6 +11438,7 @@ void ClearTargets(const Targets &t, u32 flags, const plume::RenderRect &rect, co
       continue;
     const plume::RenderRect alias_host = ScaleRect(alias_rect, a.scale);
     ++alias->writes;  // banjo-nx (banjo_renut_resolve_skip)
+    alias->clear_known = false;  // banjo-nx (banjo_renut_clear_repeat): not followed through aliases
     cmd->clearColor(0, clear_color, &alias_host, 1);
   }
 }
@@ -10744,6 +11545,7 @@ bool MaterialiseLocked(HostTexture &d, bool words) {
     if (same && ResolveDepth(source, &d, src, d.last_dest_x, d.last_dest_y, words)) {
       d.words_current = words;
       banjo::renut_gpu::CountHandOver(3);
+      banjo::renut_gpu::CountHandOver(g_materialise_cause);  // banjo-nx (2026-10-28, diagnostic)
       return true;
     }
     banjo::renut_gpu::CountHandOver(5);
@@ -11024,7 +11826,9 @@ uint32_t DepthHandOverSlotLocked(HostTexture &d, const plume::RenderComponentMap
     }
     // Not the image of a target of the draw: its resolve is drawn after all.
     if (g_handover_targets && g_handover_targets->depth == source) {
+      g_materialise_cause = 8;  // banjo-nx (2026-10-28, diagnostic)
       MaterialiseLocked(d, false);
+      g_materialise_cause = 9;
       return UINT32_MAX;
     }
     const uint32_t slot =
@@ -11255,7 +12059,24 @@ void ResolveStateLocked(const u8 *device_state, u32 flags, const ClearRect *sour
               host_y, z, &box);
         }
         TransitionTextureLocked(dest, plume::RenderTextureLayout::SHADER_READ);
-        if (dest->extra_levels) {
+        if (dest->extra_levels && LazyResolveMipsOn()) {
+          // banjo-nx (2026-10-28, banjo_renut_lazy_resolve_mips; from sa2-nx): made where they are read
+          // (FlushResolveMipsLocked), or before level 0 is written another way. Every way a draw takes a texture's words
+          // without BindTextureLocked holds by an epoch: the lean executor's kept slots by g_texture_epoch, the texture
+          // objects, the slots' last answers and the memo by the texture's binding buckets (sa2-nx bumped only the
+          // first; Banjo's objects check the buckets). The first pending region bumps both.
+          const plume::RenderRect &p = dest->mips_rect;
+          if (dest->mips_pending) {
+            dest->mips_rect = plume::RenderRect(std::min(p.left, dest_rect.left), std::min(p.top, dest_rect.top),
+                                                std::max(p.right, dest_rect.right), std::max(p.bottom, dest_rect.bottom));
+          } else {
+            dest->mips_rect = dest_rect;
+            dest->mips_pending = true;
+            ++g_texture_epoch;
+            BumpTextureBindings(*dest);
+            ++g_lazy_mips_deferred;
+          }
+        } else if (dest->extra_levels) {
           UpdateResolveMipsLocked(dest, dest_rect);
           // The draw path binds its own layout, pipeline and viewport again.
           g_bound.pipeline = nullptr;

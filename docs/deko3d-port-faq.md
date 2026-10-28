@@ -1,5 +1,7 @@
 # deko3d port FAQ for the other ports (2026-10-19 night)
 
+> Status 2026-10-28: this guide is older than the current renderer. Start at `docs/porting-start-here.md` (the reading order, what is current, the method rules) and see `docs/porting-guide-renderer.md` section 6b for the items measured slower on the console. Superseded here: "no resolution changes" (Banjo now has internal and dynamic resolution); MSAA is off.
+
 Answers to the questions Futari, SA2, Peggle 2 and SASRT asked while starting the route of
 `docs/deko3d-native-renderer-kit.md`. Paths are banjo-nx's unless marked.
 

@@ -269,6 +269,55 @@ const ComponentTables &PackedComponentTables() {
 inline u32 TableIndex(const DeclType &type) { return (type.is_signed ? 1u : 0u) | (type.is_integer ? 2u : 0u); }
 
 #if defined(__aarch64__)
+// banjo-nx (2026-10-28, per-draw night): four 16-bit components (as DecodeComponent takes them from the words: the low
+// half first) to floats in one of the four modes (TableIndex: bit 0 signed, bit 1 integer). The same values as
+// DecodeComponent: the integers are exact in a float, the divisions are the same IEEE divisions (lane by lane, the
+// same rounding mode), and max(x, -1) is std::max's for a quotient that is never NaN.
+template <u32 kMode>
+inline float32x4_t Decode16x4(u32 w0, u32 w1) {
+  const uint16x4_t h = vreinterpret_u16_u32(vset_lane_u32(w1, vdup_n_u32(w0), 1));
+  if constexpr ((kMode & 1) != 0) {
+    const float32x4_t v = vcvtq_f32_s32(vmovl_s16(vreinterpret_s16_u16(h)));
+    if constexpr ((kMode & 2) != 0)
+      return v;
+    return vmaxq_f32(vdivq_f32(v, vdupq_n_f32(32767.0f)), vdupq_n_f32(-1.0f));
+  } else {
+    const float32x4_t v = vcvtq_f32_u32(vmovl_u16(h));
+    if constexpr ((kMode & 2) != 0)
+      return v;
+    return vdivq_f32(v, vdupq_n_f32(65535.0f));
+  }
+}
+// Every 16-bit value in every mode against DecodeComponent, once (the console's FPCR is the one this runs with).
+template <u32 kMode>
+bool Neon16ExactMode() {
+  DeclType type{};
+  type.is_signed = (kMode & 1) != 0;
+  type.is_integer = (kMode & 2) != 0;
+  for (u32 v = 0; v < 0x10000u; v += 4) {
+    const u32 w0 = v | (v + 1) << 16, w1 = (v + 2) | (v + 3) << 16;
+    float got[4];
+    vst1q_f32(got, Decode16x4<kMode>(w0, w1));
+    for (u32 i = 0; i < 4; ++i) {
+      const float want = DecodeComponent(i < 2 ? w0 : w1, (i & 1) * 16, 16, type);
+      if (std::memcmp(&got[i], &want, 4) != 0)
+        return false;
+    }
+  }
+  return true;
+}
+bool Neon16Exact() {
+  static const bool exact = [] {
+    const bool ok = Neon16ExactMode<0>() && Neon16ExactMode<1>() && Neon16ExactMode<2>() && Neon16ExactMode<3>();
+    if (!ok)
+      RGPU_WARN("16-bit vertex components: the NEON expansion differs from DecodeComponent; the scalar path is used");
+    return ok;
+  }();
+  return exact;
+}
+#endif
+
+#if defined(__aarch64__)
 // banjo-nx (2026-10-23, batch 6): two or four halves (as HalfToFloat takes them from the words: the low half first) to
 // floats with the NEON conversion: the same values (exact, subnormals included); a word holding an infinity or NaN half
 // goes through HalfToFloat (the conversion would quiet a signalling NaN's payload).
@@ -366,6 +415,24 @@ void ExpandElement(const HostVertexElement &e, const u8 *src, u32 src_stride, u8
     break;
   }
   case k16_16:
+#if defined(__aarch64__)
+    // banjo-nx (2026-10-28, per-draw night): Decode16x4 (the mode chosen once for the loop, not per component).
+    if (Neon16Exact()) {
+      const auto two = [&]<u32 kMode>() {
+        expand([&](const u8 *p, float c[6]) {
+          const u32 w = word(p, 0);
+          vst1_f32(c, vget_low_f32(Decode16x4<kMode>(w, w)));
+        });
+      };
+      switch (TableIndex(type)) {
+      case 0: two.template operator()<0>(); break;
+      case 1: two.template operator()<1>(); break;
+      case 2: two.template operator()<2>(); break;
+      default: two.template operator()<3>(); break;
+      }
+      break;
+    }
+#endif
     expand([&](const u8 *p, float c[6]) {
       const u32 w = word(p, 0);
       c[0] = DecodeComponent(w, 0, 16, type);
@@ -373,6 +440,20 @@ void ExpandElement(const HostVertexElement &e, const u8 *src, u32 src_stride, u8
     });
     break;
   case k16_16_16_16:
+#if defined(__aarch64__)
+    if (Neon16Exact()) {  // banjo-nx (2026-10-28, per-draw night)
+      const auto four = [&]<u32 kMode>() {
+        expand([&](const u8 *p, float c[6]) { vst1q_f32(c, Decode16x4<kMode>(word(p, 0), word(p, 1))); });
+      };
+      switch (TableIndex(type)) {
+      case 0: four.template operator()<0>(); break;
+      case 1: four.template operator()<1>(); break;
+      case 2: four.template operator()<2>(); break;
+      default: four.template operator()<3>(); break;
+      }
+      break;
+    }
+#endif
     expand([&](const u8 *p, float c[6]) {
       const u32 w0 = word(p, 0), w1 = word(p, 1);
       c[0] = DecodeComponent(w0, 0, 16, type);
@@ -600,6 +681,17 @@ inline uint8x16_t SwapVector(uint8x16_t v) {
     return vreinterpretq_u8_u16(vrev32q_u16(vreinterpretq_u16_u8(v)));
 }
 
+// banjo-nx (2026-10-28, per-draw night): SwapVector on half a vector (two words).
+template <u32 kEndian>
+inline uint8x8_t SwapVector64(uint8x8_t v) {
+  if constexpr (kEndian == 1)
+    return vrev16_u8(v);
+  else if constexpr (kEndian == 2)
+    return vrev32_u8(v);
+  else
+    return vreinterpret_u8_u16(vrev32_u16(vreinterpret_u16_u8(v)));
+}
+
 // The words a vector loop did not take are left to the caller.
 template <u32 kEndian>
 size_t SwapWordsNeon(const u8 *src, u8 *dst, size_t words) {
@@ -652,6 +744,17 @@ void CopyWordsLoop(const u8 *src, u32 src_stride, u8 *dst, u32 dst_stride, u32 c
     if (banjo::renut_gpu::NeonSwapOn()) {
       for (u32 v = 0; v < count; ++v, src += src_stride, dst += dst_stride)
         vst1q_u8(dst, SwapVector<kEndian>(vld1q_u8(src)));
+      return;
+    }
+  }
+  // banjo-nx (2026-10-28, per-draw night): two words as one 64-bit reverse, three as that and one word.
+  if constexpr ((kWords == 2 || kWords == 3) && kEndian != 0) {
+    if (banjo::renut_gpu::NeonSwapOn()) {
+      for (u32 v = 0; v < count; ++v, src += src_stride, dst += dst_stride) {
+        vst1_u8(dst, SwapVector64<kEndian>(vld1_u8(src)));
+        if constexpr (kWords == 3)
+          SwapWordsAs<kEndian>(src + 8, dst + 8, 1);
+      }
       return;
     }
   }

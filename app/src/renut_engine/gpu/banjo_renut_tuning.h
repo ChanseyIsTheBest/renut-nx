@@ -109,6 +109,8 @@ void OnPrebuildWorkerStart();
 void OnBackgroundThreadStart(const char *what);
 // How many prebuild workers to start; Renut's own count off the Switch.
 uint32_t PrebuildWorkers(uint32_t renut_count);
+// banjo-nx (2026-10-28, the heap): banjo_renut_prebuild_release_s (0: prebuilt pipelines stay).
+uint32_t PrebuildReleaseSeconds();
 // banjo_renut_upload_cached (the Switch only): the upload ring in CPU-cached memory (backend/video.cpp).
 bool UploadCached();
 // banjo_renut_push_point_only: the draw's push constant only for point sprites (render/draw.cpp).
@@ -230,11 +232,13 @@ void CountDepthFloatSampled();
 // banjo_deko3d_depth_compression / banjo_deko3d_zcull (2026-10-18): read before the deko3d device is made.
 bool Deko3DDepthCompressionOn();
 bool Deko3DZcullOn();
+bool Deko3DGpuRegionOn();  // banjo-nx (2026-10-28, h10): banjo_deko3d_gpu_region
 // banjo_deko3d_barrier_merge / _lean (2026-10-19, GPU): fewer pipeline drains and texture cache invalidations.
 bool Deko3DBarrierMergeOn();
 bool Deko3DBarrierLeanOn();
 bool Deko3DVtxDedupeOn();  // banjo-nx (2026-10-26)
 bool Deko3DTextureSkipOn();  // banjo-nx (2026-10-27)
+bool Deko3DProvisionalCountOn();  // banjo-nx (2026-10-28): banjo_deko3d_provisional_count
 bool Deko3DAsyncVariantsOn();  // banjo_deko3d_async_variants (2026-10-21)
 // banjo_deko3d_alpha_spec (2026-10-18): the alpha test's function in the pipeline key (constant 903).
 [[gnu::always_inline]] inline bool AlphaSpecOn() { return Latch().alpha_spec; }
@@ -345,6 +349,8 @@ void CountFetchAlignment(bool aligned);
 // 3 resolves done after all (the target bound or gone, or the destination needed in its texture), 4 of them from a
 // taken image, 5 contents lost (none expected).
 [[gnu::always_inline]] inline bool DepthHandOverOn() { return Latch().depth_handover; }
+// banjo-nx (2026-10-28, GPU block): banjo_deko3d_depth_handover_readonly (A/B 64).
+bool DepthHandOverReadOnlyOn();
 // banjo_deko3d_depth24 (2026-10-19, GPU): D24S8 depth targets as 24-bit unorm (render/format.cpp).
 [[gnu::always_inline]] inline bool Depth24On() { return Latch().depth24; }
 // banjo_deko3d_push_constants (2026-10-19, render-thread proposals 2 and 5): the float constants and SharedConstants

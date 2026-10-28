@@ -50,7 +50,9 @@ struct ShaderRecord {
   // banjo-nx (2026-10-23, render-thread round): what every draw reads, together in the record's first lines (the host
   // shader, the summary and the specialised bools were in its fourth to sixth lines, past the stride arrays). The
   // host shader is built on first use by a pipeline, under host_mutex (below).
-  std::unique_ptr<plume::RenderShader> host;
+  // banjo-nx (2026-10-28, per-draw night, banjo_renut_shared_host_shaders): owned by the host shader registry
+  // (d3d/hooks/shader.cpp: one host an entry, shared by its live records), given back by ReleaseHostShader.
+  plume::RenderShader *host = nullptr;
   // Vertex shaders: what D3DVertexShader_Bind bound the shader to. The bind
   // bakes the declaration into the microcode, so a draw with no declaration
   // set uses it; a copy, as N&B releases the declaration right after binding.
@@ -112,6 +114,14 @@ ShaderRecord *FindShaderLocked(u32 shader_va, RecordKind kind);
 void PrefetchShaderLocked(u32 shader_va, RecordKind kind);
 // banjo-nx (2026-10-27): the record's first lines when the memo holds the shader already (prefetches only).
 void PrefetchShaderRecordLocked(u32 shader_va, RecordKind kind);
+// banjo-nx (2026-10-28, per-draw night): a shader record sits at the shader's own guest address (guest_records.h), so
+// Replay's stream fetches its first three lines from an op's recorded word alone, an op ahead (no memo look: A/B 49's
+// look in the memo cost more than it saved); then, at the op itself, the lines behind it a shader change reads (its
+// cache entry, its bound declaration). The c4/d4 profiles: the record's first touch (its cache entry and host shader)
+// was the fast path's hottest load, N&B making a shader object per mesh. Prefetches only: an address that is not one of
+// our records (a guest shader set up in place) fetches lines of guest memory for nothing.
+void PrefetchShaderRecordAt(u32 shader_va);
+void PrefetchShaderBehind(u32 shader_va);
 
 // Drops the host side of an in-place guest shader object, if it has one.
 // Requires State().mutex.
@@ -131,7 +141,7 @@ plume::RenderShader *GetHostShader(ShaderRecord *shader);
 // same rule: only GetHostShader sets 'host', and the draws that read it hold State().mutex); the call otherwise.
 [[gnu::always_inline]] inline plume::RenderShader *HostShaderOf(ShaderRecord *shader) {
   if (shader && shader->entry)
-    if (plume::RenderShader *host = shader->host.get())
+    if (plume::RenderShader *host = shader->host)
       return host;
   return GetHostShader(shader);
 }

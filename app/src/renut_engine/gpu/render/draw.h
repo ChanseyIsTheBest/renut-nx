@@ -171,7 +171,15 @@ struct ReplayConstants {
   // device is the same.
   uint64_t *vs_dirty = nullptr, *ps_dirty = nullptr;
   uint64_t replay = 0;
+  // banjo-nx (2026-10-28, banjo_renut_replay_group_pointers): where each set group's bytes are (128 pointers: the
+  // vertex shader's 64 groups, then the pixel shader's; into the recording's arena, or the device image after a sorted
+  // run), instead of the device image; null: the image.
+  const u8 *const *groups = nullptr;
 };
+// banjo-nx (2026-10-28, banjo_renut_replay_group_pointers_verify): set by Replay (the image kept as well); the reads
+// that found other bytes than the image's (the 10 s "recording from marks" line).
+extern bool g_group_pointers_verify;
+extern uint64_t g_group_pointer_reads, g_group_pointer_differ;
 
 // A draw from a device state snapshot (kDeviceSnapshotSize bytes laid out as
 // the guest D3DDevice). Without 'replay', every float constant is the
@@ -270,7 +278,14 @@ struct ChainHint {
   uint64_t seq = 0;
   uint64_t changed[2] = {};
   u32 fields = kFieldsAll;  // banjo-nx (2026-10-26)
+  // banjo-nx (2026-10-28, host packets): the replayed op's packet key (its whole device state and the call's primitive
+  // kind; guest/command_buffers.cpp PacketKeyOf), 0 when it has none (an immediate draw, keys off).
+  uint64_t packet_key = 0;
 };
+// banjo-nx (2026-10-28, host packets): a packet's first lines asked for (the replay, an op ahead); and every packet
+// dropped (a shader or declaration record or a host shader went: render/draw.cpp g_packet_epoch).
+void PrefetchHostPacket(uint64_t key);
+void InvalidateHostPacketsLocked();
 extern ChainHint g_chain_hint;
 // banjo-nx (2026-10-20): the next ChainHint::seq, shared by every producer of hints (backend/queued.cpp's delta chain,
 // guest/command_buffers.cpp's replays): a producer whose number is not its previous one + 1 had another draw in between
@@ -420,6 +435,10 @@ inline uint64_t RenderTicks() {
 #endif
 }
 void InvalidateFastDrawLocked();
+// banjo-nx (2026-10-28, per-draw night): a shader or vertex declaration record about to go (or a vertex shader's bound
+// declaration about to be replaced): the fast path's state only when it holds that record, and the stream memo (it names
+// records). The pipeline choices (cache entries, built pipelines: KeepShader keeps a record's host shader) stay.
+void InvalidateFastDrawForRecordLocked(const void *record);
 u32 FastTextureMaskGuess();
 void PrefetchTextureMemoLocked(u32 va, const d3d::TextureFetchConstant &fetch);
 // banjo-nx (2026-10-26, API-level stage 2): the 10 s "[renut] whole buffers" line; resets its counts.

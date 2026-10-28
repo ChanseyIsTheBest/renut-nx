@@ -23,6 +23,11 @@
 #include <vector>
 
 #include <fmt/format.h>
+#include <chrono>
+#if defined(__SWITCH__)
+#include <unistd.h>  // banjo-nx (2026-10-28): sbrk (ReleaseSpareBuffersWhenHeapShort)
+extern "C" char *fake_heap_end;  // libnx: the end of the malloc heap
+#endif
 #include <rex/frame_latency.h>  // banjo-nx (2026-10-26): the Unleashed census's frames
 
 #include "renut_engine/gpu/d3d/d3d.h"
@@ -36,6 +41,7 @@
 #include "renut_engine/gpu/render/draw.h"  // banjo-nx (2026-10-20): ChainHint
 #include "renut_engine/gpu/guest/resources.h"  // banjo-nx (2026-10-23): PrefetchShaderLocked
 #include "renut_engine/gpu/render/texture_layout.h"  // banjo-nx (2026-10-27): the slots' extents (GetTextureDataSizes)
+#include "renut_engine/gpu/render/textures.h"  // banjo-nx (2026-10-28): TextureFrameLocked (the packet census's frames)
 
 #include <rex/cvar.h>
 
@@ -44,6 +50,12 @@ REXCVAR_DEFINE_BOOL(banjo_renut_tags, true, "Banjo/Enhancements",
                     "Renut's renderer (2026-10-26): a recorded op compares only the device chunks the native D3D "
                     "setters marked as written since the device's previous op, not all 53 (the same op, the same "
                     "bytes: the rest are unchanged). Off: every chunk compared, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DECLARE(bool, banjo_renut_host_packets);  // banjo-nx (2026-10-28): render/draw.cpp
+REXCVAR_DEFINE_BOOL(banjo_renut_diag_packet_census, false, "Banjo/Diagnostics",
+                    "Renut's renderer (2026-10-28, host draw packets): every 10 s, how many replayed draws a cache keyed "
+                    "by the draw's whole device state (not the float constants) would answer, and how many of those "
+                    "re-derive state today. Hashes 3 KB a draw: diagnostics only")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(banjo_renut_tags_check, 32, "Banjo/Enhancements",
                      "Renut's renderer (banjo_renut_tags): every Nth op of a recording device also compares every "
@@ -73,8 +85,9 @@ REXCVAR_DEFINE_BOOL(banjo_renut_chain_reuse_replays, true, "Banjo/Enhancements",
 // where the recorded order reads one op's bytes in a row. The emulator's census: 7.39 us a shadow draw sorted against
 // 7.48 as recorded (an even trade there). Kept for its A/B (target 40, with this key on) and as the base of a sort that
 // keeps the front-to-back order within each shader (not tried).
+// SLOWER ON THE CONSOLE (A/B 40, 2026-10-27 city: render thread +1.1 ms, GPU +0.65 ms a frame): off by default.
 REXCVAR_DEFINE_BOOL(banjo_renut_shadow_sort, false, "Banjo/Enhancements",
-                    "OFF by default (2026-10-27 console run: render thread +1.1 ms, GPU +0.65 ms a frame). "
+                    "SLOWER ON THE CONSOLE, OFF by default (2026-10-27 console run: render thread +1.1 ms, GPU +0.65 ms a frame). "
                     "Renut's renderer (2026-10-27): the draws of a recorded command buffer that write depth only (a depth "
                     "target, no colour written, no stencil, a less / less-equal or greater / greater-equal depth test) "
                     "and follow one another into the same targets are replayed sorted by vertex shader, pixel shader and "
@@ -89,10 +102,20 @@ REXCVAR_DEFINE_BOOL(banjo_renut_shadow_sort, false, "Banjo/Enhancements",
 // 2026-10-23 profile, but on the A57 the peeks (PeekNextWord: seven words a texture slot, the header chunks' words, a
 // memo entry hashed per slot) cost more than the misses they hide: the draw's own prefetches (FastDrawLocked,
 // WholeGeometryTry) already reach most of those lines a few hundred cycles ahead.
+// SLOWER ON THE CONSOLE (A/B 29, 2026-10-27 city: render thread +2.15 ms a frame; confirmed by night_gpu5's check,
+// four-core, 30 s halves, the control at +0.3 ms: +2.79 ms, +3.1 / +2.2 / +3.1): off by default.
 REXCVAR_DEFINE_BOOL(banjo_renut_replay_lookahead, false, "Banjo/Enhancements",
-                    "OFF by default (2026-10-27 console run: render thread +2.15 ms a frame with it). Renut's renderer "
+                    "SLOWER ON THE CONSOLE, OFF by default (2026-10-27 console run: render thread +2.15 ms a frame with it). Renut's renderer "
                     "(2026-10-23): while a replayed draw is drawn, the next op's shader lookups, guest headers and texture "
                     "memo entries are prefetched from its recorded chunks. In-run A/B target 29 with this key on")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// banjo-nx (2026-10-28): NO MEASURABLE EFFECT (not slower): night_final's +0.99 ms was one sample inside the noise;
+// night_gpu5's check (four-core, 30 s halves, the control at +0.3 ms) had -0.21 ms (-0.6, 0.0, 0.0). Off (no gain).
+REXCVAR_DEFINE_BOOL(banjo_renut_replay_record_prefetch, false, "Banjo/Enhancements",
+                    "OFF by default: no measurable effect (night_gpu5 console check, target 57: -0.21 ms a frame, within "
+                    "the noise; night_final's +0.99 ms was noise). Renut's renderer (2026-10-28, per-draw night): the replay prefetches the "
+                    "next op's shader and declaration records (at their own guest addresses) from its recorded words. "
+                    "In-run A/B target 57 with this key on")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_replay_stream, true, "Banjo/Enhancements",
                     "Renut's renderer (2026-10-27, the replay stream): recorded ops are 64-byte aligned and a draw's op "
@@ -114,6 +137,18 @@ REXCVAR_DEFINE_BOOL(banjo_renut_first_op_groups, true, "Banjo/Enhancements",
                     "every buffer). A replayed draw reads a group from the image only when its op's set mask holds it "
                     "(the others from the running device), and every such group was copied by an op at or before it. "
                     "Exact. In-run A/B target 51")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_replay_group_pointers, true, "Banjo/Enhancements",
+                    "Renut's renderer (2026-10-28, per-draw night): a replay keeps a pointer to each float constant "
+                    "group's bytes where the op recorded them (the arena), and a draw reads its set groups there, "
+                    "instead of copying every op's groups into the device image (64 bytes a group, the image's lines "
+                    "touched again by the draw). A nested run gets its set groups written into the image first. The "
+                    "same bytes. In-run A/B target 52")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_replay_group_pointers_verify, false, "Banjo/Debug",
+                    "Debug (banjo_renut_replay_group_pointers): the groups are copied into the device image as well, and "
+                    "every read through a group pointer is compared with the image's bytes; the count of reads that "
+                    "differ is in the 10 s \"recording from marks\" line")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_shadow_sort_verify, false, "Banjo/Debug",
                     "Renut's renderer (banjo_renut_shadow_sort): each sorted run's ops are also applied as recorded "
@@ -220,6 +255,11 @@ struct OpCall {
   u32 up_stride = 0, up_vertex_count = 0;
   u32 up_vertices = kNoUp, up_indices = kNoUp;  // arena offsets
   u32 vs_word = 0, ps_word = 0;                 // the device's shader words when recorded (prefetch only)
+  u32 decl_word = 0;  // banjo-nx (2026-10-28): the device's vertex declaration word when recorded (prefetch only)
+  // banjo-nx (2026-10-28, host packets, banjo_renut_host_packets): the op's packet words as a key (the device words a
+  // packet's answers read: kPacketWords), 0 when not made. NewOp keeps it per device as the XOR of each chunk's mixed
+  // hash, so an op hashes only the chunks it copies that hold such words (PacketChunkPart).
+  uint64_t state_key = 0;
 };
 static_assert(sizeof(OpCall) <= 64);
 
@@ -321,6 +361,8 @@ inline void SetOpCall(OpCall &o, const DrawCall &c, const u8 *device) {
     o.vs_word = __builtin_bswap32(v);
     std::memcpy(&v, device + d3d::kDeviceOffsetPixelShader, 4);
     o.ps_word = __builtin_bswap32(v);
+    std::memcpy(&v, device + d3d::kDeviceOffsetVertexDeclaration, 4);
+    o.decl_word = __builtin_bswap32(v);
   }
 }
 
@@ -445,6 +487,10 @@ struct DeviceRecording {
   // The device as its last op saw it, in the device layout; only the chunks
   // (ChunkOffset) are kept.
   u8 shadow[d3d::kDeviceSnapshotSize];
+  // banjo-nx (2026-10-28, host packets): each chunk's mixed hash as the ops last copied it, and their XOR (the state key
+  // of the device's last op). Zero together at the start (the XOR of zeros); a buffer's first op copies every chunk.
+  uint64_t chunk_key[64] = {};
+  uint64_t state_key = 0;
 };
 
 // A RunCommandBuffer's buffer and every buffer it runs in turn, as they were
@@ -989,8 +1035,10 @@ size_t CopyState(HostCommandBuffer &buffer, const u8 *device, uint64_t plain_dir
 
 // Brings 'state', the previous op's device (or anything, before a buffer's
 // first op), to the op's.
+// 'groups' (banjo_renut_replay_group_pointers): the replay's 128 group pointers, set to the op's recorded groups instead
+// of copying them into the image; null: copied, as before.
 void ApplyState(u8 *state, const u8 *from, uint64_t plain_dirty, uint64_t vs_dirty,
-                uint64_t ps_dirty) {
+                uint64_t ps_dirty, const u8 **groups = nullptr) {
   for (uint64_t chunks = plain_dirty; chunks; chunks &= chunks - 1) {
     const u32 i = u32(std::countr_zero(chunks));
     const u32 size = ChunkSize(i);
@@ -1000,6 +1048,19 @@ void ApplyState(u8 *state, const u8 *from, uint64_t plain_dirty, uint64_t vs_dir
     else
       std::memcpy(state + ChunkOffset(i), from, kLastChunkBytes);  // banjo-nx (2026-10-23, batch 6)
     from += size;
+  }
+  if (groups) {
+    const u8 *const groups_from = from;
+    for (const auto [dirty, slot0] : {std::pair{vs_dirty, 0u}, std::pair{ps_dirty, 64u}}) {
+      ForEachGroupRun(dirty, [&](u32 first, u32 count) {
+        for (u32 k = 0; k < count; ++k)
+          groups[slot0 + first + k] = from + k * kConstantGroupBytes;
+        from += count * kConstantGroupBytes;
+      });
+    }
+    if (!g_group_pointers_verify)
+      return;
+    from = groups_from;  // (verify: the image as well, below)
   }
   for (const auto [dirty, base] : {std::pair{vs_dirty, kVertexShaderF}, std::pair{ps_dirty, kPixelShaderF}}) {
     ForEachGroupRun(dirty, [&](u32 first, u32 count) {
@@ -1012,10 +1073,23 @@ void ApplyState(u8 *state, const u8 *from, uint64_t plain_dirty, uint64_t vs_dir
     });
   }
 }
+// banjo-nx (2026-10-28, banjo_renut_replay_group_pointers): the replay's set groups written into its image (before a
+// nested run, which reads the image as its running device).
+void MaterializeGroups(u8 *state, const u8 *const *groups, uint64_t vs_set, uint64_t ps_set) {
+  for (u32 stage = 0; stage < 2; ++stage) {
+    const u32 slot0 = stage ? 64u : 0u, base = stage ? kPixelShaderF : kVertexShaderF;
+    ForEachGroupRun(stage ? ps_set : vs_set, [&](u32 first, u32 count) {
+      for (u32 k = 0; k < count; ++k) {
+        if (const u8 *g = groups[slot0 + first + k])
+          std::memcpy(state + base + (first + k) * kConstantGroupBytes, g, kConstantGroupBytes);
+      }
+    });
+  }
+}
 
 // banjo-nx (2026-10-27, banjo_renut_shadow_sort): one slot of a sorted entry (SortPair) into the device, as ApplyState
 // copies a chunk or a constant group.
-inline void ApplySortPair(u8 *state, const u8 *arena, const SortPair &p) {
+inline void ApplySortPair(u8 *state, const u8 *arena, const SortPair &p, const u8 **groups = nullptr) {
   const u8 *from = arena + p.offset;
   if (p.slot < 64) {
     u8 *to = state + ChunkOffset(p.slot);
@@ -1025,8 +1099,19 @@ inline void ApplySortPair(u8 *state, const u8 *arena, const SortPair &p) {
       std::memcpy(to, from, kChunkBytes);
     return;
   }
-  std::memcpy(state + (p.slot < 128 ? kVertexShaderF : kPixelShaderF) + (p.slot & 63) * kConstantGroupBytes, from,
-              kConstantGroupBytes);
+  u8 *to = state + (p.slot < 128 ? kVertexShaderF : kPixelShaderF) + (p.slot & 63) * kConstantGroupBytes;
+  std::memcpy(to, from, kConstantGroupBytes);
+  if (groups)  // banjo-nx (2026-10-28): the group's bytes are the image's now
+    groups[(p.slot < 128 ? 0u : 64u) + (p.slot & 63)] = to;
+}
+const u8 *g_replay_groups[kMaxRunDepth][128];  // banjo-nx (2026-10-28, banjo_renut_replay_group_pointers)
+}  // namespace
+bool g_group_pointers_verify = false;
+uint64_t g_group_pointer_reads = 0, g_group_pointer_differ = 0;
+namespace {
+inline bool GroupPointersOn() {
+  static const bool on = REXCVAR_GET(banjo_renut_replay_group_pointers);
+  return on && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 52;
 }
 
 // banjo-nx (2026-10-27, banjo_renut_shadow_sort): whether the shaders of a sorted run's draws allow any order (each
@@ -1229,25 +1314,62 @@ inline void BumpOwn(std::atomic<uint64_t> &c, uint64_t n) {
   c.store(c.load(std::memory_order_relaxed) + n, std::memory_order_relaxed);
 }
 
-u32 RecordResources(HostCommandBuffer &buffer, const u8 *device, uint64_t plain_dirty, OpKind kind, u32 touch_slot) {
+// banjo-nx (2026-10-28, per-draw night): RecordResources in two calls around the op's state copy (NewOp): the plan
+// (the guest headers' lines, then the keys, the memo's objects and the tables' lines asked for) before CopyState and
+// RecordExtents, the table lookups and the record after them, so that the table lines' misses overlap the copy (the
+// lookups followed the prefetches at once: the d4 console profile still had them at 1.4 % of the recording threads).
+struct ResourcePlan {
+  ResourceHead head;
   u32 slots = 0;
+  ResourceMemo *memo = nullptr;
+  u32 object_mask = 0, stream_lookups = 0, tex_lookups = 0;
+  GeometryObject *index_object = nullptr;
+  uint64_t index_hash = 0, memo_hits = 0;
+  bool index_lookup = false;
+  // Written where the masks say (no initialisers: 1.5 KB an op).
+  u32 tex_va[d3d::kTextureFetchSlots];
+  u32 vb_words[16][2];
+  GeometryObject *stream_objects[16];
+  u32 stream_keys[16][6];
+  uint64_t stream_hash[16];
+  TextureObject *tex_objects[d3d::kTextureFetchSlots];
+  u32 tex_words[d3d::kTextureFetchSlots][6];
+  uint64_t tex_hash[d3d::kTextureFetchSlots];
+};
+void PlanResources(ResourcePlan &p, const u8 *device, uint64_t plain_dirty, OpKind kind, u32 touch_slot) {
+  u32 &slots = p.slots;
+  ResourceHead &head = p.head;
+  u32 (&tex_va)[d3d::kTextureFetchSlots] = p.tex_va;
+  u32 (&vb_words)[16][2] = p.vb_words;
+  GeometryObject *(&stream_objects)[16] = p.stream_objects;
+  u32 &object_mask = p.object_mask;
+  GeometryObject *&index_object = p.index_object;
+  u32 (&stream_keys)[16][6] = p.stream_keys;
+  uint64_t (&stream_hash)[16] = p.stream_hash;
+  u32 &stream_lookups = p.stream_lookups;
+  uint64_t &index_hash = p.index_hash;
+  bool &index_lookup = p.index_lookup;
+  uint64_t &memo_hits = p.memo_hits;
+  TextureObject *(&tex_objects)[d3d::kTextureFetchSlots] = p.tex_objects;
+  u32 (&tex_words)[d3d::kTextureFetchSlots][6] = p.tex_words;
+  uint64_t (&tex_hash)[d3d::kTextureFetchSlots] = p.tex_hash;
+  u32 &tex_lookups = p.tex_lookups;
   for (uint64_t bits = plain_dirty & kAllChunks; bits; bits &= bits - 1)
     slots |= kTextureSlotsOfChunk[std::countr_zero(bits)];
-  ResourceHead head;
   head.slots = slots;
   const bool draw = kind == OpKind::Draw;
   // banjo-nx (2026-10-28, banjo_renut_record_lookups / A/B 50): the lookups in three steps, each step's misses together
   // (the guest headers' lines, then the tables' lines), and the device's memo first. Off: one lookup after the other,
   // as before.
   const bool batch = LookupTablesOn() && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 50;
-  ResourceMemo *memo = batch && touch_slot - 1 < native::kTouchSlots - 1 ? &g_resource_memos[touch_slot] : nullptr;
+  ResourceMemo *const memo = p.memo =
+      batch && touch_slot - 1 < native::kTouchSlots - 1 ? &g_resource_memos[touch_slot] : nullptr;
   const auto word = [device](u32 offset) {
     u32 v;
     std::memcpy(&v, device + offset, 4);
     return __builtin_bswap32(v);
   };
   // Step 1: the guest headers' addresses (the slots', the index buffer's, the bound stream sources').
-  u32 tex_va[d3d::kTextureFetchSlots];
   const d3d::BaseTexture *tex_header[d3d::kTextureFetchSlots];
   for (u32 bits = slots; bits; bits &= bits - 1) {
     const u32 r = u32(std::countr_zero(bits));
@@ -1278,7 +1400,6 @@ u32 RecordResources(HostCommandBuffer &buffer, const u8 *device, uint64_t plain_
     }
   }
   // Step 2: the headers' words and the keys; the memo's objects; for the others the hash (which fetches the table line).
-  u32 vb_words[16][2];
   if (draw) {
     if (ib) {
       head.ib[0] = u32(ib->resource.Common);
@@ -1298,15 +1419,6 @@ u32 RecordResources(HostCommandBuffer &buffer, const u8 *device, uint64_t plain_
   // FindStreamObject: the stream's fetch words, source, stride byte | stream << 8, the source header's two words).
   // flags bit 1: a word of their mask (and a pad word) and their pointers follow the header words; bit 2: then the
   // index buffer's.
-  GeometryObject *stream_objects[16];
-  u32 object_mask = 0;
-  GeometryObject *index_object = nullptr;
-  u32 stream_keys[16][6];
-  uint64_t stream_hash[16];
-  u32 stream_lookups = 0;
-  uint64_t index_hash = 0;
-  bool index_lookup = false;
-  uint64_t memo_hits = 0;
   if (draw && GeometryObjectsRecorded()) {
     for (u32 bits = head.vb_mask; bits; bits &= bits - 1) {
       const u32 s = u32(std::countr_zero(bits));
@@ -1343,10 +1455,6 @@ u32 RecordResources(HostCommandBuffer &buffer, const u8 *device, uint64_t plain_
       }
     }
   }
-  TextureObject *tex_objects[d3d::kTextureFetchSlots];
-  u32 tex_words[d3d::kTextureFetchSlots][6];
-  uint64_t tex_hash[d3d::kTextureFetchSlots];
-  u32 tex_lookups = 0;
   for (u32 bits = slots; bits; bits &= bits - 1) {
     const u32 r = u32(std::countr_zero(bits));
     tex_objects[r] = nullptr;
@@ -1363,20 +1471,29 @@ u32 RecordResources(HostCommandBuffer &buffer, const u8 *device, uint64_t plain_
       tex_objects[r] = FindTextureObject(tex_va[r], tex_words[r]);
     }
   }
+}
+u32 FinishResources(HostCommandBuffer &buffer, ResourcePlan &p) {
+  const u32 slots = p.slots;
+  ResourceHead &head = p.head;
+  ResourceMemo *const memo = p.memo;
+  u32 &object_mask = p.object_mask;
+  GeometryObject *&index_object = p.index_object;
+  const u32 stream_lookups = p.stream_lookups, tex_lookups = p.tex_lookups;
+  const bool index_lookup = p.index_lookup;
   // Step 3: the tables (their lines asked for in step 2); the memo takes what they gave.
   for (u32 bits = stream_lookups; bits; bits &= bits - 1) {
     const u32 s = u32(std::countr_zero(bits));
-    if (GeometryObject *o = FindStreamObjectAt(stream_hash[s], stream_keys[s])) {
-      stream_objects[s] = o;
+    if (GeometryObject *o = FindStreamObjectAt(p.stream_hash[s], p.stream_keys[s])) {
+      p.stream_objects[s] = o;
       object_mask |= 1u << s;
       if (memo) {
-        std::memcpy(memo->stream[s].key, stream_keys[s], 24);
+        std::memcpy(memo->stream[s].key, p.stream_keys[s], 24);
         memo->stream[s].obj = o;
       }
     }
   }
   if (index_lookup) {
-    index_object = FindIndexObjectAt(index_hash, head.ib);
+    index_object = FindIndexObjectAt(p.index_hash, head.ib);
     if (memo && index_object) {
       std::memcpy(memo->ib, head.ib, 12);
       memo->ib_obj = index_object;
@@ -1384,16 +1501,16 @@ u32 RecordResources(HostCommandBuffer &buffer, const u8 *device, uint64_t plain_
   }
   for (u32 bits = tex_lookups; bits; bits &= bits - 1) {
     const u32 r = u32(std::countr_zero(bits));
-    tex_objects[r] = FindTextureObjectAt(tex_hash[r], tex_va[r], tex_words[r]);
-    if (memo && tex_objects[r]) {
-      memo->tex[r].va = tex_va[r];
-      std::memcpy(memo->tex[r].header, tex_words[r], sizeof(tex_words[r]));
-      memo->tex[r].obj = tex_objects[r];
+    p.tex_objects[r] = FindTextureObjectAt(p.tex_hash[r], p.tex_va[r], p.tex_words[r]);
+    if (memo && p.tex_objects[r]) {
+      memo->tex[r].va = p.tex_va[r];
+      std::memcpy(memo->tex[r].header, p.tex_words[r], sizeof(p.tex_words[r]));
+      memo->tex[r].obj = p.tex_objects[r];
     }
   }
   if (memo) {
-    if (memo_hits)
-      BumpOwn(memo->hits, memo_hits);
+    if (p.memo_hits)
+      BumpOwn(memo->hits, p.memo_hits);
     if (const u32 tables = u32(std::popcount(stream_lookups) + std::popcount(tex_lookups)) + (index_lookup ? 1u : 0u))
       BumpOwn(memo->tables, tables);
   }
@@ -1413,11 +1530,11 @@ u32 RecordResources(HostCommandBuffer &buffer, const u8 *device, uint64_t plain_
   std::memcpy(to, &head, sizeof(head));
   to += sizeof(head);
   for (u32 bits = slots; bits; bits &= bits - 1) {
-    std::memcpy(to, &tex_objects[std::countr_zero(bits)], sizeof(TextureObject *));
+    std::memcpy(to, &p.tex_objects[std::countr_zero(bits)], sizeof(TextureObject *));
     to += sizeof(TextureObject *);
   }
   for (u32 bits = head.vb_mask; bits; bits &= bits - 1) {
-    std::memcpy(to, vb_words[std::countr_zero(bits)], 8);
+    std::memcpy(to, p.vb_words[std::countr_zero(bits)], 8);
     to += 8;
   }
   if (head.flags & 2) {
@@ -1425,13 +1542,18 @@ u32 RecordResources(HostCommandBuffer &buffer, const u8 *device, uint64_t plain_
     std::memcpy(to, mask_words, 8);
     to += 8;
     for (u32 bits = object_mask; bits; bits &= bits - 1) {
-      std::memcpy(to, &stream_objects[std::countr_zero(bits)], sizeof(GeometryObject *));
+      std::memcpy(to, &p.stream_objects[std::countr_zero(bits)], sizeof(GeometryObject *));
       to += sizeof(GeometryObject *);
     }
   }
   if (head.flags & 4)
     std::memcpy(to, &index_object, sizeof(index_object));
   return u32(offset);
+}
+u32 RecordResources(HostCommandBuffer &buffer, const u8 *device, uint64_t plain_dirty, OpKind kind, u32 touch_slot) {
+  ResourcePlan p;
+  PlanResources(p, device, plain_dirty, kind, touch_slot);
+  return FinishResources(buffer, p);
 }
 // banjo-nx (2026-10-28, ARM audit): Replay's stream, for the next op: its objects' lines (its record came an op before).
 // Trimmed after the d4 console profile (the helper 1.2 ms a frame, many prefetches an op): an object the replay holds
@@ -1544,6 +1666,72 @@ DrawSlotExtents g_replay_extents[kMaxRunDepth];
 // records on several threads at once, and the snapshot copy, most of the
 // work, goes into the device's own buffer, which only its recording thread
 // touches until the buffer runs.
+// banjo-nx (2026-10-28, host packets): the state keys are made while packets or their census are on.
+inline bool HostPacketKeysOn() {
+  return REXCVAR_GET(banjo_renut_host_packets) || REXCVAR_GET(banjo_renut_diag_packet_census);
+}
+// banjo-nx (2026-10-28, host packets): a chunk's part of the state key: its content's 64-bit hash (the PMULL CRC-64 the
+// stream and texture checks use) with its index, through a 64-bit finaliser (a bijection, so the XOR of the chunks' parts
+// is not linear in their bytes the way the CRCs alone would be).
+inline uint64_t ChunkKeyPartAt(const u8 *chunk, u32 size, u32 i) {
+  uint64_t h = banjo::renut_gpu::ContentHash64(chunk, size) ^ (uint64_t(i + 1) * 0x9E3779B97F4A7C15ull);
+  h ^= h >> 33;
+  h *= 0xFF51AFD7ED558CCDull;
+  h ^= h >> 33;
+  h *= 0xC4CEB9FE1A85EC53ull;
+  h ^= h >> 33;
+  return h;
+}
+inline uint64_t ChunkKeyPart(const u8 *bytes, u32 i) { return ChunkKeyPartAt(bytes + ChunkOffset(i), ChunkSize(i), i); }
+
+// banjo-nx (2026-10-28, host packets, second form): the key covers only the device words a packet's answers read. The
+// first form keyed the whole state and found the same state again for 5.6 % of the draws (the title screen): words
+// the answers never read (the streams, index buffer and vertex fetch constants, the texture fetch words, private
+// words) changed from frame to frame. The fields are the lean executor's own dependency sets for those answers (and
+// banjo_renut_fast_draw_verify checks them): the shaders and declaration, the targets, the window/values/control
+// packets, the destination packet, the bools, the word at 0x29C0 and the predication. Word by word (a mixed chunk's
+// other words left out), from the field tables.
+constexpr u32 kPacketFields = kFieldShaders | kFieldDecl | kFieldTargets | kFieldViewPackets | kFieldBools |
+                              kFieldDest | kField29C0 | kFieldPredication;
+struct PacketWordTables {
+  uint16_t words[64] = {};  // bit w: word w of the chunk is read
+  uint64_t chunks = 0;      // the chunks with any
+};
+constexpr PacketWordTables MakePacketWordTables() {
+  PacketWordTables t{};
+  for (u32 c = 0; c < kPlainChunks; ++c) {
+    for (u32 w = 0; w < ChunkSize(c) / 4; ++w)
+      if (kPlainFields.word[c][w] & kPacketFields)
+        t.words[c] |= uint16_t(1u << w);
+    if (t.words[c])
+      t.chunks |= uint64_t(1) << c;
+  }
+  return t;
+}
+constexpr PacketWordTables kPacketWords = MakePacketWordTables();
+// A chunk's part of the packet key: its packet words (the others as zeros).
+inline uint64_t PacketChunkPart(const u8 *bytes, u32 i) {
+  const u32 size = ChunkSize(i), mask = kPacketWords.words[i];
+  const u8 *src = bytes + ChunkOffset(i);
+  if (mask == (1u << (size / 4)) - 1u)
+    return ChunkKeyPartAt(src, size, i);
+  alignas(16) u8 kept[kChunkBytes] = {};
+  for (u32 m = mask; m; m &= m - 1) {
+    const u32 w = u32(std::countr_zero(m));
+    std::memcpy(kept + 4 * w, src + 4 * w, 4);
+  }
+  return ChunkKeyPartAt(kept, size, i);
+}
+// The key a draw's packet is found by: the op's state key with what of the call the derived state reads (the
+// primitive, indexed or not, tessellation). Never 0 (0: no key).
+inline uint64_t PacketKeyOf(const OpCall &c) {
+  if (!c.state_key)
+    return 0;
+  const uint64_t k = c.state_key ^ ((uint64_t(c.primitive) | uint64_t(c.indexed) << 8 | uint64_t(c.tessellation) << 9) *
+                                    0xD6E8FEB86659FD93ull);
+  return k ? k : 1;
+}
+
 Op *NewOp(u32 device_va, OpKind kind, HostCommandBuffer **out_buffer) {
   const u32 command_buffer = RecordingBuffer(device_va);
   auto *device = GuestPtr<d3d::Device>(device_va);
@@ -1611,6 +1799,12 @@ Op *NewOp(u32 device_va, OpKind kind, HostCommandBuffer **out_buffer) {
                           banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 21;
   set.primed = tracked;
   uint64_t changed;
+  // banjo-nx (2026-10-28, per-draw night): the marked chunks' shadow lines asked for together (the device's lines the
+  // game has just written; the shadow's were the compare's misses, 1.6 % of the recording threads in the d4 profile).
+  if (from_marks) {
+    for (uint64_t bits = marked & kAllChunks; bits; bits &= bits - 1)
+      __builtin_prefetch(set.shadow + ChunkOffset(u32(std::countr_zero(bits))));
+  }
   // banjo-nx (2026-10-26, Unleashed-style step 1): the mixed chunks' changed words, before the shadow takes them.
   u32 fields = MixedChunkFields(bytes, set.shadow, from_marks ? marked & kAllChunks : kAllChunks);
   if (from_marks) {
@@ -1655,18 +1849,36 @@ Op *NewOp(u32 device_va, OpKind kind, HostCommandBuffer **out_buffer) {
     FlushTagCounts(counts);
   op.plain_dirty = first ? kAllChunks : changed;
   op.fields = first ? kFieldsAll : fields | WholeChunkFields(changed & ~kPlainFields.mixed);
+  // banjo-nx (2026-10-28, host packets): the packet key over what this op copies (CopyState below takes the same chunks
+  // from the same bytes), so it is the key of the state the replay rebuilds for this op; only the packet words
+  // (kPacketWords: the chunks without any are not hashed).
+  static const bool state_keys = HostPacketKeysOn();
+  if (state_keys) {
+    for (uint64_t bits = op.plain_dirty & kPacketWords.chunks; bits; bits &= bits - 1) {
+      const u32 i = u32(std::countr_zero(bits));
+      const uint64_t part = PacketChunkPart(bytes, i);
+      set.state_key ^= set.chunk_key[i] ^ part;
+      set.chunk_key[i] = part;
+    }
+    op.call.state_key = set.state_key ? set.state_key : 1;
+  }
   // banjo-nx (2026-10-28, banjo_renut_first_op_groups / A/B 51): the first op's groups, those set so far (see the key).
   static const bool first_groups_key = REXCVAR_GET(banjo_renut_first_op_groups);
   const bool first_groups = first && first_groups_key && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 51;
   op.vs_dirty = first ? (first_groups ? set.vs : ~uint64_t(0)) : vs_dirty;
   op.ps_dirty = first ? (first_groups ? set.ps : ~uint64_t(0)) : ps_dirty;
+  // banjo-nx (2026-10-28, per-draw night): the resources planned first (their table lines in flight over the copy).
+  static const bool resource_objects = ResourceObjectsOn();
+  ResourcePlan plan;
+  if (resource_objects)
+    PlanResources(plan, bytes, op.plain_dirty, kind, touch_slot);
   op.state = CopyState(buffer, bytes, op.plain_dirty, op.vs_dirty, op.ps_dirty);
   // banjo-nx (2026-10-27): the changed texture slots' extents (banjo_renut_record_extents).
   if (RecordExtentsOn())
     op.extents = RecordExtents(buffer, bytes, op.plain_dirty, touch_slot);
   // banjo-nx (2026-10-27, Phase A): the op's resources (banjo_renut_resource_objects).
-  if (ResourceObjectsOn())
-    op.resources = RecordResources(buffer, bytes, op.plain_dirty, kind, touch_slot);
+  if (resource_objects)
+    op.resources = FinishResources(buffer, plan);
   *out_buffer = &buffer;
   return &op;
 }
@@ -1985,6 +2197,125 @@ void CensusRecording(const HostCommandBuffer &buffer, u32 command_buffer_va) {
   l.constants = hc;
 }
 
+// banjo-nx (2026-10-28, the host packets census, banjo_renut_diag_packet_census): how many replayed draws a cache of
+// derived draw state keyed by the draw's whole device state would answer: the fetch constants and the tail (every byte
+// a draw reads but the float constants, which are pushed at every draw anyway), with the primitive and whether it is
+// indexed. "Derive" draws are those whose chain fields since the draw before are not empty: the lean executor
+// re-derives something for them today, and only those gain from a packet. Diagnostics only (3 KB hashed a draw).
+struct PacketCensus {
+  struct Slot {
+    uint64_t key = 0;
+  };
+  static constexpr u32 kBits = 13;  // the table a packet cache could afford: 8,192 entries, direct-mapped
+  Slot table[1u << kBits];
+  std::unordered_map<uint64_t, uint64_t> seen;  // key -> the frame it was last drawn in (unbounded)
+  uint64_t draws = 0, derive = 0, hit = 0, derive_hit = 0, seen_recent = 0, derive_seen_recent = 0;
+  uint64_t derive_shaders = 0, derive_shaders_hit = 0, derive_textures = 0, derive_textures_hit = 0;
+  uint64_t derive_geometry = 0, derive_geometry_hit = 0, keys_new = 0;
+  // The recording's state keys (PacketKeyOf) against the whole hash: one key with two states would be a wrong key (a
+  // packet answering another state); one state with two keys only a key more precise than it needs to be.
+  std::unordered_map<uint64_t, uint64_t> key_state, state_key;
+  uint64_t keyed = 0, unkeyed = 0, key_two_states = 0, state_two_keys = 0;
+  // banjo-nx (2026-10-28, second census): which field makes a draw's state new from frame to frame. For each of the 18
+  // fields, a key without its chunks and a key of its chunks alone, each looked up in a table of the frames keys were
+  // last drawn in (direct-mapped, approximate): "recent" = drawn this frame or the one before.
+  static constexpr u32 kFieldCount = 18, kStampBits = 16;
+  struct Stamp {
+    uint64_t key = 0, frame = 0;
+  };
+  std::vector<Stamp> without_stamps = std::vector<Stamp>(size_t(kFieldCount) << kStampBits);
+  std::vector<Stamp> alone_stamps = std::vector<Stamp>(size_t(kFieldCount) << kStampBits);
+  uint64_t without_recent[kFieldCount] = {}, alone_recent[kFieldCount] = {};
+};
+inline bool StampRecent(std::vector<PacketCensus::Stamp> &t, u32 field, uint64_t key, uint64_t frame) {
+  PacketCensus::Stamp &s =
+      t[(size_t(field) << PacketCensus::kStampBits) | size_t((key * 0xFF51AFD7ED558CCDull) >> (64 - PacketCensus::kStampBits))];
+  const bool recent = s.key == key && s.frame + 1 >= frame;
+  s.key = key;
+  s.frame = frame;
+  return recent;
+}
+PacketCensus *g_packet_census = nullptr;
+
+void CensusPacket(const u8 *state, const OpCall &call, u32 fields) {
+  if (!g_packet_census)
+    g_packet_census = new PacketCensus();
+  PacketCensus &c = *g_packet_census;
+  const uint64_t frame = TextureFrameLocked();
+  uint64_t key = banjo::renut_gpu::ContentHash64(state + kFetchBegin, kFetchBytes);
+  key = (key ^ banjo::renut_gpu::ContentHash64(state + kTailBegin, kTailBytes)) * 0x9E3779B97F4A7C15ull;
+  key ^= (uint64_t(call.primitive) | uint64_t(call.indexed) << 8 | uint64_t(call.tessellation) << 9) *
+         0xC2B2AE3D27D4EB4Full;
+  {
+    // banjo-nx (2026-10-28, second census): the keys without each field, and of each field alone.
+    uint64_t parts[kPlainChunks];
+    uint64_t whole = 0;
+    for (u32 i = 0; i < kPlainChunks; ++i) {
+      parts[i] = ChunkKeyPart(state, i);
+      whole ^= parts[i];
+    }
+    uint64_t field_part[PacketCensus::kFieldCount] = {};
+    for (u32 i = 0; i < kPlainChunks; ++i)
+      for (u32 fb = kPlainFields.chunk[i]; fb; fb &= fb - 1)
+        if (u32(std::countr_zero(fb)) < PacketCensus::kFieldCount)
+          field_part[std::countr_zero(fb)] ^= parts[i];
+    const uint64_t call_bits =
+        (uint64_t(call.primitive) | uint64_t(call.indexed) << 8 | uint64_t(call.tessellation) << 9) * 0xD6E8FEB86659FD93ull;
+    for (u32 fi = 0; fi < PacketCensus::kFieldCount; ++fi) {
+      c.without_recent[fi] += StampRecent(c.without_stamps, fi, whole ^ field_part[fi] ^ call_bits, frame);
+      c.alone_recent[fi] += StampRecent(c.alone_stamps, fi, field_part[fi] ^ (uint64_t(fi + 1) * 0x9E3779B97F4A7C15ull),
+                                        frame);
+    }
+  }
+  if (const uint64_t k = PacketKeyOf(call)) {
+    ++c.keyed;
+    // banjo-nx (2026-10-28, second form): the packet words of the rebuilt state hashed here must give the recorded key
+    // (key_two_states: they did not); state_two_keys counts the whole states that share a key (expected now).
+    uint64_t narrow = 0;
+    for (uint64_t bits = kPacketWords.chunks; bits; bits &= bits - 1)
+      narrow ^= PacketChunkPart(state, u32(std::countr_zero(bits)));
+    OpCall expect = call;
+    expect.state_key = narrow ? narrow : 1;
+    c.key_two_states += PacketKeyOf(expect) != k;
+    auto [ks, ks_new] = c.key_state.try_emplace(k, key);
+    c.state_two_keys += !ks_new && ks->second != key;
+    key = k;  // the table below as a packet cache would see it
+  } else {
+    ++c.unkeyed;
+  }
+  constexpr u32 kDerive = kFieldShaders | kFieldDecl | kFieldFetch | kFieldTexWords | kFieldVertexFetch | kFieldBools |
+                          kFieldViewPackets | kField29C0 | kFieldTargets | kFieldDest | kFieldPredication |
+                          kFieldStreams | kFieldIndex;
+  const bool derive = (fields & kDerive) != 0;
+  PacketCensus::Slot &slot = c.table[(key * 0xFF51AFD7ED558CCDull) >> (64 - PacketCensus::kBits)];
+  const bool hit = slot.key == key;
+  slot.key = key;
+  auto [it, inserted] = c.seen.try_emplace(key, frame);
+  const bool recent = !inserted && it->second + 1 >= frame;  // drawn this frame or the one before
+  it->second = frame;
+  ++c.draws;
+  c.keys_new += inserted;
+  c.hit += hit;
+  c.seen_recent += recent;
+  if (derive) {
+    ++c.derive;
+    c.derive_hit += hit;
+    c.derive_seen_recent += recent;
+  }
+  if (fields & (kFieldShaders | kFieldDecl)) {
+    ++c.derive_shaders;
+    c.derive_shaders_hit += hit;
+  }
+  if (fields & (kFieldFetch | kFieldTexWords)) {
+    ++c.derive_textures;
+    c.derive_textures_hit += hit;
+  }
+  if (fields & (kFieldStreams | kFieldIndex | kFieldVertexFetch)) {
+    ++c.derive_geometry;
+    c.derive_geometry_hit += hit;
+  }
+}
+
 // On the render thread. 'predication': the mask the buffer runs under
 // (SetPredication before RunCommandBuffer), which the draws' own masks narrow
 // (see SetReplayPredicationLocked).
@@ -2030,7 +2361,17 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
   resources.index_obj = nullptr;
   const bool use_resources = ResourceObjectsOn() && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 45;
   const bool stream = ReplayStreamOn();  // banjo-nx (2026-10-27, the replay stream)
+  // banjo-nx (2026-10-28, banjo_renut_replay_group_pointers / A/B 52): the depth's group pointers (each op sets those it
+  // writes before a draw reads them: a set group was written by an op at or before it), or null (copied into the image).
+  const u8 **groups = GroupPointersOn() ? g_replay_groups[depth] : nullptr;
+  static const bool group_verify = REXCVAR_GET(banjo_renut_replay_group_pointers_verify);
+  g_group_pointers_verify = groups && group_verify;
   const bool stream_shaders = stream && ReplayStreamShadersOn();
+  // banjo-nx (2026-10-28, per-draw night): the A/B half once a replay (targets 55-57: one look-ahead stage off each).
+  const int prefetch_ab = banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed);
+  // banjo-nx (2026-10-28): the record prefetch below is OFF by default: it HURT on the console (A/B 57, night_final:
+  // render thread +0.99 ms a frame with it on in the static city); banjo_renut_replay_record_prefetch puts it back.
+  static const bool record_prefetch = REXCVAR_GET(banjo_renut_replay_record_prefetch);
   static const bool kinds = DrawKindsCensusOn();  // banjo-nx (2026-10-27): the draw-kind census's times
   const Op *merge_prev = nullptr;  // banjo-nx (2026-10-27): the draw op before, with nothing between (the merge census)
   // banjo-nx (2026-10-27, banjo_renut_shadow_sort): the buffer's sorted runs (PlanSortedRuns), each taken at its first op
@@ -2067,7 +2408,7 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
             const uint64_t entry_start = kinds ? RenderTicks() : 0;
             const SortPair *pairs = buffer.sort_pairs.data() + e.first_pair;
             for (u32 p = 0; p < e.pair_count; ++p)
-              ApplySortPair(state, arena, pairs[p]);
+              ApplySortPair(state, arena, pairs[p], groups);
             hint_plain |= e.plain;
             hint_fields |= e.fields;
             vs_dirty |= e.vs_dirty;
@@ -2102,7 +2443,7 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
                 PrefetchShaderLocked(nop.sort_ps, RecordKind::PixelShader);
               PrefetchSortedHeaders(arena, buffer.sort_pairs.data() + ne.first_pair, ne.pair_count);
             }
-            const ReplayConstants constants{running, sop.vs_set, sop.ps_set, &vs_dirty, &ps_dirty, replay};
+            const ReplayConstants constants{running, sop.vs_set, sop.ps_set, &vs_dirty, &ps_dirty, replay, groups};
             ++replayed_draws;
             if (hints) {
               const uint64_t seq = NextChainSeq();
@@ -2172,25 +2513,44 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
       if (op_index + 1 < op_count) {
         const Op &next = ops[op_index + 1];
         const u8 *arena = buffer.arena.data();
-        if (next.state != kNone) {
+        if (next.state != kNone && prefetch_ab != 55) {
           const u32 bytes = u32(std::popcount(next.plain_dirty)) * kChunkBytes +
                             u32(std::popcount(next.vs_dirty) + std::popcount(next.ps_dirty)) * kConstantGroupBytes;
           const u8 *s = arena + next.state;
           for (u32 at = 0; at < std::min(bytes, kStreamStateBytes); at += 64)
             __builtin_prefetch(s + at);
         }
-        if (next.resources != kNoResources)
+        if (next.resources != kNoResources && prefetch_ab != 56)
           PrefetchResourceObjects(arena + next.resources, resources);
+        // banjo-nx (2026-10-28, per-draw night): its shader records' lines, from its words (resources.h), and with a
+        // declaration of the device's its record's (a record at its own guest address too: the hash, stream order,
+        // used mask and first streams the geometry reads first, a miss at most declaration changes in the d4 profile).
+        // (OFF by default: see banjo_renut_replay_record_prefetch; it cost the console's render thread ~1 ms a frame.)
+        if (record_prefetch && next.kind == OpKind::Draw && (next.fields & kFieldShaders) && prefetch_ab != 57) {
+          PrefetchShaderRecordAt(next.call.vs_word);
+          PrefetchShaderRecordAt(next.call.ps_word);
+        }
+        if (record_prefetch && next.kind == OpKind::Draw && (next.fields & (kFieldShaders | kFieldDecl)) &&
+            next.call.decl_word && prefetch_ab != 57)
+          PrefetchShaderRecordAt(next.call.decl_word);  // (the same three lines from a record's address)
         if (next.extents != kNoExtents)
           __builtin_prefetch(arena + next.extents);
+        if (next.kind == OpKind::Draw && next.call.state_key)
+          PrefetchHostPacket(PacketKeyOf(next.call));  // banjo-nx (2026-10-28, host packets)
         if (stream_shaders && next.kind == OpKind::Draw && (next.fields & kFieldShaders)) {
           PrefetchShaderRecordLocked(next.call.vs_word, RecordKind::VertexShader);
           PrefetchShaderRecordLocked(next.call.ps_word, RecordKind::PixelShader);
         }
       }
     }
+    // banjo-nx (2026-10-28, per-draw night): this op's records came an op ago: what its shader change reads behind
+    // them (the cache entries, the bound declaration), while its state is applied.
+    if (stream && op.kind == OpKind::Draw && (op.fields & kFieldShaders)) {
+      PrefetchShaderBehind(op.call.vs_word);
+      PrefetchShaderBehind(op.call.ps_word);
+    }
     const uint64_t op_start = kinds ? RenderTicks() : 0;
-    ApplyState(state, buffer.arena.data() + op.state, op.plain_dirty, op.vs_dirty, op.ps_dirty);
+    ApplyState(state, buffer.arena.data() + op.state, op.plain_dirty, op.vs_dirty, op.ps_dirty, groups);
     if (op.extents != kNoExtents)
       ApplyExtents(extents, buffer.arena.data() + op.extents);
     else if (op.plain_dirty & ((uint64_t(1) << kFetchChunks) - 1))
@@ -2274,7 +2634,7 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
         merge_prev = &op;
       }
       // The draw reads its inherited constants from the running device.
-      const ReplayConstants constants{running, op.vs_set, op.ps_set, &vs_dirty, &ps_dirty, replay};
+      const ReplayConstants constants{running, op.vs_set, op.ps_set, &vs_dirty, &ps_dirty, replay, groups};
       ++replayed_draws;  // banjo-nx (2026-10-23): counted once for the buffer (CountDrawSource), not at every draw
       if (hints) {
         const uint64_t seq = NextChainSeq();
@@ -2289,6 +2649,7 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
         hint_last = seq;
         hint_plain = 0;
         hint_fields = 0;
+        g_chain_hint.packet_key = PacketKeyOf(op.call);  // banjo-nx (2026-10-28, host packets)
       }
       // banjo-nx (2026-10-23, render-thread round): the next draw's shader lookups' lines, fetched while this draw runs
       // (the first thing a draw reads; its own prefetches come after them), and the start of its state in the arena.
@@ -2315,6 +2676,11 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
       }
       g_draw_slot_extents = extents.mask ? &extents : nullptr;  // banjo-nx (2026-10-27)
       g_draw_resources = use_resources ? &resources : nullptr;  // (Phase A)
+      {
+        static const bool packet_census = REXCVAR_GET(banjo_renut_diag_packet_census);  // banjo-nx (2026-10-28)
+        if (packet_census) [[unlikely]]
+          CensusPacket(state, op.call, hints ? g_chain_hint.fields : kFieldsAll);
+      }
       DrawStateLocked(state, call, &constants);
       g_draw_slot_extents = nullptr;
       g_draw_resources = nullptr;
@@ -2340,6 +2706,8 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
       // The nested buffer runs on this op's state: complete its constants.
       // Idempotent: the inherited groups are rewritten on every run.
       merge_prev = nullptr;
+      if (groups)  // banjo-nx (2026-10-28): the image holds this replay's set groups for the nested one
+        MaterializeGroups(state, groups, op.vs_set, op.ps_set);
       MergeInherited(state, running, op.vs_set, kVertexShaderF);
       MergeInherited(state, running, op.ps_set, kPixelShaderF);
       Replay(state, buffers, op.command_buffer, depth + 1, predication & Predication(state));
@@ -2408,6 +2776,40 @@ void BeginRecording(u32 device_va, u32 command_buffer_va) {
 // smallest) or greater / greater-equal test (the largest), or not written at all; no Draw*UP data, tessellation or
 // point sprites. Its pixel shader may discard (a discarded fragment writes nothing, the others still keep the
 // nearest); exports, skinning once and the fur family are the replay's test (SortableShadersLocked).
+// banjo-nx (2026-10-28, the console's OOM): see command_buffers.h.
+void ReleaseSpareBuffersNow() {
+  std::vector<std::unique_ptr<HostCommandBuffer>> spare;
+  {
+    std::lock_guard lock(g_free_mutex);
+    spare.swap(g_free_buffers);
+    g_free_bytes = 0;
+  }
+}
+
+// banjo-nx (2026-10-28, the heap): see command_buffers.h.
+void ReleaseSpareBuffersWhenHeapShort() {
+#if defined(__SWITCH__)
+  static int64_t next_ms = 0;
+  const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch())
+                          .count();
+  if (now < next_ms)
+    return;
+  next_ms = now + 5000;
+  const char *top = static_cast<const char *>(sbrk(0));
+  const uint64_t room = (top && fake_heap_end > top) ? uint64_t(fake_heap_end - top) : 0;
+  if (room >= (uint64_t(256) << 20))
+    return;
+  std::vector<std::unique_ptr<HostCommandBuffer>> spare;
+  {
+    std::lock_guard lock(g_free_mutex);
+    spare.swap(g_free_buffers);
+    g_free_bytes = 0;
+  }
+  // (freed here, outside the lock)
+#endif
+}
+
 namespace {
 // banjo-nx (2026-10-27, banjo_renut_shadow_sort): each shader object's content (a 31-bit digest of its hash) and whether
 // its draws may be reordered (ShaderSortableByHash), published where the object is made (hooks/shader.cpp, on the
@@ -2598,6 +3000,34 @@ void RecordResolve(u32 device_va, u32 flags, const ClearRect *source_rect, u32 d
 }
 
 // banjo-nx (2026-10-26, banjo_renut_diag_fast_census): the 10 s line of CensusRecording.
+// banjo-nx (2026-10-28, banjo_renut_diag_packet_census): the counts since the start.
+std::string PacketCensusReport() {
+  if (!g_packet_census || !g_packet_census->draws)
+    return {};
+  const PacketCensus &c = *g_packet_census;
+  const auto pct = [](uint64_t a, uint64_t b) { return b ? 100.0 * double(a) / double(b) : 0.0; };
+  static constexpr const char *kNames[PacketCensus::kFieldCount] = {
+      "fetch", "bools", "dest", "view packets", "misc", "29C0", "unread", "private", "decl",
+      "tail", "index", "targets", "streams", "tex words", "scissor", "shaders", "predication", "vertex fetch"};
+  std::string fields = "; drawn recently without the field / the field alone:";
+  for (u32 fi = 0; fi < PacketCensus::kFieldCount; ++fi)
+    fields += fmt::format(" {} {:.0f}/{:.0f} %", kNames[fi], pct(c.without_recent[fi], c.draws),
+                          pct(c.alone_recent[fi], c.draws));
+  return fmt::format("host packets census (banjo_renut_diag_packet_census): {} replayed draws, {} distinct states "
+                     "({:.1f} % new); a state drawn this frame or the one before {:.1f} %, in an 8,192-entry table {:.1f} "
+                     "%; the {} draws that re-derive something today ({:.1f} %): {:.1f} % drawn recently, {:.1f} % in the "
+                     "table; shaders or declaration changed {} ({:.1f} % in the table), textures {} ({:.1f} %), "
+                     "geometry {} ({:.1f} %); packet keys: {} keyed, {} not; a recorded key not the state's own {} (must "
+                     "be 0), draws whose key another whole state had {}",
+                     c.draws, c.seen.size(), pct(c.keys_new, c.draws), pct(c.seen_recent, c.draws), pct(c.hit, c.draws),
+                     c.derive, pct(c.derive, c.draws), pct(c.derive_seen_recent, c.derive), pct(c.derive_hit, c.derive),
+                     c.derive_shaders, pct(c.derive_shaders_hit, c.derive_shaders), c.derive_textures,
+                     pct(c.derive_textures_hit, c.derive_textures), c.derive_geometry,
+                     pct(c.derive_geometry_hit, c.derive_geometry), c.keyed, c.unkeyed, c.key_two_states,
+                     c.state_two_keys) +
+         fields;
+}
+
 std::string RepeatCensusReport() {
   RepeatCensus &c = g_repeat_census;
   if (!c.recordings)
@@ -2999,7 +3429,11 @@ std::string TagsReport() {
                          ? fmt::format("; object lookups (banjo_renut_record_lookups): {} from the devices' memos, {} "
                                        "from the tables ({:.1f} % memo)",
                                        memo_hits, tables, 100.0 * double(memo_hits) / double(memo_hits + tables))
-                         : std::string());
+                         : std::string()) +
+         (g_group_pointer_reads
+              ? fmt::format("; group pointers verify (banjo_renut_replay_group_pointers_verify): {} reads, {} differ",
+                            std::exchange(g_group_pointer_reads, 0), std::exchange(g_group_pointer_differ, 0))
+              : std::string());
 }
 
 CommandBufferMemory CommandBufferMemoryUsage() {

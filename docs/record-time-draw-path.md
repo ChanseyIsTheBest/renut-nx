@@ -102,7 +102,8 @@ shader entries, the guest texture headers): the old path's prefetches had no cou
   fetches the shader entries when the shaders change, the texture headers and memo entries as it converts the fetch
   constants (or the kept slots' headers before their compare), the pipeline cache's likely entry; the memexport
   buffer's address asked only when the buffer changes; the per-shader profile label made only when its inputs change.
-- Round 3 (lookahead): the replay loop fetches the next draw's texture memo entries (the slots this draw bound, from the
+- Round 3 (lookahead; OFF since 2026-10-27 with `banjo_renut_replay_lookahead`, SLOWER ON THE CONSOLE: +2.15 ms, and
+  +2.79 ms in night_gpu5's 30 s check): the replay loop fetches the next draw's texture memo entries (the slots this draw bound, from the
   next op's texture words and fetch constants: PrefetchNextTextures); DrawNeedsExportFlush's texture answers kept by the
   fetch words (512 entries) instead of by the slot (the slot's answer was another texture's at nearly every draw).
 
@@ -238,6 +239,8 @@ path cannot skip them; the night's changes cut what is left (all exact, each wit
 - kFieldVertexFetch (0x6F0-0x77F) apart from kFieldFetch: the vertex fetch constants of another mesh no longer make a
   draw take its textures again. (Vertex fetch indices 64-79 live in 0x680-0x6EF: the export and fetch tests read both.)
 - Literal residency (A/B 34): about 1,000 literal pushes not made per 10 s; push-constants verify 0 wrong registers.
+  night_gpu4's two 15 s samples (+2.4 / +1.7 ms) were noise: the 30 s check had -0.34 ms. On
+  (`banjo_renut_literals_resident`).
 - Fetch copies made: 85-142 MB per 10 s on the title (FlushVertexFillsLocked's memcpy); A/B 36 keeps the draw before's
   fetch data when nothing it reads changed.
 - Compiler: Latch() and its 36 accessors, GuestVirtualBase/GuestPhysicalBase and TextureFetch::FromGuest always inline;
@@ -294,7 +297,8 @@ path cannot skip them; the night's changes cut what is left (all exact, each wit
   GetHostShader at each shader change (HostShaderOf reads the built host shader inline), and memcmp for 16 and 32
   bytes (the bound fetch entries at every draw, SetShared's float4 / u32[4] / bools, the render state intern table, the
   blend constant): SameBytes now (moved ahead of SetShared).
-- The replay's texture look-ahead skips the slots whose texture word and fetch constant the next op leaves as they are
+- The replay's texture look-ahead (OFF: part of `banjo_renut_replay_lookahead`, SLOWER ON THE CONSOLE) skips the slots
+  whose texture word and fetch constant the next op leaves as they are
   (seven words peeked and a memo entry hashed for each before; this draw's own lookup brings that entry in).
 - A/B 39 (banjo_deko3d_texture_skip): plume's bindTextures read every binding's texture and sampler words from the shared
   constants and compared the handles at every colour draw. Each pipeline now has the 64-byte lines its bindings' words
@@ -414,17 +418,17 @@ In-run A/B (on minus off; negative: the item saves):
 | A/B | item | periods | render on / off | render | GPU |
 |---|---|---|---|---|---|
 | 41 | shader checks by contents | 1 | 56.34 / 56.71 | -0.37 ms (-0.7 %) | -0.13 |
-| 40 | shadow sort | 2 | 56.72 / 55.59 | +1.13 ms (+2.0 %) | +0.65 |
+| 40 | shadow sort (**SLOWER ON THE CONSOLE**, off) | 2 | 56.72 / 55.59 | +1.13 ms (+2.0 %) | +0.65 |
 | 39 | texture-bind skip | 2 | 56.00 / 56.34 | -0.33 ms (-0.6 %) | -0.05 |
 | 38 | index copies bound by chunk | 2 | 56.48 / 57.06 | -0.57 ms (-1.0 %) | -0.08 |
 | 37 | kept stream sources | 2 | 56.30 / 56.26 | +0.04 ms | -0.05 |
 | 36 | kept fetch data | 2 | 56.54 / 56.98 | -0.44 ms (-0.8 %) | -0.05 |
 | 35 | texture epochs by page / address | 2 | 56.31 / 56.69 | -0.39 ms (-0.7 %) | -0.11 |
-| 34 | resident literals | 2 | 56.41 / 56.84 | -0.43 ms (-0.8 %) | -0.13 |
+| 34 | resident literals (night_gpu4's +2.4 / +1.7 ms were noise; the 30 s check: -0.34 ms, on) | 2 | 56.41 / 56.84 | -0.43 ms (-0.8 %) | -0.13 |
 | 32 | texture memo refresh | 2 | 56.30 / 57.24 | -0.93 ms (-1.6 %) | -0.01 |
 | 31 | no texture / pixel work without a pixel shader | 2 | 56.97 / 56.99 | -0.02 ms | +0.12 |
 | 30 | base-vertex draws | 1 | 56.34 / 56.29 | +0.05 ms | +0.11 |
-| 29 | the replay's look-ahead prefetch | 1 | 55.88 / 53.73 | +2.15 ms (+4.0 %) | -0.12 |
+| 29 | the replay's look-ahead prefetch (**SLOWER ON THE CONSOLE**, off; the 30 s check: +2.79 ms) | 1 | 55.88 / 53.73 | +2.15 ms (+4.0 %) | -0.12 |
 | 28 | render-state numbers by content | 1 | 55.78 / 57.91 | -2.13 ms (-3.7 %) | -0.02 |
 | 27 | setters' tags kept apart | 1 | 56.07 / 56.76 | -0.69 ms (-1.2 %) | -0.10 |
 | 26 | setters mark only changed values | 1 | 56.07 / 56.16 | -0.09 ms | -0.21 |
@@ -595,6 +599,9 @@ is the switch if a console ever shows it.
   night packages (39 ... 26) rotated over 31-26 only; 32-39 were dropped without a word. Raised to 64 (2026-10-27,
   found when A/B 40 gave no line). The single target (banjo_renut_ab_target) had .range(0, 19): every target from 20
   on was refused, so with those NROs 32-39 could not be measured at all. Now 0-63.
+- The same trap again (2026-10-28): target 64 (banjo_deko3d_depth_handover_readonly) was dropped from the night_gpu1-3
+  packages' renut_ab.toml lists at the 64 limit, silently. The limit is 128 now and a target past it is logged. When a
+  new A/B target number is taken, check AbTargets' limit, Stats::by_target and banjo_renut_ab_target's range.
 - A patch script that replaces an expression everywhere in a function also replaces it in the declaration it just
   added (`const int ab = ab;`, b9-b11). GCC compiles that silently without optimisation-time warnings enabled; grep for
   `T x = x;` before building (2026-10-27).

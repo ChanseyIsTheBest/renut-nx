@@ -36,6 +36,7 @@
 #include "renut_engine/gpu/backend/video_internal.h"
 #include "renut_engine/gpu/banjo_renut_tuning.h"
 #include "renut_engine/gpu/banjo_renut_record.h"  // banjo-nx (package 28b): banjo_renut_record_worker
+#include "renut_engine/gpu/render/surfaces.h"  // banjo-nx (2026-10-28): NoteGpuFrameForDynamicResolution
 #include <rex/frame_latency.h>  // banjo-nx (2026-10-20): the latency probe's "input -> GPU done"
 #if defined(PLUME_DEKO3D)
 #include <plume_deko3d.h>  // banjo-nx (2026-10-20, banjo_deko3d_latency_trim): fence copies
@@ -604,6 +605,7 @@ void CollectGpuTime(VideoState &s, uint32_t slot) {
       total += ns[2 * i + 1] - ns[2 * i];
   }
   frame_stats::OnGpuFrame(double(total) / 1e6);
+  NoteGpuFrameForDynamicResolution(double(total) / 1e6);  // banjo-nx (2026-10-28, GPU block)
 }
 
 } // namespace

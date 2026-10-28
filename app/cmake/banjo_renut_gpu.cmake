@@ -112,6 +112,17 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/guest/command_buffers.cpp"
         TARGET_DIRECTORY banjo_renut_gpu APPEND PROPERTY COMPILE_OPTIONS "-fno-threadsafe-statics")
 endif()
+# banjo-nx (2026-10-28): BANJO_SWITCH_RENDERER_LINES also gives Renut's hot render-thread files line tables (-g1), so a
+# console profile's samples name source lines (rt_breakdown.py). night_gpu4's ELF had none for them (every sample ":?").
+# Debug info only: the generated code is the same.
+if(REXGLUE_PLATFORM_SWITCH AND BANJO_SWITCH_RENDERER_LINES)
+    set_property(SOURCE
+        "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/render/draw.cpp"
+        "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/render/textures.cpp"
+        "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/render/surfaces.cpp"
+        "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/guest/command_buffers.cpp"
+        TARGET_DIRECTORY banjo_renut_gpu APPEND PROPERTY COMPILE_OPTIONS "-g1")
+endif()
 # banjo-nx (2026-10-20): a Switch build without the Vulkan driver (REXGLUE_SWITCH_NVK OFF) always boots Renut on
 # deko3d, the one renderer that does not need it (banjo_renut_select.cpp, backend.cpp ResolveBackend).
 if(REXGLUE_PLATFORM_SWITCH AND NOT REXGLUE_SWITCH_NVK)

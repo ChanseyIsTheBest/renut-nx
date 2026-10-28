@@ -789,6 +789,27 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
       PrintAddr(f, lr_hist[k].addr);
       std::fputc('\n', f);
     }
+    // banjo-nx (2026-10-28): who calls the C library's copies (a leaf keeps its caller in lr): the samples whose pc is
+    // in memcpy, memmove or memset (their first 0x800 bytes), by lr, as "lrleaf image+0x... xN" lines.
+    if (active) {
+      static const u64 kLeaf[3] = {reinterpret_cast<u64>(&std::memcpy), reinterpret_cast<u64>(&std::memmove),
+                                   reinterpret_cast<u64>(&std::memset)};
+      std::vector<u64> leaf_lrs;
+      for (auto it = lo; it != hi; ++it) {
+        for (const u64 start : kLeaf) {
+          if (it->pc - start < 0x800) {
+            leaf_lrs.push_back(it->lr);
+            break;
+          }
+        }
+      }
+      const auto leaf_hist = Histogram(leaf_lrs);
+      for (size_t k = 0; k < leaf_hist.size() && k < 30u; ++k) {
+        std::fprintf(f, "   %5.1f%%  lrleaf ", double(leaf_hist[k].n) * 100.0 / double(busy));
+        PrintAddr(f, leaf_hist[k].addr);
+        std::fprintf(f, " x%u\n", unsigned(leaf_hist[k].n));
+      }
+    }
 
     // Full stacks, waits included: they say what the thread is waiting for.
     std::vector<const Sample*> by_stack;

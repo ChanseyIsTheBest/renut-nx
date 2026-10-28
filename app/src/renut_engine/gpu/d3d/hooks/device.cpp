@@ -926,6 +926,8 @@ void D3DDevice_Swap_hook(u32 device_va, u32 front_buffer, u32 /*parameters*/) {
       LatchResolutionScaleLocked();
     }
     MaybeReportMemory();
+    ReleaseIdlePrebuiltPipelines();  // banjo-nx (2026-10-28, the heap)
+    ReleaseSpareBuffersWhenHeapShort();
     // The front buffer is the texture the game resolved the frame into.
     Video::NotePresentingSwap(swap_ordinal);  // banjo-nx (2026-10-20): the probe's "input -> GPU done"
     Video::Present(image.texture ? &image : nullptr);

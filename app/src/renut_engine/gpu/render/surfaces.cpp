@@ -4,6 +4,8 @@
 #include "renut_engine/gpu/render/surfaces.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>  // banjo-nx (2026-10-28): dynamic resolution
 #include <numeric>
 #include <string>
 #include <unordered_map>
@@ -49,6 +51,21 @@ constexpr uint32_t kMenuFrames = 30;
 RenderScale g_ui_scale;
 // The internal heights (render_scale.h codes 4 and 6), as the shaders read them: handheld | docked << 16.
 uint32_t g_internal_heights = 720u | 720u << 16;
+// banjo-nx (2026-10-28, GPU block, banjo_renut_dynamic_resolution): each mode's heights, lowest first (night_gpu5: the
+// range's ends and banjo_renut_dynamic_steps between them), how many (0: no range for that mode; set once by
+// LatchResolutionScaleLocked), the one in use (an index into the mode's) and the mode it is for.
+constexpr int kMaxDynamicSteps = 10;
+int32_t g_dynamic_steps[2][kMaxDynamicSteps] = {};
+int g_dynamic_count[2] = {0, 0};
+std::atomic<int> g_dynamic_step{0};
+std::atomic<bool> g_dynamic_docked{false};
+// banjo-nx (2026-10-28, night_gpu5): the heights render_scale.h's settable codes 4 and 6 hold now ([0] code 4, [1] code
+// 6; the shaders read them from InternalHeightsWord), and the frame each was last the render scale. A height other than
+// 720 (code 0) and 1080 (code 2) takes the code that holds it, or else the other code than the one in use, whose targets
+// go first (CodeForHeightLocked): a range's steps take turns on the two codes.
+int32_t g_code_height[2] = {0, 0};
+uint64_t g_code_used[2] = {0, 0};
+uint64_t g_latches = 0;
 struct UiTarget {
   HostSurface *scene = nullptr;  // the composite's target it was made for, and that target's generation then
   uint64_t scene_generation = 0;
@@ -273,6 +290,56 @@ bool BuildTarget(HostSurface &surface, const d3d::SurfaceDesc &desc, uint32_t mi
   return true;
 }
 
+#if defined(PLUME_DEKO3D)
+// banjo-nx (2026-10-28, night_gpu5, dynamic resolution steps): the scale of 'height' lines. 720 is code 0 and 1080 code
+// 2 (fixed factors); any other height takes the settable code (4 or 6) that holds it, or else the one that is not the
+// render scale now (the less recently used when neither is), set to the height here. That code's targets are retired
+// first, their size being the old height's: each is built again at the new one at its next use (GetHostSurfaceSlow), as
+// a target that grows is. Resolve destinations of the code are made again at their next resolve (textures.cpp, by
+// their size). Between two such changes of a code the frame has drawn at the other one, so a resolve texture still of
+// the old height and sampled after it has gone two changes without a resolve into it.
+RenderScale CodeForHeightLocked(int32_t height) {
+  if (height == 720)
+    return RenderScale{};
+  if (height == 1080)
+    return RenderScale{2};
+  constexpr uint32_t kCodes[2] = {RenderScale::kHandheldCode, RenderScale::kDockedCode};
+  for (int i = 0; i < 2; ++i) {
+    if (g_code_height[i] == height) {
+      g_code_used[i] = g_latches;
+      return RenderScale{kCodes[i]};
+    }
+  }
+  int pick;
+  if (g_resolution_scale.code == kCodes[0])
+    pick = 1;
+  else if (g_resolution_scale.code == kCodes[1])
+    pick = 0;
+  else
+    pick = g_code_used[0] <= g_code_used[1] ? 0 : 1;
+  const uint32_t code = kCodes[pick];
+  uint32_t retired = 0;
+  for (auto &[key, surface] : g_targets) {
+    if (surface && surface->texture && surface->scale.code == code) {
+      RetireTarget(*surface);
+      ++retired;
+    }
+  }
+  const uint32_t g = std::gcd(uint32_t(height), 720u);
+  RenderScale::kNumerators[code] = uint32_t(height) / g;
+  RenderScale::kDenominators[code] = 720u / g;
+  const int32_t old_height = g_code_height[pick];
+  g_code_height[pick] = height;
+  g_code_used[pick] = g_latches;
+  g_internal_heights = pick == 0 ? (g_internal_heights & 0xFFFF0000u) | uint32_t(height)
+                                 : (g_internal_heights & 0xFFFFu) | uint32_t(height) << 16;
+  ++g_surface_epoch;
+  RGPU_INFO("[renut] dynamic resolution: code {} now {} lines ({} targets of its {} lines made again at their next use)",
+            code, height, retired, old_height);
+  return RenderScale{code};
+}
+#endif
+
 } // namespace
 
 uint64_t SurfaceEpochLocked() { return g_surface_epoch; }  // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_chain_reuse)
@@ -319,6 +386,7 @@ void LatchResolutionScaleLocked() {
     // shaders the same heights. 720 is 1x (code 0); 1080 is code 2 (1.5x, the docked display's: no upscale then).
     static const struct Heights {
       int32_t handheld, docked;
+      bool dynamic[2];  // banjo-nx (2026-10-28): banjo_renut_dynamic_resolution's range for [handheld, docked]
     } heights = [] {
       auto pick = [](int32_t want, const char *name) {
         const int32_t h = std::clamp((std::clamp(want, 360, 1080) + 4) / 9 * 9, 360, 1080);
@@ -326,8 +394,50 @@ void LatchResolutionScaleLocked() {
           RGPU_INFO("banjo_renut_render_height_{} = {}: {} (a multiple of 9 from 360 to 1080)", name, want, h);
         return h;
       };
-      const int32_t hh = pick(banjo::renut_gpu::RenderHeightHandheld(), "handheld");
-      const int32_t dh = pick(banjo::renut_gpu::RenderHeightDocked(), "docked");
+      int32_t hh = pick(banjo::renut_gpu::RenderHeightHandheld(), "handheld");
+      int32_t dh = pick(banjo::renut_gpu::RenderHeightDocked(), "docked");
+      // banjo-nx (2026-10-28, GPU block, the user's ranges): each mode's range has 720 (1x, code 0) at one end; the
+      // other end takes the mode's code (4 handheld, 6 docked) for the session. 2026-10-28 (night_gpu5, the user's
+      // request: docked 720 to 1080): an end of 1080 is code 2 (1.5x, the docked display's own size: the HUD is drawn
+      // into the scene without the upscale), as a fixed height of 1080 always was (render_scale below).
+      bool dynamic[2] = {false, false};
+      if (DynamicResolutionOn()) {
+        for (int m = 0; m < 2; ++m) {
+          const bool docked_mode = m == 1;
+          const int32_t low = pick(DynamicHeight(docked_mode, false), docked_mode ? "dynamic docked low" : "dynamic handheld low");
+          const int32_t high = pick(DynamicHeight(docked_mode, true), docked_mode ? "dynamic docked high" : "dynamic handheld high");
+          if (low >= high || (low != 720 && high != 720)) {
+            RGPU_WARN("[renut] dynamic resolution, {} mode: {} to {} lines is not a range with 720 at one end: the "
+                      "fixed height", docked_mode ? "docked" : "handheld", low, high);
+            continue;
+          }
+          (docked_mode ? dh : hh) = low == 720 ? high : low;
+          dynamic[m] = true;
+          // banjo-nx (2026-10-28, night_gpu5, banjo_renut_dynamic_steps): the ends and the heights between them, evenly
+          // spaced and rounded to a multiple of 36 (whole host pixels at 320x180 too). Deko3d only: the other back ends'
+          // codes 4 and 6 are fixed factors (the ends alone there).
+          int n = 0;
+          g_dynamic_steps[m][n++] = low;
+#if defined(PLUME_DEKO3D)
+          const int between = DynamicSteps();
+          for (int i = 1; i <= between && n < kMaxDynamicSteps - 1; ++i) {
+            const int32_t h = (low + (high - low) * i / (between + 1) + 18) / 36 * 36;
+            if (h > g_dynamic_steps[m][n - 1] && h < high)
+              g_dynamic_steps[m][n++] = h;
+          }
+#endif
+          g_dynamic_steps[m][n++] = high;
+          g_dynamic_count[m] = n;
+          std::string list;
+          for (int i = 0; i < n; ++i)
+            list += fmt::format("{}{}", i ? " " : "", g_dynamic_steps[m][i]);
+          RGPU_INFO("[renut] dynamic resolution, {} mode: 3D at {} lines, by the GPU's time a frame against {} ms "
+                    "(banjo_renut_dynamic_resolution){}",
+                    docked_mode ? "docked" : "handheld", list, DynamicGpuMs(),
+                    DynamicTestSeconds() > 0 ? fmt::format("; test: a step every {} s", DynamicTestSeconds())
+                                             : std::string());
+        }
+      }
       auto set = [](uint32_t code, int32_t h) {
         const uint32_t g = std::gcd(uint32_t(h), 720u);
         RenderScale::kNumerators[code] = uint32_t(h) / g;
@@ -336,16 +446,35 @@ void LatchResolutionScaleLocked() {
 #if defined(PLUME_DEKO3D)
       set(RenderScale::kHandheldCode, hh);
       set(RenderScale::kDockedCode, dh);
+      g_code_height[0] = hh;  // banjo-nx (2026-10-28, night_gpu5): CodeForHeightLocked's
+      g_code_height[1] = dh;
 #endif
       g_internal_heights = uint32_t(hh) | uint32_t(dh) << 16;
       RGPU_INFO("Internal heights: handheld {}x{}, docked {}x{}", RenderScale{RenderScale::kHandheldCode}.Size(1280),
                 hh, RenderScale{RenderScale::kDockedCode}.Size(1280), dh);
-      return Heights{hh, dh};
+      return Heights{hh, dh, {dynamic[0], dynamic[1]}};
     }();
-    const int32_t chosen = docked ? heights.docked : heights.handheld;
+    // banjo-nx (2026-10-28, GPU block, banjo_renut_dynamic_resolution): the mode's range by the GPU's time; a change of
+    // mode starts it at its 720 end (night_gpu2 console run: docking at 900 made the docked set of targets with the heap
+    // at its end; 720 is the smaller set, at the 1x code both modes use).
+    const int mode = docked ? 1 : 0;
+    const int count = heights.dynamic[mode] ? g_dynamic_count[mode] : 0;
+    static bool dynamic_started = false;
+    const bool mode_changed = g_dynamic_docked.exchange(docked) != docked;
+    if ((mode_changed || !dynamic_started) && count) {
+      dynamic_started = true;
+      g_dynamic_step = g_dynamic_steps[mode][0] == 720 ? 0 : count - 1;  // the 720 end
+    }
+    ++g_latches;
+    const int32_t chosen = count ? g_dynamic_steps[mode][std::clamp(g_dynamic_step.load(), 0, count - 1)]
+                                 : (docked ? heights.docked : heights.handheld);
+#if defined(PLUME_DEKO3D)
+    render_scale = CodeForHeightLocked(chosen);  // banjo-nx (2026-10-28, night_gpu5): the steps take turns on codes 4 and 6
+#else
     render_scale = chosen == 720    ? RenderScale{}
                    : chosen == 1080 ? RenderScale{2}
                                     : RenderScale{docked ? RenderScale::kDockedCode : RenderScale::kHandheldCode};
+#endif
     (void)render;
     g_frames_without_composite = g_composite_seen ? 0 : std::min(g_frames_without_composite + 1, kMenuFrames);
     g_composite_seen = false;
@@ -381,6 +510,80 @@ void LatchResolutionScaleLocked() {
     ++g_surface_epoch;
     g_resolution_latched = true;
   }
+}
+
+// banjo-nx (2026-10-28, GPU block): see render/surfaces.h. A moving average of the GPU's time a frame (about 16
+// frames); down above the budget, up when the next height's predicted time (the current one times the pixel ratio, an
+// overestimate) has been under 85 % of it for banjo_renut_dynamic_up_s in a row (and that long since the last change);
+// down 5 s at least after a change. night_gpu5 (the user's request, banjo_renut_dynamic_steps): with heights between the
+// ends, down goes to the highest step predicted to fit the budget (the lowest if none) and up to the highest predicted
+// under 85 % of it, in one change each.
+void NoteGpuFrameForDynamicResolution(double gpu_ms) {
+  const int mode = g_dynamic_docked ? 1 : 0;
+  const int count = g_dynamic_count[mode];
+  if (count < 2 || gpu_ms <= 0.0)
+    return;
+  // banjo-nx (2026-10-28): up after banjo_renut_dynamic_up_s in a row of fitting, 1 s by default (the user: "be
+  // aggressive"). h9 had 20 s, after a loading screen's light frames took the city's 540 to 720 for 12 s (each change
+  // makes a set of targets); the h10 GPU region is what keeps that memory in check now.
+  const double up_seconds = DynamicUpSeconds();
+  static double average = 0.0;
+  static std::chrono::steady_clock::time_point last_change = std::chrono::steady_clock::now();
+  static std::chrono::steady_clock::time_point fits_since = last_change;
+  static int last_mode = mode;
+  average = average > 0.0 ? average * 0.94 + gpu_ms * 0.06 : gpu_ms;
+  const auto now = std::chrono::steady_clock::now();
+  if (mode != last_mode) {  // a change of mode starts again at its 720 end (see above): its own hold
+    last_mode = mode;
+    fits_since = now;
+  }
+  const double since = std::chrono::duration<double>(now - last_change).count();
+  const int step = std::clamp(g_dynamic_step.load(), 0, count - 1);
+  const int32_t *heights = g_dynamic_steps[mode];
+  const double current = double(heights[step]);
+  const double budget = DynamicGpuMs();
+  // The time a step is predicted to take: the average times the pixel ratio.
+  const auto predicted = [&](int s) {
+    const double r = double(heights[s]) / current;
+    return average * r * r;
+  };
+  int next = step;
+  const int32_t test = DynamicTestSeconds();
+  if (test > 0) {
+    // The test walks the steps one at a time, up to an end and back.
+    static int direction = -1;
+    if (since >= double(test)) {
+      if (step + direction < 0 || step + direction >= count)
+        direction = -direction;
+      next = step + direction;
+    }
+  } else if (step > 0 && since >= 5.0 && average > budget) {
+    next = 0;
+    for (int s = step - 1; s >= 0; --s) {
+      if (predicted(s) <= budget) {
+        next = s;
+        break;
+      }
+    }
+  } else if (step + 1 < count) {
+    if (predicted(step + 1) >= budget * 0.85)
+      fits_since = now;
+    if (since >= up_seconds && std::chrono::duration<double>(now - fits_since).count() >= up_seconds) {
+      next = step + 1;
+      while (next + 1 < count && predicted(next + 1) < budget * 0.85)
+        ++next;
+    }
+  }
+  if (next == step)
+    return;
+  const double was = average;
+  average = predicted(next);  // the frames to come are at the new height
+  g_dynamic_step = next;
+  last_change = now;
+  fits_since = now;
+  RGPU_INFO("[renut] dynamic resolution: 3D at {} lines (the GPU's time a frame {:.1f} ms on average at {}; "
+            "banjo_renut_dynamic_gpu_ms {})",
+            heights[next], was, heights[step], DynamicGpuMs());
 }
 
 void SetTilingExtentLocked(uint32_t width, uint32_t height) {

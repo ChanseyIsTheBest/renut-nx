@@ -271,7 +271,8 @@ namespace plume {
         bool stencilEnabled = false;
         bool dynamicStencilReference = false;
         bool dynamicDepthBias = false;
-        std::atomic<bool> provisional{false};  // (see pending, below)
+        std::atomic<bool> provisional{false};  // (see pending, below; counted in g_deko3dProvisionalPipelines)
+        ~Deko3DGraphicsPipeline();  // banjo-nx (2026-10-28): a provisional pipeline that goes leaves the count
         DkPrimitive primitive = DkPrimitive_Triangles;
         uint32_t stageMask = 0;
         uint32_t shaderCount = 0;
@@ -353,6 +354,9 @@ namespace plume {
 
     struct Deko3DSwapChain;
 
+    // banjo-nx (2026-10-28, per-draw night): what a command list holds as its bound shaders before its first bind.
+    inline const DkShader *const kDeko3DShadersUnknown = reinterpret_cast<const DkShader *>(uintptr_t(1));
+
     struct Deko3DCommandList : RenderCommandList {
         Deko3DCommandQueue *queue = nullptr;
         Deko3DDevice *device = nullptr;
@@ -372,7 +376,9 @@ namespace plume {
         const Deko3DGraphicsPipeline *graphicsPipeline = nullptr;
         const Deko3DComputePipeline *computePipeline = nullptr;
         uint64_t boundStateHash = 0;
-        const DkShader *boundShaders[3] = {};
+        // banjo-nx (2026-10-28, per-draw night): kDeko3DShadersUnknown until the list's first bind (which binds every
+        // stage); then the shaders bound per stage, so that a bind rebinds only the stages that changed.
+        const DkShader *boundShaders[3] = {kDeko3DShadersUnknown, kDeko3DShadersUnknown, kDeko3DShadersUnknown};
         // banjo-nx (2026-10-19): the groups of fixed-function state as last bound (Deko3DGraphicsPipeline::groupHash;
         // 0: unknown). The dynamic depth bias and stencil reference make theirs unknown.
         uint64_t boundGroups[9] = {};
@@ -405,6 +411,9 @@ namespace plume {
         DkGpuAddr indexAddress = 0;
         bool descriptorsInvalidated = false;
         uint64_t descriptorEpoch = 0;
+        // banjo-nx (2026-10-28, per-draw night): the device's two numbers as of the last drop (flushDescriptorInvalidate
+        // drops only the caches whose number moved).
+        uint64_t seenDescriptors = 0, seenCode = 0;
         const Deko3DFramebuffer *framebuffer = nullptr;
         // Bound textures: the handles last bound per graphics stage, and the buffer the shared constants were last
         // found in (GPU range and CPU address).
@@ -680,6 +689,9 @@ namespace plume {
         };
         std::mutex guardMutex;
         std::vector<GuardedBlock> guarded;
+        // banjo-nx (2026-10-28, the console's OOM).
+        // Frees the image heap's empty chunks (heapMutex held); the bytes given back.
+        uint64_t releaseEmptyChunksLocked();
         bool imageAlloc(uint32_t size, uint32_t alignment, Deko3DImageAlloc &out);
         void retire(const Deko3DImageAlloc &image, DkMemBlock block);
         void collectRetired();
@@ -761,7 +773,29 @@ namespace plume {
     // banjo-nx (2026-10-21, asyncVariants): this thread does not draw (Renut's pipeline prebuild workers): the variants it
     // asks for are compiled after the draws' ones, and only so many wait at a time (the rest when a draw needs them).
     void Deko3DSetBackgroundThread(bool background);
+    // banjo-nx (2026-10-28, the console's OOM): called when a memory block's storage cannot be had from the heap, before
+    // asking again (any thread; it must not take the application's renderer lock): the application's spares go back.
+    void Deko3DSetMemoryPressureCallback(void (*callback)());
+
+    // banjo-nx (2026-10-28, h10): GPU memory blocks from a region of their own at the heap's top (plume_deko3d.cpp,
+    // "The GPU region"); on by default, set before the device is made. Its figures for the memory report.
+    void Deko3DSetGpuRegion(bool on);
+    struct Deko3DGpuRegionInfo {
+        bool on = false;
+        uint64_t size = 0, used = 0, peak = 0, freeBytes = 0, largestFree = 0, givenBack = 0, refused = 0;
+        uint32_t freeRanges = 0, blocks = 0, growths = 0, givebacks = 0;
+    };
+    void Deko3DGpuRegionFigures(Deko3DGpuRegionInfo &out);
+    // banjo-nx (2026-10-28, render-thread round): how many graphics pipelines are provisional now (made at creation,
+    // dropped when refreshPipeline finds every variant or the pipeline goes), and whether a draw may take a zero count
+    // as its answer (Deko3DSetProvisionalCount; Banjo's A/B 68). Every draw asked its pipeline (a line of the pipeline
+    // object: night_gpu5's profile had the check at 0.9 % of the render thread) although nearly every frame has none.
+    extern std::atomic<int> g_deko3dProvisionalPipelines;
+    extern bool g_deko3dProvisionalCount;
+    void Deko3DSetProvisionalCount(bool on);
     inline bool Deko3DRefreshPipeline(RenderPipeline *pipeline) {
+        if (g_deko3dProvisionalCount && g_deko3dProvisionalPipelines.load(std::memory_order_relaxed) == 0)
+            return false;  // none is provisional: the answer the pipeline's flag would give
         auto *p = static_cast<Deko3DPipeline *>(pipeline);
         if (p == nullptr || p->type != Deko3DPipeline::Type::Graphics ||
             !static_cast<Deko3DGraphicsPipeline *>(p)->provisional.load(std::memory_order_relaxed))

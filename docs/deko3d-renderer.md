@@ -1158,7 +1158,7 @@ loads into memo tables, guest headers and caches: the frame's records do not sta
 all exact (the same commands in the same order):
 
 - Shared constants: the changed 64-byte lines as one mask (line_compare.h `Lines64DifferMask`, no branch per line;
-  `banjo_renut_inline_line_compare` has no effect now). Literal registers pushed as runs.
+  `banjo_renut_inline_line_compare` has no effect now; it was SLOWER ON THE CONSOLE in 36q). Literal registers pushed as runs.
 - Memos: stream and index memos of 16-byte slots (hash and node; the key compared in the node) with 16,384 each;
   texture extents 2,048; texture slots 2,048 entries of two whole lines; fetch copies 1,024; pipeline memo ways with a
   separate line of key-hash tags. Per-shader answers (float constant groups, exports, bound fetches) kept in the

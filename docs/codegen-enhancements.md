@@ -1,5 +1,7 @@
 # Codegen enhancements
 
+> Status 2026-10-28: this guide is older than the current renderer. Start at `docs/porting-start-here.md` (the reading order, what is current, the method rules) and see `docs/porting-guide-renderer.md` section 6b for the items measured slower on the console. The CPU rounds after 2026-10-19 (bulk localized copies, direct dispatch) are in `docs/enhancements.md` and in the zuma ports' `docs/optimising-functions.md`.
+
 The game code is C++ that the ReXGlue generator writes from the Xbox 360 executable (`app/generated`, 213 files). How
 fast it runs on the A57 depends on how that C++ is written, so most of the CPU work on this port is done at build
 time, in three layers:

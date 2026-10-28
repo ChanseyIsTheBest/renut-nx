@@ -111,7 +111,7 @@ namespace plume {
         graphicsPipeline = nullptr;
         computePipeline = nullptr;
         boundStateHash = 0;
-        boundShaders[0] = boundShaders[1] = boundShaders[2] = nullptr;
+        boundShaders[0] = boundShaders[1] = boundShaders[2] = kDeko3DShadersUnknown;  // banjo-nx (2026-10-28)
         std::fill(std::begin(boundGroups), std::end(boundGroups), 0);
         graphicsLayout = computeLayout = nullptr;
         boundImageSet = boundSamplerSet = 0;
@@ -152,6 +152,8 @@ namespace plume {
         // Whatever the GPU holds of descriptors and shader code from before is dropped.
         dkCmdBufBarrier(cmd, DkBarrier_None, DkInvalidateFlags_Descriptors | DkInvalidateFlags_Shader);
         descriptorEpoch = currentEpoch();
+        seenDescriptors = device->descriptorEpoch.load(std::memory_order_relaxed);  // banjo-nx (2026-10-28)
+        seenCode = device->codeEpoch.load(std::memory_order_relaxed);
     }
 
     // Descriptors written and shader code loaded so far, as one number (flushDescriptorInvalidate).
@@ -179,11 +181,21 @@ namespace plume {
     void Deko3DCommandList::flushDescriptorInvalidate() {
         // Descriptors the CPU wrote since this list last invalidated, or shader code loaded since: the GPU's caches of
         // them are dropped before the next draw or dispatch.
-        const uint64_t epoch = currentEpoch();
+        // banjo-nx (2026-10-28, per-draw night): the two numbers read once (currentEpoch's form), and only the caches
+        // whose contents changed dropped.
+        const uint64_t d = device->descriptorEpoch.load(std::memory_order_relaxed);
+        const uint64_t c = device->codeEpoch.load(std::memory_order_relaxed);
+        const uint64_t epoch = d ^ (c << 40);
         if (epoch != descriptorEpoch) {
+            uint32_t flags = (d != seenDescriptors ? uint32_t(DkInvalidateFlags_Descriptors) : 0u) |
+                             (c != seenCode ? uint32_t(DkInvalidateFlags_Shader) : 0u);
+            if (!flags)
+                flags = DkInvalidateFlags_Descriptors | DkInvalidateFlags_Shader;
             flushBarriers();
-            dkCmdBufBarrier(cmd, DkBarrier_None, DkInvalidateFlags_Descriptors | DkInvalidateFlags_Shader);
+            dkCmdBufBarrier(cmd, DkBarrier_None, flags);
             descriptorEpoch = epoch;
+            seenDescriptors = d;
+            seenCode = c;
         }
     }
 
@@ -393,6 +405,17 @@ namespace plume {
             // the handles are the same: a descriptor slot may hold another texture now.
             if (p->txqMask[st]) {
                 const uint32_t base = st == 2 ? 0u : 32u;
+                // banjo-nx (2026-10-28, per-draw night): the changed entries gathered into runs of consecutive ones,
+                // each run one push (the shadow holds what was pushed; an entry not changed ends a run).
+                uint32_t run[32][4];
+                uint32_t run_first = 0, run_count = 0;
+                const auto flush = [&] {
+                    if (run_count) {
+                        dkCmdBufPushConstants(cmd, device->texSizeAddr, Deko3DDevice::TexSizeSize, run_first * 16,
+                                              run_count * 16, run);
+                        run_count = 0;
+                    }
+                };
                 for (uint32_t mask = p->txqMask[st]; mask;) {
                     const uint32_t k = uint32_t(__builtin_ctz(mask));
                     mask &= mask - 1;
@@ -407,17 +430,34 @@ namespace plume {
                         size[2] = dims[2];
                     }
                     const uint32_t e = base + k;
-                    if (((texSizeValid >> e) & 1) && !memcmp(texSizeShadow[e], size, sizeof(size)))
+                    if (((texSizeValid >> e) & 1) && !memcmp(texSizeShadow[e], size, sizeof(size))) {
+                        flush();
                         continue;
-                    dkCmdBufPushConstants(cmd, device->texSizeAddr, Deko3DDevice::TexSizeSize, e * 16, 16, size);
+                    }
+                    if (run_count && e != run_first + run_count)
+                        flush();
+                    if (!run_count)
+                        run_first = e;
+                    memcpy(run[run_count++], size, sizeof(size));
                     memcpy(texSizeShadow[e], size, sizeof(size));
                     texSizeValid |= uint64_t(1) << e;
                 }
+                flush();
             }
             if (same)
                 continue;
-            dkCmdBufBindTextures(cmd, GraphicsStages[st], 0, handles, n);
-            memcpy(boundTex[st], handles, n * sizeof(DkResHandle));
+            // banjo-nx (2026-10-28, per-draw night): with the stage's count as bound, only the handles from the first
+            // to the last that differ (each bind is a selector, a no-op, a header and the handles into the driver
+            // constant buffer; a draw changing one or two textures rewrote all of them). The buffer ends the same.
+            uint32_t first = 0, end = n;
+            if (n == boundTexCount[st]) {
+                while (first < n && handles[first] == boundTex[st][first])
+                    first++;
+                while (end > first && handles[end - 1] == boundTex[st][end - 1])
+                    end--;
+            }
+            dkCmdBufBindTextures(cmd, GraphicsStages[st], first, handles + first, end - first);
+            memcpy(boundTex[st] + first, handles + first, (end - first) * sizeof(DkResHandle));
             boundTexCount[st] = n;
         }
         // banjo-nx (2026-10-27): what this run read (only from the renderer's copy: a ring upload's words are elsewhere).
@@ -493,9 +533,26 @@ namespace plume {
         auto bump = [](std::atomic<uint64_t> &c) { c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); };
         bump(GetDeko3DStats().pipelineBinds);
         // Shaders: rebound when any stage differs (absent stages are disabled by the bind).
-        const DkShader *const *want = p->stageShaders;  // banjo-nx: kept at creation
+        // banjo-nx (2026-10-28, per-draw night): only the stages that differ (deko3d binds each stage on its own: its
+        // program, its compiler constant buffer, the fragment stage's state; a stage in the mask without a shader is
+        // disabled). The list's first bind binds them all with the whole graphics mask, as every bind did before.
+        const DkShader *const want[3] = {p->stageShaders[0], p->stageShaders[1], p->stageShaders[2]};
         if (want[0] != boundShaders[0] || want[1] != boundShaders[1] || want[2] != boundShaders[2]) {
-            dkCmdBufBindShaders(cmd, DkStageFlag_GraphicsMask, p->shaders, p->shaderCount);
+            if (boundShaders[0] == kDeko3DShadersUnknown) {
+                dkCmdBufBindShaders(cmd, DkStageFlag_GraphicsMask, p->shaders, p->shaderCount);
+            } else {
+                static constexpr uint32_t kStageFlags[3] = {DkStageFlag_Vertex, DkStageFlag_Geometry, DkStageFlag_Fragment};
+                const DkShader *list[3];
+                uint32_t count = 0, mask = 0;
+                for (int st = 0; st < 3; st++) {
+                    if (want[st] != boundShaders[st]) {
+                        mask |= kStageFlags[st];
+                        if (want[st])
+                            list[count++] = want[st];
+                    }
+                }
+                dkCmdBufBindShaders(cmd, mask, list, count);
+            }
             boundShaders[0] = want[0];
             boundShaders[1] = want[1];
             boundShaders[2] = want[2];

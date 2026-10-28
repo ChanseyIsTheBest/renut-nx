@@ -375,7 +375,16 @@ void ClearPending(d3d::Device *device) {
 // banjo-nx (from sa2-nx) (banjo_renut_snapshot_deltas), on the render thread: the device a queued draw reads.
 const u8 *DeviceForDraw(const DrawCapture &capture) {
   if (capture.snapshot == SnapshotKind::Whole) {
-    g_chain_hint = {};  // not a chain draw (banjo_renut_chain_reuse)
+    // banjo-nx (2026-10-28, per-draw night, A/B 62): a number of its own, every chunk and field changed (as a replay's
+    // first draw): the fast path may take it after the draw before it. The chain's own number stays (its next delta
+    // draw is not consecutive with it: every chunk then too). Off half: not a chain draw, as before.
+    if (banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) == 62) {
+      g_chain_hint = {};  // not a chain draw (banjo_renut_chain_reuse)
+    } else {
+      g_chain_hint.seq = NextChainSeq();
+      g_chain_hint.changed[0] = g_chain_hint.changed[1] = ~uint64_t(0);
+      g_chain_hint.fields = kFieldsAll;
+    }
     return capture.state.data();
   }
   if (capture.snapshot == SnapshotKind::Rebase) {

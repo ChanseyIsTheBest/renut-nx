@@ -139,7 +139,8 @@ void BeginList(VideoState &s) {
     // banjo-nx (2026-10-19, GPU): with the per-shader breakdown (a timestamp at nearly every draw), one frame in
     // kShaderSample is timed; the report's averages are over the timed frames (draws are counted in them only).
     static uint32_t frames_seen = 0;
-    constexpr uint32_t kShaderSample = 4;
+    // banjo-nx (2026-10-28, per-draw night): 8 (was 4): the timed frames' marks and labels cost the render thread.
+    constexpr uint32_t kShaderSample = 8;
     if (slot.active && REXCVAR_GET(banjo_renut_diag_gpu_shaders) && (frames_seen++ % kShaderSample) != 0)
       slot.active = false;
     if (slot.active && !slot.pool) {

@@ -4,6 +4,7 @@
 // deko3d 0.5.0 used here (and its bugs) are listed there with where they were found.
 //
 #include "plume_deko3d.h"
+#include "plume_deko3d_region.h"  // banjo-nx (2026-10-28, h10): the GPU region's ranges
 
 #include <switch.h>
 #include <pthread.h>
@@ -55,7 +56,58 @@ namespace plume {
     }
 
     static constexpr uint32_t alignUp(uint32_t v, uint32_t a) { return (v + a - 1) / a * a; }
+
+    // banjo-nx (2026-10-28, the console's OOM): see makeBlock. Cold paths only (a block that did not fit, a new chunk).
+    static thread_local bool t_inImageAlloc = false;
+    static void (*g_memoryPressure)() = nullptr;
+    void Deko3DSetMemoryPressureCallback(void (*callback)()) { g_memoryPressure = callback; }
     static constexpr uint64_t alignUp64(uint64_t v, uint64_t a) { return (v + a - 1) / a * a; }
+
+    // The GPU region (banjo-nx, 2026-10-28, h10, after the night_gpu2 console freeze; battd_nx's bp_gpuarena.c and its
+    // notes for the lessons). Memory blocks of kRegionMinBlock and more come from a region of their own at the heap's
+    // top, not from newlib among every small allocation: a freed block was cut into small pieces there, and the console
+    // had 577 MB free in 170,000 pieces with no 32 MB one. The region grows down from the heap's end by lowering
+    // fake_heap_end (newlib's _sbrk_r reads it at every call; moved under malloc's lock, and never closer than
+    // kRegionNewlibSlack above newlib's break), so no size is fixed in advance (battd's fixed arena was wrong by 2x at
+    // one point). Blocks pack at its top; free space at its bottom beyond kRegionKeep goes back to newlib once
+    // kRegionGiveBackAt of it is free. Storage given to deko3d is zeroed and flushed here: deko3d zeroes only what it
+    // allocates itself, and the zero vertex buffer and command memory rely on it. A block that does not fit takes the
+    // old path (newlib). No logging under g_regionMutex (battd: a log line that allocates deadlocked its arena lock).
+    static bool g_regionOn = true;
+    void Deko3DSetGpuRegion(bool on) { g_regionOn = on; }
+    static constexpr uint64_t kRegionMinBlock = 64ull << 10, kRegionGrain = 64ull << 10, kRegionStep = 2ull << 20;
+    static constexpr uint64_t kRegionNewlibSlack = 32ull << 20, kRegionGiveBackAt = 128ull << 20, kRegionKeep = 64ull << 20;
+    static std::mutex g_regionMutex;
+    static GpuRegionRanges g_region;
+    static std::unordered_map<DkMemBlock, std::pair<uintptr_t, uint64_t>> g_regionBlocks;
+    static uint64_t g_regionRefused = 0;
+
+    // newlib's end moved to 'end' under malloc's lock; lowering keeps kRegionNewlibSlack above its break.
+    static bool regionMoveHeapEnd(uintptr_t end, bool lowering) {
+        __malloc_lock(_REENT);
+        const uintptr_t brk = reinterpret_cast<uintptr_t>(sbrk(0));
+        const bool ok = !lowering || end >= brk + kRegionNewlibSlack;
+        if (ok)
+            fake_heap_end = reinterpret_cast<char *>(end);
+        __malloc_unlock(_REENT);
+        return ok;
+    }
+
+    void Deko3DGpuRegionFigures(Deko3DGpuRegionInfo &out) {
+        std::lock_guard<std::mutex> lock(g_regionMutex);
+        out.on = g_regionOn;
+        out.size = g_region.high - g_region.low;
+        out.used = g_region.used;
+        out.peak = g_region.peak;
+        out.freeBytes = g_region.freeBytes();
+        out.largestFree = g_region.largestFree();
+        out.freeRanges = uint32_t(g_region.free.size());
+        out.blocks = uint32_t(g_regionBlocks.size());
+        out.growths = g_region.growths;
+        out.givebacks = g_region.givebacks;
+        out.givenBack = g_region.givenBack;
+        out.refused = g_regionRefused;
+    }
 
     // FNV-1a 64: the variant cache key (tools/deko3d_shaders.py computes the same over the same text).
     static uint64_t fnv1a64(const void *data, size_t size) {
@@ -994,6 +1046,105 @@ namespace plume {
         }
         return block;
 #else
+        // banjo-nx (2026-10-28, the console's OOM, 05:43): deko3d takes the block's memory from the heap itself (and
+        // zeroes it) and aborts the process when it cannot. So the room is tried first: an allocation of the same size
+        // and alignment, freed at once. None: the image heap's empty chunks (unless this thread holds the image heap,
+        // making a chunk) and the application's spares go back and it is tried again; still none: a log line and no
+        // block (each caller's failure path) instead of the abort. (Giving deko3d storage of our own hung the emulator:
+        // such a block is not zeroed, and the zero vertex buffer and command memory rely on it.)
+        // banjo-nx (2026-10-28, h10): the GPU region first (see g_region); this storage is zeroed here.
+        if (g_regionOn && m.size >= kRegionMinBlock) {
+            const uint64_t span = alignUp64(m.size, kRegionGrain);
+            uintptr_t at = 0, startedAt = 0;
+            uint32_t growths = 0;
+            bool grew = false;
+            uint64_t regionSize = 0;
+            {
+                std::lock_guard<std::mutex> lock(g_regionMutex);
+                if (!g_region.high) {
+                    // The region starts at the heap's end, on the grain.
+                    const uintptr_t end = reinterpret_cast<uintptr_t>(fake_heap_end) & ~uintptr_t(kRegionGrain - 1);
+                    if (regionMoveHeapEnd(end, true)) {
+                        g_region.low = g_region.high = end;
+                        startedAt = end;
+                    }
+                }
+                if (g_region.high) {
+                    const uint32_t before = g_region.growths;
+                    at = g_region.alloc(span, kRegionStep, [](uintptr_t low) { return regionMoveHeapEnd(low, true); });
+                    grew = g_region.growths != before;
+                    growths = g_region.growths;
+                    regionSize = g_region.high - g_region.low;
+                    if (!at)
+                        ++g_regionRefused;
+                }
+            }
+            if (startedAt)
+                logf("GPU region: at the heap's top, %p (banjo_deko3d_gpu_region)", reinterpret_cast<void *>(startedAt));
+            if (grew && growths <= 48)
+                logf("GPU region: grown to %" PRIu64 " MB for a %s of %u KiB (growth %u)", regionSize >> 20, what,
+                     size >> 10, growths);
+            if (at) {
+                void *storage = reinterpret_cast<void *>(at);
+                memset(storage, 0, m.size);
+                armDCacheFlush(storage, m.size);
+                m.storage = storage;
+                DkMemBlock block = dkMemBlockCreate(&m);
+                std::lock_guard<std::mutex> lock(g_regionMutex);
+                if (block)
+                    g_regionBlocks.emplace(block, std::make_pair(at, span));
+                else
+                    g_region.release(at, span, kRegionGiveBackAt, kRegionKeep, kRegionStep,
+                                     [](uintptr_t low) { return regionMoveHeapEnd(low, false); });
+                return block;
+            }
+            // No room above newlib's break: newlib's heap, as before.
+        }
+        void *probe = memalign(DK_MEMBLOCK_ALIGNMENT, m.size);
+        if (!probe) {
+            // banjo-nx (2026-10-28, night_gpu2 console freeze): a request at least as big as one that failed in the last
+            // 250 ms fails at once, and only the first 8 failures take the heap's figures for their log line: mallinfo
+            // walked 170,000 free pieces under malloc's lock (the audio threads waited in free), and with the SD card
+            // write each failure took 22 ms; the stream cache asked 3,812 times in 95 s (0.1 fps).
+            static std::atomic<uint64_t> failedSize{0}, failedTick{0};
+            static std::atomic<uint32_t> failures{0}, quick{0};
+            const uint64_t tick = armGetSystemTick();
+            if (m.size >= failedSize.load(std::memory_order_relaxed) &&
+                tick - failedTick.load(std::memory_order_relaxed) < armNsToTicks(250000000ull)) {
+                quick.fetch_add(1, std::memory_order_relaxed);
+                total.fetch_sub(m.size);
+                return nullptr;
+            }
+            uint64_t freed = 0;
+            if (!t_inImageAlloc) {
+                std::lock_guard<std::mutex> heap(heapMutex);
+                freed = releaseEmptyChunksLocked();
+            }
+            if (g_memoryPressure)
+                g_memoryPressure();
+            probe = memalign(DK_MEMBLOCK_ALIGNMENT, m.size);
+            const uint32_t n = failures.fetch_add(1, std::memory_order_relaxed);
+            if (n < 8) {
+                uint64_t heapFree = 0, processFree = 0;
+                memoryFigures(heapFree, processFree);
+                logf("memory block: %s, %u KiB not had from the heap at first (%" PRIu64 " MB of image chunks given "
+                     "back, the application's spares released): %s (heap %" PRIu64 " MB free, process %" PRIu64
+                     " MB unused)", what, size >> 10, freed >> 20, probe ? "had on the second try" : "NONE MADE",
+                     heapFree >> 20, processFree >> 20);
+            } else if ((n & 255) == 0) {
+                logf("memory block: %s, %u KiB: %s; %u blocks not had at first so far, %u more refused at once",
+                     what, size >> 10, probe ? "had on the second try" : "NONE MADE", n + 1,
+                     quick.load(std::memory_order_relaxed));
+            }
+            if (!probe) {
+                failedSize.store(m.size, std::memory_order_relaxed);
+                failedTick.store(armGetSystemTick(), std::memory_order_relaxed);
+                total.fetch_sub(m.size);
+                return nullptr;
+            }
+            failedTick.store(0, std::memory_order_relaxed);
+        }
+        free(probe);
         return dkMemBlockCreate(&m);
 #endif
     }
@@ -1001,7 +1152,22 @@ namespace plume {
     void Deko3DDevice::destroyBlock(DkMemBlock block) {
         if (!block)
             return;
+        // banjo-nx (2026-10-28, h10): a GPU region block's range goes back after deko3d has let it go; taken out of the
+        // table first (the block's handle may be made again by another thread once destroyed).
+        std::pair<uintptr_t, uint64_t> range{0, 0};
+        {
+            std::lock_guard<std::mutex> lock(g_regionMutex);
+            if (auto it = g_regionBlocks.find(block); it != g_regionBlocks.end()) {
+                range = it->second;
+                g_regionBlocks.erase(it);
+            }
+        }
         dkMemBlockDestroy(block);
+        if (range.second) {
+            std::lock_guard<std::mutex> lock(g_regionMutex);
+            g_region.release(range.first, range.second, kRegionGiveBackAt, kRegionKeep, kRegionStep,
+                             [](uintptr_t low) { return regionMoveHeapEnd(low, false); });
+        }
 #if defined(PLUME_DEKO3D_GUARDS)
         std::lock_guard<std::mutex> lock(guardMutex);
         for (size_t i = 0; i < guarded.size(); i++) {
@@ -1055,6 +1221,31 @@ namespace plume {
     // Image heap: 64 MB chunks (bigger for a bigger image), first fit.
     static constexpr uint32_t ImageChunkSize = 64u << 20;
 
+    // banjo-nx (2026-10-28, the console's OOM): what the heap's room is short of: the image heap's empty chunks go back
+    // below it (the application's rule for its own spares, f7b), and kept above it (a chunk given back is made again by
+    // the next texture: a 64 MB allocation and a GPU mapping).
+    static bool heapRoomShort() {
+        char *brk = static_cast<char *>(sbrk(0));
+        const uint64_t room = (brk && fake_heap_end > brk) ? uint64_t(fake_heap_end - brk) : 0;
+        return room < (uint64_t(256) << 20);
+    }
+
+    uint64_t Deko3DDevice::releaseEmptyChunksLocked() {
+        uint64_t freed = 0;
+        for (Chunk &c : chunks) {
+            if (c.block && c.freeList.size() == 1 && c.freeList[0].first == 0 && c.freeList[0].second == c.size) {
+                destroyBlock(c.block);
+                freed += c.size;
+                c.block = nullptr;
+                c.size = 0;
+                c.freeList.clear();
+            }
+        }
+        if (freed)
+            logf("image heap: %" PRIu64 " MiB of empty chunks given back to the heap", freed >> 20);
+        return freed;
+    }
+
     static void chunkFree(Deko3DDevice::Chunk &c, uint32_t offset, uint32_t size) {
         auto it = std::lower_bound(c.freeList.begin(), c.freeList.end(), std::make_pair(offset, 0u));
         it = c.freeList.insert(it, {offset, size});
@@ -1094,9 +1285,20 @@ namespace plume {
                 }
             }
             if (pass == 0) {
-                const uint32_t chunkSize = std::max(ImageChunkSize, alignUp(size + alignment, DK_MEMBLOCK_ALIGNMENT));
+                uint32_t chunkSize = std::max(ImageChunkSize, alignUp(size + alignment, DK_MEMBLOCK_ALIGNMENT));
                 Chunk c;
+                t_inImageAlloc = true;  // banjo-nx (2026-10-28): makeBlock leaves the image heap to this thread
                 c.block = makeBlock(chunkSize, DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image, "image heap chunk");
+                // banjo-nx (2026-10-28, the console's OOM): the empty chunks back, then the image's own size.
+                if (!c.block) {
+                    releaseEmptyChunksLocked();
+                    const uint32_t own = alignUp(size + alignment, DK_MEMBLOCK_ALIGNMENT);
+                    if (own < chunkSize) {
+                        chunkSize = own;
+                        c.block = makeBlock(chunkSize, DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image, "image (own block)");
+                    }
+                }
+                t_inImageAlloc = false;
                 if (!c.block)
                     return false;
                 c.size = chunkSize;
@@ -1155,7 +1357,13 @@ namespace plume {
                 retired[kept++] = r;
             }
         }
+        const bool freed_images = kept != retired.size();
         retired.resize(kept);
+        // banjo-nx (2026-10-28, the console's OOM): chunks emptied by those, back to the heap while its room is short.
+        if (freed_images && heapRoomShort()) {
+            std::lock_guard<std::mutex> heap(heapMutex);
+            releaseEmptyChunksLocked();
+        }
     }
 
     // ---- shaders
@@ -1645,13 +1853,25 @@ namespace plume {
             }
             req = Deko3DVariantRequest();
         }
-        if (!waiting)
+        if (!waiting) {
             p->provisional.store(false, std::memory_order_release);
+            g_deko3dProvisionalPipelines.fetch_sub(1, std::memory_order_relaxed);  // banjo-nx (2026-10-28)
+        }
         return waiting;
     }
 
     bool Deko3DShaderReadsVertexId(const RenderShader *shader) {
         return shader == nullptr || static_cast<const Deko3DShader *>(shader)->usage.readsVertexId;
+    }
+
+    // banjo-nx (2026-10-28, render-thread round): see plume_deko3d.h.
+    std::atomic<int> g_deko3dProvisionalPipelines{0};
+    bool g_deko3dProvisionalCount = true;
+    void Deko3DSetProvisionalCount(bool on) { g_deko3dProvisionalCount = on; }
+
+    Deko3DGraphicsPipeline::~Deko3DGraphicsPipeline() {
+        if (provisional.load(std::memory_order_relaxed))
+            g_deko3dProvisionalPipelines.fetch_sub(1, std::memory_order_relaxed);
     }
 
     bool Deko3DRefreshPipelineSlow(RenderPipeline *pipeline) {
@@ -2113,6 +2333,10 @@ namespace plume {
             p->textures = p->textures || stages[i]->usage.textures;
         }
         p->valid = ok;
+        // banjo-nx (2026-10-28): counted once, before anyone has the pipeline (the destructor or the refresh that finds
+        // its variants takes it off again).
+        if (p->provisional.load(std::memory_order_relaxed))
+            g_deko3dProvisionalPipelines.fetch_add(1, std::memory_order_relaxed);
         p->primitive = toDk(desc.primitiveTopology);
 
         dkRasterizerStateDefaults(&p->rasterizer);

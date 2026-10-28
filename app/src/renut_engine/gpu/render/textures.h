@@ -51,6 +51,11 @@ struct HostTexture {
   // downsamples to quarter size and below) average what the guest texels
   // cover, as one guest bilinear tap does. Sampled up to LOD log2(scale).
   uint32_t extra_levels = 0;
+  // banjo-nx (2026-10-28, banjo_renut_lazy_resolve_mips; from sa2-nx's sa2_renut_lazy_resolve_mips): the region of the
+  // host levels still to be made from level 0. The resolves since they were last made widen it; the first read of the
+  // levels (a bind) or other write of level 0 (an upload, a words copy) makes them (FlushResolveMipsLocked).
+  bool mips_pending = false;
+  plume::RenderRect mips_rect;
   // Level 0 without the fetch swizzle, which the levels are made from.
   std::unique_ptr<plume::RenderTextureView> level0_view;
   uint32_t level0_slot = UINT32_MAX;
@@ -304,6 +309,9 @@ bool ReadOnlyLayout(plume::RenderTextureLayout layout);
 // texture in SHADER_READ and the command list's framebuffer, pipeline and
 // viewport changed.
 void UpdateResolveMipsLocked(HostTexture *texture, const plume::RenderRect &rect);
+// banjo-nx (2026-10-28, banjo_renut_lazy_resolve_mips; from sa2-nx; render/draw.cpp): makes a resolve destination's
+// pending host levels (before a read of them or another write of its level 0; outside a draw's framebuffer).
+void FlushResolveMipsLocked(HostTexture &t);
 
 // A single-level color target of a resolve destination's format and host
 // size, which a multisampled resolve into one with host levels goes through

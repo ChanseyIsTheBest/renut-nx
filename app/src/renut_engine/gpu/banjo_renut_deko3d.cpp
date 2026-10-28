@@ -17,6 +17,7 @@
 #include <zstd.h>
 
 #include "renut_engine/gpu/banjo_renut_tuning.h"
+#include "renut_engine/gpu/guest/command_buffers.h"  // banjo-nx (2026-10-28): ReleaseSpareBuffersNow
 #include "renut_engine/gpu/shaders/shader_cache.h"  // banjo-nx (2026-10-22): the installed package's shader table
 
 #if defined(PLUME_DEKO3D)
@@ -422,8 +423,12 @@ void InstallShaderCache() {
   options.compileWaitBoost = Deko3DCompileWaitBoostOn();  // 2026-10-23
   options.asyncCacheReads = Deko3DAsyncCacheReadsOn();     // 2026-10-23
   plume::Deko3DSetOptions(options);
+  // banjo-nx (2026-10-28, the console's OOM): a block that finds no room in the heap gets the spare command buffers'.
+  plume::Deko3DSetMemoryPressureCallback(+[] { ::renut::gpu::ReleaseSpareBuffersNow(); });
+  plume::Deko3DSetGpuRegion(Deko3DGpuRegionOn());  // banjo-nx (2026-10-28, h10)
   plume::Deko3DSetVertexBufferDedupe(Deko3DVtxDedupeOn());  // banjo-nx (2026-10-26, Unleashed-style step 2)
   plume::Deko3DSetTextureSkip(Deko3DTextureSkipOn());       // banjo-nx (2026-10-27, render thread night)
+  plume::Deko3DSetProvisionalCount(Deko3DProvisionalCountOn());  // banjo-nx (2026-10-28, render-thread round)
   LoadCache();
   // banjo-nx (2026-10-23): the index only (asyncCacheReads).
   plume::SetDeko3DShaderCacheContains([](uint64_t key) {

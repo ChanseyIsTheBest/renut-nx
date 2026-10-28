@@ -1573,7 +1573,8 @@ builds/2026-10-27_1047_shadowsort (handheld, stock clocks): 17.2 fps, render thr
 render thread a draw (setters2: 16.1 fps, 56.9 ms, 41.0 ms, 11.23 us). Its in-run A/B over targets 41-26 put every item
 within -3.7 % ... +4.0 %; two cost time and are now OFF by default, each with a note at its definition: the shadow sort
 (`banjo_renut_shadow_sort`, A/B 40: render thread +1.13 ms, GPU +0.65 ms) and the replay's look-ahead prefetch (its own
-key now, `banjo_renut_replay_lookahead`, A/B 29: +2.15 ms in one period). Found the same day: the A/B target list kept
+key now, `banjo_renut_replay_lookahead`, A/B 29: +2.15 ms in one period; OFF, SLOWER ON THE CONSOLE, confirmed at
++2.79 ms by night_gpu5's 30 s check). Found the same day: the A/B target list kept
 only targets below 32 and the single target was limited to 0-19, so the night packages' lists never ran 32-39; both
 now go to 63.
 
