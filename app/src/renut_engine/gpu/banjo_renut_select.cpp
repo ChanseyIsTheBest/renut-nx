@@ -30,7 +30,15 @@ bool LatchActive() {
     return true;
   }();
 #else
-  static const bool active = REXCVAR_GET(banjo_renderer) == "renut";
+  // banjo-nx (2026-10-29, title update 3): the native renderer (app/src/me, app/src/native) reads the base game's
+  // CDevice layout, which title update 3 changed (4 bytes more from 0x2AC0, 8 from 0x2E30; render/draw.h); it is kept
+  // as source only, and Renut's renderer runs whatever banjo_renderer says.
+  static const bool active = [] {
+    if (REXCVAR_GET(banjo_renderer) != "renut")
+      REXLOG_WARN("banjo_renderer = \"{}\": the native renderer reads the base game's Direct3D device layout, not "
+                  "title update 3's: Renut's renderer instead", REXCVAR_GET(banjo_renderer));
+    return true;
+  }();
 #endif
   g_active = active ? 1 : -1;
   return active;

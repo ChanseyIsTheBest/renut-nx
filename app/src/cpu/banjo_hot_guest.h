@@ -36,7 +36,7 @@ inline constexpr uint32_t kCountdownMask = (1u << kCountdownBits) - 1;
 
 struct Hook {
   // Fixed (the BANJO_HOT_HOOK line).
-  const char* name;  // "sub_82949790"
+  const char* name;  // "sub_8299E2E8"
   const char* key;   // its cvar
   PPCFunc* orig;     // the recompiled function
   void (*native)(PPCContext&, uint8_t*);

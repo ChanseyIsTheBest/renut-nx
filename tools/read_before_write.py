@@ -111,6 +111,12 @@ def uses_defs(s):
     if m and m.group(1) in idx:
         defs |= 1 << idx[m.group(1)]
         s2 = s2[len(m.group(1)):]
+    # banjo-nx (2026-10-29): fp_compares_modeless writes the field through a helper, rex::ppc::CompareAnyMode(cr6, a,
+    # b): a definition (2,220 of them in the title update's code read as reads made 450 false cr6 reports).
+    m = re.match(r'^rex::ppc::CompareAnyMode\((cr[0-7]),', s2)
+    if m and m.group(1) in idx:
+        defs |= 1 << idx[m.group(1)]
+        s2 = s2[m.end():]
     ms = re.match(r'^simde_mm_store\w*\(\(?(?:simde__m128i?\*\))?(' + REG + r')\.\w+,(.*)$', s2)
     if ms:
         defs |= 1 << idx[ms.group(1)]

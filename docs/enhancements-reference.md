@@ -1,5 +1,10 @@
 # Enhancements reference
 
+> **Title update 3 (2026-10-29).** banjo-nx is now built from the updated game (and installs the DLC):
+> `docs/title-update-3.md`. Every address-keyed item on this page (natives, localized and bulk copies, hooks, the
+> analysis lists) was moved to the update's code or derived again on it; addresses quoted below that predate it are the
+> base game's. `banjo_pool_lock` is off by default there (the update has its own pool lock).
+
 Performance changes that keep the picture and the game's behaviour the same, and the renderer fixes that are switched
 the same way. Each has its own key in `renut.toml` (`sdmc:/switch/banjo-nx/renut.toml`) and belongs to a group whose
 master key must also be on:

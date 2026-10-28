@@ -294,8 +294,8 @@ void ReleaseHostTextureLocked(u32 texture_va);
 
 // The game freed the guest memory at physical address 'physical' ('size'
 // bytes): the host textures whose data was there go. N&B's level textures are
-// headers it sets up itself (XGSetTextureHeader, sub_823191B8 and the
-// streaming's sub_8230B360) over data in its section pools; D3D never destroys
+// headers it sets up itself (XGSetTextureHeader, sub_822E8660 and the
+// streaming's sub_822DAB48) over data in its section pools; D3D never destroys
 // them, and the game drops them by destroying the pool at a section change
 // (game/level_pools.cpp).
 void ReleaseHostTexturesInMemoryLocked(u32 physical, u32 size);

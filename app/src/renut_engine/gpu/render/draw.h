@@ -190,7 +190,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call,
 // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_chain_reuse): set by backend/queued.cpp around a draw of its delta chain
 // (banjo_renut_snapshot_deltas): the device chunks that changed since the chain's previous draw. The chain's chunks: the
 // 30 of 64 bytes before the float constants (device bytes 0-1919), then the bool constants on: banjo-nx (N&B's
-// 12,712-byte snapshot) 41 (10112-12711, the last one 40 bytes); SA2 47 (10112-13087). 'seq' numbers the chain's draws (consecutive, from 2; a whole copy marks every chunk); 0 for
+// 12,720-byte snapshot on title update 3) 41 (10112-12719, the last one 48 bytes); SA2 47 (10112-13087). 'seq' numbers the chain's draws (consecutive, from 2; a whole copy marks every chunk); 0 for
 // any other draw. A memo of a draw's derived state is valid for the next draw when its seq is the memo's + 1 and none
 // of the chunks it reads changed.
 // banjo-nx (2026-10-26, Unleashed-style step 1): 'fields', the device fields that changed since the previous draw
@@ -204,17 +204,17 @@ enum DrawField : u32 {
   kFieldViewPackets = 1u << 3,  // the window, values and control packets, 0x28C0-0x2967
   kFieldMisc = 1u << 4,         // the other packets, 0x2968-0x2A7F but 0x29C0
   kField29C0 = 1u << 5,         // the word ComputeViewport reads at 0x29C0
-  kFieldUnread = 1u << 6,       // 0x2A80-0x2DFF: the private words no draw reads
-  kFieldPrivate = 1u << 7,      // the private render state, 0x2E00-0x2EFF but the declaration
-  kFieldDecl = 1u << 8,         // the vertex declaration, 0x2E2C
-  kFieldTail = 1u << 9,         // the rest: 0x2F00-0x3093, 0x3168-0x3183, 0x319C-0x31A3
-  kFieldIndex = 1u << 10,       // the index buffer, 0x3094
-  kFieldTargets = 1u << 11,     // the render targets and the depth surface, 0x3098-0x30AB
-  kFieldStreams = 1u << 12,     // the stream sources and strides, 0x30AC-0x30FF
-  kFieldTexWords = 1u << 13,    // the texture words, 0x3100-0x3167
-  kFieldScissor = 1u << 14,     // SetScissorRect's RECT, 0x3184-0x3193
-  kFieldShaders = 1u << 15,     // the pixel and vertex shaders, 0x3194-0x319B
-  kFieldPredication = 1u << 16, // the predication, 0x31A4
+  kFieldUnread = 1u << 6,       // 0x2A80-0x2E03: the private words no draw reads
+  kFieldPrivate = 1u << 7,      // the private render state, 0x2E04-0x2F07 but the declaration
+  kFieldDecl = 1u << 8,         // the vertex declaration, 0x2E30
+  kFieldTail = 1u << 9,         // the rest: 0x2F08-0x309B, 0x3170-0x318B, 0x31A4-0x31AB
+  kFieldIndex = 1u << 10,       // the index buffer, 0x309C
+  kFieldTargets = 1u << 11,     // the render targets and the depth surface, 0x30A0-0x30B3
+  kFieldStreams = 1u << 12,     // the stream sources and strides, 0x30B4-0x3107
+  kFieldTexWords = 1u << 13,    // the texture words, 0x3108-0x316F
+  kFieldScissor = 1u << 14,     // SetScissorRect's RECT, 0x318C-0x319B
+  kFieldShaders = 1u << 15,     // the pixel and vertex shaders, 0x319C-0x31A3
+  kFieldPredication = 1u << 16, // the predication, 0x31AC
   // banjo-nx (2026-10-27, render thread night): the vertex fetch constants, 0x6F0-0x77F, apart from the texture ones: a
   // draw of another mesh changes its streams' fetch constants (72-77 % of the draws), which made every such draw take
   // its textures again as if a texture had changed (Unleashed's dirty flags are per object).
@@ -240,29 +240,31 @@ constexpr u32 FieldOfOffset(u32 at) {
     return kField29C0;
   if (at < 0x2A80)
     return kFieldMisc;
-  if (at < 0x2E00)
+  // Title update 3's CDevice (banjo-nx 2026-10-29): 4 bytes more from 0x2AC0 and 8 from 0x2E30 (the base's 0x2E2C),
+  // the same from 0x3390 (d3d.h); the base's boundaries in the comments of DrawField moved with their fields.
+  if (at < 0x2E04)
     return kFieldUnread;
-  if (at >= 0x2E2C && at < 0x2E30)
+  if (at >= d3d::kDeviceOffsetVertexDeclaration && at < d3d::kDeviceOffsetVertexDeclaration + 4)
     return kFieldDecl;
-  if (at < 0x2F00)
+  if (at < 0x2F08)
     return kFieldPrivate;
-  if (at < 0x3094)
+  if (at < d3d::kDeviceOffsetIndexBuffer)
     return kFieldTail;
-  if (at < 0x3098)
+  if (at < d3d::kDeviceOffsetRenderTargets)
     return kFieldIndex;
-  if (at < 0x30AC)
+  if (at < d3d::kDeviceOffsetStreamSources)
     return kFieldTargets;
-  if (at < 0x3100)
+  if (at < d3d::kDeviceOffsetTextures)
     return kFieldStreams;
-  if (at < 0x3168)
+  if (at < d3d::kDeviceOffsetTextures + 4 * d3d::kTextureFetchSlots)
     return kFieldTexWords;
-  if (at < 0x3184)
+  if (at < 0x318C)
     return kFieldTail;
-  if (at < 0x3194)
+  if (at < d3d::kDeviceOffsetPixelShader)
     return kFieldScissor;
-  if (at < 0x319C)
+  if (at < d3d::kDeviceOffsetVertexShader + 4)
     return kFieldShaders;
-  if (at < 0x31A4)
+  if (at < d3d::kDeviceOffsetPredication)
     return kFieldTail;
   return kFieldPredication;
 }

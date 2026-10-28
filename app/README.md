@@ -48,7 +48,14 @@ you, the player?
 
 Requirements
 ----------------------------------------------
-the US version of Banjo-Kazooie: Nuts and Bolts (do not get the update, the recomp doesn't use it)
+the US version of Banjo-Kazooie: Nuts and Bolts **with title update 3** (banjo-nx, 2026-10-29: the recomp is built
+from the updated game, as reNut upstream is since ab60251), and optionally the DLC (L.O.G.'s Lost Challenges).
+
+banjo-nx (Switch) file layout, in `sdmc:/switch/banjo-nx/`:
+- `game_root/`: the disc's files, with the update's `default.xexp` next to `default.xex`;
+- `update/`: the rest of the update package (`db_index.txt` and its 12 bundle files);
+- `dlc/`: the DLC package file as it comes (e.g. `E41F20AAF7094B9AFCA8CC90489D689D72A5062B4D`), installed at the first
+  start. See `docs/title-update-3.md`.
 
 How to play on Linux
 ----------------------------------------------

@@ -160,7 +160,7 @@ struct B16 {
 
 }  // namespace detail
 
-// sub_82BB4510 - XDK C runtime memcpy: r3 = dst, r4 = src, r5 = n (its 32-bit part); returns r3 as it came.
+// sub_82C111C0 - XDK C runtime memcpy: r3 = dst, r4 = src, r5 = n (its 32-bit part); returns r3 as it came.
 //
 // The original stores r3 at -8(r1) first (a real store: it reloads r3 from there at every return), then copies
 // FORWARD: a byte head up to 8-byte dst alignment, then 128-byte blocks / doublewords / words / bytes chosen by the
@@ -174,7 +174,7 @@ struct B16 {
 // Also declined: ranges that wrap around 4 GB, and a destination that covers the save slot (the original would then
 // return what was copied over it).
 // Scratch the original leaves and this does not reproduce (hand.txt): r0, r4-r12.
-namespace n_82BB4510 {
+namespace n_82C111C0 {
 
 template <class S>
 [[gnu::always_inline]] inline bool Native(PPCContext& __restrict ctx, uint8_t* base, [[maybe_unused]] S& s) {
@@ -206,9 +206,9 @@ template <class S>
   return true;
 }
 
-}  // namespace n_82BB4510
+}  // namespace n_82C111C0
 
-// sub_82BB4A40 - XDK C runtime memset: r3 = dst, r4 = value (its low byte), r5 = n; r3 is not written.
+// sub_82C116F0 - XDK C runtime memset: r3 = dst, r4 = value (its low byte), r5 = n; r3 is not written.
 //
 // The original (ori r6,r3,0; ctr = n + 1): single bytes until r6 is 4-aligned or n is used up, the low byte of r4
 // replicated into a word, 16-byte blocks of four stw, up to three stw, up to three stb. Every store writes that byte,
@@ -216,7 +216,7 @@ template <class S>
 //   * ctr = r5 + 1 is 64-bit: with anything in the upper half of r5 the head loop could run past n: DECLINED;
 //   * ranges that wrap around 4 GB are declined.
 // Scratch not reproduced (hand.txt): r0, r4, r5, r6.
-namespace n_82BB4A40 {
+namespace n_82C116F0 {
 
 template <class S>
 [[gnu::always_inline]] inline bool Native(PPCContext& __restrict ctx, uint8_t* base, [[maybe_unused]] S& s) {
@@ -237,12 +237,12 @@ template <class S>
   return true;
 }
 
-}  // namespace n_82BB4A40
+}  // namespace n_82C116F0
 
 // Direct3D's two shader float-constant writers (called for every constant upload of every draw):
-//   sub_8222EFA8: r3 = device, r4 = first constant, r5 = source (any alignment), r6 = count of 16-byte vectors,
+//   sub_821FE108: r3 = device, r4 = first constant, r5 = source (any alignment), r6 = count of 16-byte vectors,
 //                 r7 = 64-bit dirty bits. Destination ((r3 + (r4 + 120) * 16) & ~15) + 16 k; dirty mask at r3 + 0.
-//   sub_8222F0D8: the same with (r4 + 376) and the dirty mask at r3 + 8.
+//   sub_821FE230: the same with (r4 + 376) and the dirty mask at r3 + 8.
 // The originals copy four vectors per iteration, then one per iteration: lvlx + lvrx + vor is an unaligned 16-byte
 // load (lvrx at an aligned address loads nothing), stvx128 an aligned store, dcbt are hints; then ld / or r7 / std on
 // the dirty mask. Facts used:
@@ -251,10 +251,8 @@ template <class S>
 //   * the four-at-a-time loop loads its four vectors before it stores them: ranges that overlap are DECLINED, as are
 //     ranges that wrap around 4 GB;
 //   * the dirty mask is read after the copy, in the same order here;
-//   * the originals' first instruction saves r31 at -8(r1). The generated code keeps r31 in a local of the function
-//     (zero at that point, the context's r31 is never touched) and makes the store unless the build elides dead
-//     saves (REX_NV_SAVES_ELIDE, off in the shipped build): eight zero bytes there, written first, as the original
-//     does. (Should a later code generator keep r31 in the context instead, the guard reports the slot's bytes.)
+//   * the base game's originals saved r31 at -8(r1) first (eight zero bytes, the local r31); title update 3's
+//     compile of them saves nothing (count loop on ctr, r8 for the third offset), so nothing is written there.
 // Scratch not reproduced (hand.txt): r4, r5, r6, r8-r11, v0, v10-v13.
 namespace constants {
 
@@ -273,13 +271,8 @@ template <class S>
     if (!detail::Straight(dst, bytes) || !detail::Straight(src, bytes)) [[unlikely]] return false;
     if (uint32_t(src - dst) < bytes || uint32_t(dst - src) < bytes) [[unlikely]] return false;
   }
-#if !defined(REX_NV_SAVES_ELIDE)
-  {
-    const uint32_t slot = ctx.r1.u32 - 8u;  // std r31,-8(r1), the local r31 (zero)
-    if (!s.Note(slot, 8)) [[unlikely]] return true;
-    std::memset(::banjo::hot::Raw(base, slot), 0, 8);
-  }
-#endif
+  // (Title update 3, banjo-nx 2026-10-29: its writers save no register, so the base's eight zero bytes at r1 - 8 are
+  // not written; the guard found them as the one difference of the PC run's 64-call checks.)
   if (count) {
     if (!s.Note(dst, bytes)) [[unlikely]] return true;
     ::banjo::hot::Card(base, dst, bytes);
@@ -307,27 +300,27 @@ template <class S>
 
 }  // namespace constants
 
-namespace n_8222EFA8 {
+namespace n_821FE108 {
 template <class S>
 [[gnu::always_inline]] inline bool Native(PPCContext& __restrict ctx, uint8_t* base, S& s) {
   return constants::Upload(ctx, base, s, 120, 0);
 }
-}  // namespace n_8222EFA8
+}  // namespace n_821FE108
 
-namespace n_8222F0D8 {
+namespace n_821FE230 {
 template <class S>
 [[gnu::always_inline]] inline bool Native(PPCContext& __restrict ctx, uint8_t* base, S& s) {
   return constants::Upload(ctx, base, s, 376, 8);
 }
-}  // namespace n_8222F0D8
+}  // namespace n_821FE230
 
 // Direct3D's state flush, the two functions that turn dirty bits into PM4 packets in the command buffer (called by
 // the flush of every draw, once per dirty block of state):
-//   sub_8222CB90: r3 = device, r4 = 64 dirty bits (bit 63 first), r5 = register number of the first bit, r6 = the
+//   sub_821FBC70: r3 = device, r4 = 64 dirty bits (bit 63 first), r5 = register number of the first bit, r6 = the
 //                 shadow words (word i belongs to bit i). For every run of set bits: a type-0 header
 //                 ((length - 1) << 16 | register) and the run's words, appended after the write pointer at device + 48
 //                 (which names the last word written); the new pointer is stored at the end.
-//   sub_8222D0E8: the same for the float constants, one bit per block of four vectors (16 registers, 64 bytes): the
+//   sub_821FC1C8: the same for the float constants, one bit per block of four vectors (16 registers, 64 bytes): the
 //                 run is first padded with type-2 packets (0x80000000) so that its vectors land 16-aligned (the
 //                 original stores them with stvx), then header ((16 * blocks - 1) << 16 | register) and the blocks.
 // Facts used:
@@ -416,7 +409,7 @@ template <class S, uint32_t kUnit, uint32_t kFrame>
     bit += zeros;
     const uint32_t length = ~m ? uint32_t(__builtin_clzll(~m)) : 64u;
     const uint32_t words = length * kWordsPerBit, bytes = words * 4u;
-    // (sub_8222CB90's test, wp + 4 * length < limit, and sub_8222D0E8's, wp + 4 * (16 * blocks + 3) < limit, hold
+    // (sub_821FBC70's test, wp + 4 * length < limit, and sub_821FC1C8's, wp + 4 * (16 * blocks + 3) < limit, hold
     // for every run: decided above.)
     uint32_t pads = 0;
     if (kUnit == 64) {
@@ -451,23 +444,23 @@ template <class S, uint32_t kUnit, uint32_t kFrame>
 
 }  // namespace flush
 
-namespace n_8222CB90 {
+namespace n_821FBC70 {
 template <class S>
 [[gnu::always_inline]] inline bool Native(PPCContext& __restrict ctx, uint8_t* base, S& s) {
   return flush::Runs<S, 4, 144>(ctx, base, s);
 }
-}  // namespace n_8222CB90
+}  // namespace n_821FBC70
 
-namespace n_8222D0E8 {
+namespace n_821FC1C8 {
 template <class S>
 [[gnu::always_inline]] inline bool Native(PPCContext& __restrict ctx, uint8_t* base, S& s) {
   return flush::Runs<S, 64, 176>(ctx, base, s);
 }
-}  // namespace n_8222D0E8
+}  // namespace n_821FC1C8
 
-// XAudio's per-voice state-variable filter, sub_82B0DCB8 (banjo-nx 2026-10-23, the user's request: hand-optimise the
+// XAudio's per-voice state-variable filter, sub_82B6B258 (banjo-nx 2026-10-23, the user's request: hand-optimise the
 // audio thread; the hottest guest function of that thread, a fifth of it in the console's city profile).
-//   r3 = the filter, r4 = the voice's frame buffer. It calls XAudioFrameBuffer::GetProcessingData (0x826662E0), which
+//   r3 = the filter, r4 = the voice's frame buffer. It calls XAudioFrameBuffer::GetProcessingData (0x8264E7B0), which
 //   copies the buffer's words +12, +16, +20 to its stack frame (+80): byte +81 is the channel count, +88 the samples
 //   (256 floats a channel, a channel every 1024 bytes). With byte filter+24 set, the six channels' state (low at
 //   +32, band at +56, a float each) is zeroed first. Then for each channel and sample, with q at +28, frequency at
@@ -598,7 +591,7 @@ template <class S>
     ctx.fpscr.disableFlushMode();
     if (!s.Note(self + 32, 48)) [[unlikely]] return true;
     ::banjo::hot::Card(base, self + 32, 48);
-    std::memset(f + 32, 0, 48);  // the constant at 0x8213AE04: 0.0f
+    std::memset(f + 32, 0, 48);  // the constant at 0x820062F8: 0.0f
   }
   if (nch) {
     ctx.fpscr.disableFlushMode();
@@ -631,12 +624,12 @@ template <class S>
 
 }  // namespace audio_filter
 
-namespace n_82B0DCB8 {
+namespace n_82B6B258 {
 template <class S>
 [[gnu::always_inline]] inline bool Native(PPCContext& __restrict ctx, uint8_t* base, S& s) {
   return audio_filter::Run(ctx, base, s);
 }
-}  // namespace n_82B0DCB8
+}  // namespace n_82B6B258
 
 // XAudio's ramped channel mix, rex_XAudioMixFrameBufferChannel (banjo-nx 2026-10-23, batch 6, the user's request: the
 // audio mixer further): the loop of XAUDIO::CRouterEffect::Process, a sixth of the audio thread in the console's city

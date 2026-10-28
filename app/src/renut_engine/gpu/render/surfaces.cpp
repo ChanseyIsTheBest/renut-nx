@@ -438,12 +438,12 @@ void LatchResolutionScaleLocked() {
                                              : std::string());
         }
       }
+#if defined(PLUME_DEKO3D)
       auto set = [](uint32_t code, int32_t h) {
         const uint32_t g = std::gcd(uint32_t(h), 720u);
         RenderScale::kNumerators[code] = uint32_t(h) / g;
         RenderScale::kDenominators[code] = 720u / g;
       };
-#if defined(PLUME_DEKO3D)
       set(RenderScale::kHandheldCode, hh);
       set(RenderScale::kDockedCode, dh);
       g_code_height[0] = hh;  // banjo-nx (2026-10-28, night_gpu5): CodeForHeightLocked's

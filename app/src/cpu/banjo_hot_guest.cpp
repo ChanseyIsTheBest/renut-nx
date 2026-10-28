@@ -114,7 +114,7 @@ REXCVAR_DEFINE_BOOL(banjo_hand_state_flush, true, "Banjo/Enhancements",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 REXCVAR_DEFINE_BOOL(banjo_hand_audio_filter, true, "Banjo/Enhancements",
-                    "Hand-written native of XAudio's per-voice state-variable filter (sub_82B0DCB8, the audio "
+                    "Hand-written native of XAudio's per-voice state-variable filter (sub_82B6B258, the audio "
                     "thread's hottest guest function): the filter state in registers and four channels at a time "
                     "(NEON double lanes) instead of a byte-swapped load and store of every value at every sample; "
                     "bit-identical (the same double multiply-adds rounded to float), checked by the guard of its hook")

@@ -77,8 +77,9 @@ constexpr uint64_t TouchBits(u32 offset, u32 size) {
 // Such a write sets the field's dirty tag too (m_Pending words 2-4, D3DTAGCOLLECTION), or the GPU would never get the
 // new state: the tags pending at an op (and those cleared before it, TouchTags) count as marks. A fetch constant's tag
 // (word 3, bit 31 - n) is its chunks, its texture word and the stream words; any other tag the render state's chunks: the
-// bool and integer constants and the register packets (0x2780-0x2A7F) and the private render state (0x2E00-0x2EFF).
-constexpr uint64_t kStateTagChunks = TouchBits(0x2780, 0x300) | TouchBits(0x2E00, 0x100);
+// bool and integer constants and the register packets (0x2780-0x2A7F) and the private render state (0x2E00-0x2EFF; on
+// title update 3 0x2E04-0x2F07, its CDevice 4 bytes longer from 0x2AC0 and 8 from 0x2E30).
+constexpr uint64_t kStateTagChunks = TouchBits(0x2780, 0x300) | TouchBits(0x2E00, 0x108);
 struct FetchTagTable {
   uint64_t chunks[32];
 };
@@ -86,11 +87,12 @@ constexpr FetchTagTable MakeFetchTagTable() {
   FetchTagTable t{};
   for (u32 n = 0; n < 32; ++n) {
     t.chunks[n] = TouchBits(kTouchFetchBegin + n * 24, 24);
-    // The texture word of a texture fetch constant (0x3100 + 4n), and the stream words and strides (0x30AC-0x30FF):
+    // The texture word of a texture fetch constant (0x3108 + 4n on title update 3; 0x3100 on the base), and the stream
+    // words and strides (0x30B4-0x3107; 0x30AC-0x30FF):
     // any fetch constant may hold vertex fetches (SetVertexFetchConstant's slot (0x5F - register) / 3).
     if (n < d3d::kTextureFetchSlots)
       t.chunks[n] |= TouchBits(d3d::kDeviceOffsetTextures + n * 4, 4);
-    t.chunks[n] |= TouchBits(d3d::kDeviceOffsetStreamSources, 0x3100 - d3d::kDeviceOffsetStreamSources);
+    t.chunks[n] |= TouchBits(d3d::kDeviceOffsetStreamSources, d3d::kDeviceOffsetTextures - d3d::kDeviceOffsetStreamSources);
   }
   return t;
 }
@@ -296,21 +298,22 @@ constexpr u32 Flags = 0x2ABC;              // bytes 0x2ABC-0x2ABF, see below
 constexpr u32 Flags1 = 0x2ABD;
 constexpr u32 Flags2 = 0x2ABE;
 constexpr u32 Flags3 = 0x2ABF;
-constexpr u32 ScissorRect = 0x3184;        // SetScissorRect's RECT
-constexpr u32 IndexBuffer = 0x3094;
-constexpr u32 RenderTargets = 0x3098;      // [4]
-constexpr u32 DepthStencil = 0x30A8;
-constexpr u32 StreamSources = 0x30AC;      // [16]
-constexpr u32 StreamStrides = 0x30F0;      // u8[16], stride / 4
-constexpr u32 Textures = 0x3100;           // [26]
-constexpr u32 Predication = 0x31A4;        // tile predication of the next draws, ~0 none
-constexpr u32 RunPredicationState = 0x31A8;
-constexpr u32 PredicationSet = 0x31AC;     // 1 while SetPredication's mask is non-zero
-constexpr u32 TilingSurfaces = 0x31B8;     // the 4 targets and depth BeginTiling bound
-constexpr u32 TileCount = 0x31CC;
-constexpr u32 TileRects = 0x31D0;          // D3DRECT[TileCount]
-constexpr u32 TileOrigins = 0x32C0;        // per tile, x & ~31, y & ~31
-constexpr u32 TilingExtent = 0x337C;       // widest and tallest tile edge
+// TU3: the fields from 0x2E30 to 0x3390 are 8 bytes further on.
+constexpr u32 ScissorRect = 0x318C;        // SetScissorRect's RECT
+constexpr u32 IndexBuffer = 0x309C;
+constexpr u32 RenderTargets = 0x30A0;      // [4]
+constexpr u32 DepthStencil = 0x30B0;
+constexpr u32 StreamSources = 0x30B4;      // [16]
+constexpr u32 StreamStrides = 0x30F8;      // u8[16], stride / 4
+constexpr u32 Textures = 0x3108;           // [26]
+constexpr u32 Predication = 0x31AC;        // tile predication of the next draws, ~0 none
+constexpr u32 RunPredicationState = 0x31B0;
+constexpr u32 PredicationSet = 0x31B4;     // 1 while SetPredication's mask is non-zero
+constexpr u32 TilingSurfaces = 0x31C0;     // the 4 targets and depth BeginTiling bound
+constexpr u32 TileCount = 0x31D4;
+constexpr u32 TileRects = 0x31D8;          // D3DRECT[TileCount]
+constexpr u32 TileOrigins = 0x32C8;        // per tile, x & ~31, y & ~31
+constexpr u32 TilingExtent = 0x3384;       // widest and tallest tile edge
 constexpr u32 CommandBuffer = 0x34CC;      // the D3DCommandBuffer being recorded
 constexpr u32 SideBuffer = 0x4158;
 constexpr u32 AutoDepthStencil = 0x39E8;   // InitializePresentationParameters' surfaces
@@ -382,7 +385,7 @@ bool TilingBoundSurfaces(Device device);
 // What D3D does with a resource the device stops using: it is busy until the
 // current fence (a recorded buffer's resource list is the GPU's; left out).
 void TagResourceFence(Device device, u32 resource, bool read_fence);
-// D3D's InvalidateConstants (0x8264E128) and its waiting variant (0x82657488,
+// D3D's InvalidateConstants (0x82634B90) and its waiting variant (0x82640010,
 // D3DDevice_BlockUntilIdle).
 void InvalidateConstants(Device device);
 void InvalidateConstantsAndWait(Device device);
@@ -392,13 +395,13 @@ void InvalidateConstantsAndWait(Device device);
 struct Rect {
   i32 x1, y1, x2, y2;
 };
-// D3DDevice_ClearF (0x822811A0, D3D::ClearF 0x82223560); no rect: the bound
+// D3DDevice_ClearF (0x8224F110, D3D::ClearF 0x821F2750); no rect: the bound
 // target's (or the tiling extent's).
 void Clear(Device device, u32 flags, const Rect *rect);
-// D3DDevice_Resolve (0x8222D6C8).
+// D3DDevice_Resolve (0x821FC7A0).
 void Resolve(Device device, u32 flags, u32 dest_texture, float clear_z, u32 clear_stencil,
              u32 parameters);
-// D3DDevice_BeginExport (0x82269618) / D3DDevice_EndExport (0x822693B0): a
+// D3DDevice_BeginExport (0x82237FE8) / D3DDevice_EndExport (0x82237D80): a
 // memexport stream's destination, Index, is Resource.
 void BeginExport(Device device, u32 index, u32 resource, u32 flags);
 void EndExport(Device device, u32 index, u32 resource, u32 flags);

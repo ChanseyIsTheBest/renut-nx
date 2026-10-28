@@ -144,8 +144,8 @@ void ReleaseHostShader(ShaderRecord *record) {
   KeepShader(record->entry, std::move(last));
 }
 
-// Where D3DDevice_CreateVertexShader / CreatePixelShader (0x8264E8B0 /
-// 0x8264E6A8) lay out a shader object: the container's virtual part copied
+// Where D3DDevice_CreateVertexShader / CreatePixelShader (0x826377C0 /
+// 0x826375D8) lay out a shader object: the container's virtual part copied
 // after the D3D header, and a pointer to its physical part (literal constants
 // and microcode). Objects in bundles have the same layout.
 constexpr u32 kVertexShaderContainer = 0x368;
@@ -536,7 +536,7 @@ void RegisterGuestShader(u32 shader_va, u32 physical_va, bool pixel) {
   });
 }
 
-// void XGRegisterVertexShader(D3DVertexShader *pShader, void *pPhysicalPart) [0x8264E7B8]
+// void XGRegisterVertexShader(D3DVertexShader *pShader, void *pPhysicalPart) [0x826376C8]
 // As the original: the header (a vertex shader of one reference), and for
 // each of its bind slots (two when the container's flag 0x20 is set) the
 // vertex fetch instructions copied from the microcode into the slot.
@@ -574,7 +574,7 @@ void XGRegisterVertexShader_hook(u32 shader, u32 physical) {
   RegisterGuestShader(shader, physical, false);
 }
 
-// void XGRegisterPixelShader(D3DPixelShader *pShader, void *pPhysicalPart) [0x8264E670]
+// void XGRegisterPixelShader(D3DPixelShader *pShader, void *pPhysicalPart) [0x826375A0]
 void XGRegisterPixelShader_hook(u32 shader, u32 physical) {
   auto *bytes = GuestPtr<u8>(shader);
   if (!bytes)
@@ -588,18 +588,18 @@ void XGRegisterPixelShader_hook(u32 shader, u32 physical) {
   RegisterGuestShader(shader, physical, true);
 }
 
-// D3DVertexShader *D3DDevice_CreateVertexShader(const DWORD *pFunction) [0x8264E8B0]
+// D3DVertexShader *D3DDevice_CreateVertexShader(const DWORD *pFunction) [0x826377C0]
 u32 D3DDevice_CreateVertexShader_hook(mapped_u32 function) {
   return CreateShaderRecord(static_cast<const be_u32 *>(function), false);
 }
 
-// D3DPixelShader *D3DDevice_CreatePixelShader(const DWORD *pFunction) [0x8264E6A8]
+// D3DPixelShader *D3DDevice_CreatePixelShader(const DWORD *pFunction) [0x826375D8]
 u32 D3DDevice_CreatePixelShader_hook(mapped_u32 function) {
   return CreateShaderRecord(static_cast<const be_u32 *>(function), true);
 }
 
 // D3DVertexDeclaration *D3DDevice_CreateVertexDeclaration(
-//     const D3DVERTEXELEMENT9 *pVertexElements) [0x8264EA90]
+//     const D3DVERTEXELEMENT9 *pVertexElements) [0x826379A0]
 u32 D3DDevice_CreateVertexDeclaration_hook(rex::MappedPtr<GuestVertexElement> elements) {
   if (!elements)
     return 0;
@@ -617,16 +617,16 @@ u32 D3DDevice_CreateVertexDeclaration_hook(rex::MappedPtr<GuestVertexElement> el
   return declaration->self_va;
 }
 
-// void D3DVertexShader_Bind(D3DVertexShader *pShader, DWORD Flags,
-//     D3DVertexDeclaration *pDecl, const DWORD *pStreamStrides, DWORD Index) [0x82657048]
+// void D3DVertexShader_Bind(D3DVertexShader *pShader, D3DVertexDeclaration *pDecl,
+//     const DWORD *pStreamStrides) [0x82628580] (TU3's build dropped the unused
+// Flags and Index of the first release's)
 // Patches a CVertexShader's vertex fetches to a declaration and the strides of
 // streams 0..(highest stream in the declaration). Draws take their input layout
 // from a declaration record instead, so nothing is patched; the declaration and
 // strides are kept for draws that rely on the bind: N&B binds its shaders when
 // it creates them and then draws with no declaration set, or with a zero
 // SetStreamSource stride.
-void D3DVertexShader_Bind_hook(u32 shader_va, u32 /*flags*/, u32 declaration_va,
-                               mapped_u32 stream_strides, u32 /*index*/) {
+void D3DVertexShader_Bind_hook(u32 shader_va, u32 declaration_va, mapped_u32 stream_strides) {
   // The declaration and strides as they are now; the shader record is the
   // render thread's (draws read it), so it is updated there, in order.
   const auto *declaration =
@@ -658,9 +658,9 @@ void D3DVertexShader_Bind_hook(u32 shader_va, u32 /*flags*/, u32 declaration_va,
 
 } // namespace
 
-BANJO_RENUT_HOOK(sub_8264E8B0, D3DDevice_CreateVertexShader_hook);  // D3DDevice_CreateVertexShader
-BANJO_RENUT_HOOK(sub_8264E6A8, D3DDevice_CreatePixelShader_hook);  // D3DDevice_CreatePixelShader
-BANJO_RENUT_HOOK(sub_8264EA90, D3DDevice_CreateVertexDeclaration_hook);  // D3DDevice_CreateVertexDeclaration
-BANJO_RENUT_HOOK(sub_82657048, D3DVertexShader_Bind_hook);  // D3DVertexShader_Bind
-BANJO_RENUT_HOOK(sub_8264E7B8, XGRegisterVertexShader_hook);  // XGRegisterVertexShader
-BANJO_RENUT_HOOK(sub_8264E670, XGRegisterPixelShader_hook);  // XGRegisterPixelShader
+BANJO_RENUT_HOOK(sub_826377C0, D3DDevice_CreateVertexShader_hook);  // D3DDevice_CreateVertexShader
+BANJO_RENUT_HOOK(sub_826375D8, D3DDevice_CreatePixelShader_hook);  // D3DDevice_CreatePixelShader
+BANJO_RENUT_HOOK(sub_826379A0, D3DDevice_CreateVertexDeclaration_hook);  // D3DDevice_CreateVertexDeclaration
+BANJO_RENUT_HOOK(sub_8263FBD0, D3DVertexShader_Bind_hook);  // D3DVertexShader_Bind
+BANJO_RENUT_HOOK(sub_826376C8, XGRegisterVertexShader_hook);  // XGRegisterVertexShader
+BANJO_RENUT_HOOK(sub_826375A0, XGRegisterPixelShader_hook);  // XGRegisterPixelShader

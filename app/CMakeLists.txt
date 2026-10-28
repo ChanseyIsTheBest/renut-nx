@@ -81,6 +81,10 @@ set(RENUT_SOURCES
 	src/renut_engine/texture_tools.cpp
 	src/renut_engine/frontend_debug_menu.cpp
 	src/renut_engine/townsfolk.cpp
+	src/renut_engine/title_update.cpp
+	src/renut_engine/dlc_install.cpp
+	src/renut_engine/thread_slots.cpp
+	src/renut_engine/env_map_pool.cpp
     # CPU/GPU profiler ported from UnleashedRecomp-NX (see src/profiler/profiler.h).
     src/profiler/profiler.cpp
     # Native renderer (from masseffect-nx, itself derived from nfsmw-nx): reads the game's PM4 ring and draws with

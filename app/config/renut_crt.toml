@@ -1,53 +1,54 @@
+# banjo-nx (2026-10-29): addresses for title update 3 (tools/remap_addresses.py; not included in the codegen, read by tools/post_codegen.py).
 [rexcrt]
 
 #Heap
-RtlAllocateHeap = 0x8223f478
-RtlFreeHeap = 0x8223fd48 
-RtlSizeHeap = 0x82240200
-RtlReAllocateHeap = 0x82717428 
+RtlAllocateHeap = 0x8220e3b0
+RtlFreeHeap = 0x8220ec78 
+RtlSizeHeap = 0x8220F138
+RtlReAllocateHeap = 0x826F3388 
 
 #Memory
-XMemSet = 0x8224b658 
-XMemSet128 = 0x82257b18 
-XMemCpy = 0x822a2930
-memcpy_s = 0x82bb0e00 
-memmove_s = 0x82bb0ed8 
-memchr = 0x82bb1d20 
-memmove = 0x82bb2c70 
-memcpy = 0x82bb4510 
-memset = 0x82bb4a40 
+XMemSet = 0x8221a1a8 
+XMemSet128 = 0x82226508 
+XMemCpy = 0x822706c0
+memcpy_s = 0x82c0dbd0 
+memmove_s = 0x82c0dca8 
+# TU: unmapped (title update 3) # memchr = 0x82bb1d20 
+memmove = 0x82c0fa10 
+memcpy = 0x82c111c0 
+memset = 0x82c116f0 
 
 #String
-wcscmp = 0x82261560 
-strchr = 0x82bb0dc0 
-strncmp = 0x82bb12d0 
-wcslen = 0x82bb1798 
-strstr = 0x82bb1d60 
-wcsstr = 0x82bb3508 
-wcsncmp = 0x82bb3960
-wcschr = 0x82bb4028 
-wcsncpy = 0x82bb4068 
-strrchr = 0x82bb61c0 
-lstrcmpiA = 0x82bcd260 
-lstrlenA = 0x82bcd2f0 
-strncpy = 0x821e7f10
-strcpy_s = 0x821f4bc0
+wcscmp = 0x82230158 
+strchr = 0x82c0db90 
+strncmp = 0x82c0e0a0 
+# TU: unmapped (title update 3) # wcslen = 0x82bb1798 
+strstr = 0x82c0eb38 
+wcsstr = 0x82c102a8 
+wcsncmp = 0x82c106f8
+wcschr = 0x82c10ce0 
+wcsncpy = 0x82c10d20 
+strrchr = 0x82c12db0 
+lstrcmpiA = 0x82c29a40 
+# TU: unmapped (title update 3) # lstrlenA = 0x82bcd2f0 
+strncpy = 0x821b7df0
+strcpy_s = 0x821c42f8
 
 #I/O file
-CloseHandle = 0x82714358 
-FindFirstFileA = 0x827152e8 
-CreateFileA = 0x82715378 
-SetFilePointer = 0x82715570 
-ReadFile = 0x827156e0
-FindNextFileA = 0x82715868
-GetFileSize = 0x82715a20 
-SetEndOfFile = 0x82715da8
-WriteFile = 0x82715e50 
-GetFileAttributesA = 0x82715ff8 
-CompareFileTime = 0x827182b0 
-GetFileSizeEx = 0x827190f8 
-DeleteFileA = 0x82bcd0c8 
-GetFileAttributesExA = 0x82bcd3a8 
-FlushFileBuffers = 0x82bcd9e0 
-CreateDirectoryA = 0x82bcda20 
-SetFileAttributesA = 0x82bcdd68 
+CloseHandle = 0x826F0250 
+FindFirstFileA = 0x826f1250 
+CreateFileA = 0x826F12E0 
+SetFilePointer = 0x826F14D8 
+ReadFile = 0x826f1648
+FindNextFileA = 0x826F17C8
+GetFileSize = 0x826f1980 
+SetEndOfFile = 0x826f1d00
+WriteFile = 0x826f1da8 
+GetFileAttributesA = 0x826f1f50 
+# TU: unmapped (title update 3) # CompareFileTime = 0x827182b0 
+GetFileSizeEx = 0x826f5128 
+# TU: unmapped (title update 3) # DeleteFileA = 0x82bcd0c8 
+GetFileAttributesExA = 0x82c29b60 
+FlushFileBuffers = 0x82c2a1b0 
+CreateDirectoryA = 0x82c2a1f0 
+SetFileAttributesA = 0x82c2a538 

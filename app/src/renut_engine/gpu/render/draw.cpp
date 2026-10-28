@@ -1824,10 +1824,10 @@ bool BindTargets(const Targets &t, bool depth_writes = true) {
 
 // A draw's host viewport and scissor. The game's D3D sets the viewport one of
 // two ways (N&B database):
-// - D3DDevice_SetViewport (0x82222F20) writes scale w/2, -h/2, maxZ - minZ
+// - D3DDevice_SetViewport (0x821F2110) writes scale w/2, -h/2, maxZ - minZ
 //   and offset x + w/2, y + h/2, minZ, all enabled in PA_CL_VTE_CNTL: the
 //   host viewport is that rectangle, and the shaders pass positions through.
-// - D3DRS_VIEWPORTENABLE false (SetRenderState_ViewportEnable, 0x82205A80)
+// - D3DRS_VIEWPORTENABLE false (SetRenderState_ViewportEnable, 0x821D53E8)
 //   disables the transform (and clipping): the vertices are in pixels. The
 //   host viewport then covers the target, and the vertex shader maps the
 //   pixels to clip space itself (screen_space; any enabled part of the
@@ -1943,7 +1943,7 @@ ViewportState ComputeViewportSlow(const GuestDevice &device, const Targets &t) {
   // Most such draws are in the tile's own coordinates, a viewport the size of
   // the tile-sized surface (N&B's per-tile scene command buffers: the vehicle
   // parts), which the host offsets to the rect. A viewport larger than that
-  // surface addresses the whole screen (N&B's water, sub_823BA3A8, drawn once
+  // surface addresses the whole screen (N&B's water, sub_82386BF8, drawn once
   // per tile with a full-screen viewport and that tile's constants): it stays.
   ClearRect tile_rect{};
   const bool one_tile = PredicatedTile(device, tile_rect);
@@ -2698,6 +2698,8 @@ void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &con
   }
 }
 
+#endif  // PLUME_DEKO3D (the pushed buffers; banjo-nx 2026-10-29: the helpers below are every build's, the PC's too)
+
 // banjo-nx (2026-10-27, render thread night): fixed-size equality as 8-byte loads, inline: GCC called the C library's
 // memcmp for these (the texture slots' device and header words at every slot of every draw, the render state's words).
 template <size_t N>
@@ -2767,6 +2769,7 @@ inline bool PersistentSharedVerifyOn() {
   return on;
 }
 
+#if defined(PLUME_DEKO3D)
 void PushSharedConstants(plume::RenderCommandList *cmd, const SharedConstants &sc, u32 equal_lines = 0) {
   constexpr u32 kLine = 64;
   constexpr u32 kSize = u32(sizeof(SharedConstants));
@@ -5870,7 +5873,7 @@ PipelineKey MakeKey(const GuestDevice &device, const ShaderRecord *vs, const Sha
     if (State().rectangle_list_gs)
       key.rectangle_list = 1;
     // Rectangles are not culled. N&B's D3D clears through rectangles
-    // (ClearRects_D3D, 0x822043D8) whose corners run clockwise on screen, under
+    // (ClearRects_D3D, 0x821D3D20) whose corners run clockwise on screen, under
     // whatever cull mode the game left set: with back faces culled and
     // counterclockwise front faces (after hitting some enemies) the clear of
     // the post-process surface was culled, so its resolve took the previous
@@ -5979,7 +5982,7 @@ constexpr u32 kMaxMemExportStreams = 4;
 constexpr u32 kMaxMemExportBytes = 64u << 20;
 
 // The streams the shader's stream constants describe, laid out as N&B's own
-// export passes build them (sub_82317020 before D3DDevice_EndExport): x the
+// export passes build them (sub_822E6618 before D3DDevice_EndExport): x the
 // GPU address in dwords (bits 0-29) tagged 01 in bits 30-31, z the endian in
 // bits 0-2, the format in 8-13 and the number format in 16-18, w the element
 // count in bits 0-22 (y, z and w carry 0x4B high bits to stay floats).
@@ -9463,6 +9466,7 @@ std::string FastDrawReport() {
                                 g_rs_id_hits, g_rs_id_new);
   g_fast_pipeline_hits = g_fast_pipeline_misses = 0;
   std::fill(std::begin(g_fast_pipeline_miss_why), std::end(g_fast_pipeline_miss_why), 0);
+#if defined(PLUME_DEKO3D)  // banjo-nx (2026-10-29): the pushes are deko3d's (the PC build)
   if (DiagPushOn()) {  // banjo-nx (2026-10-28, diagnostic)
     out += " [push diag: shared lines";
     for (u32 l = 0; l < 22; ++l)
@@ -9473,6 +9477,7 @@ std::string FastDrawReport() {
     std::fill(std::begin(g_diag_push_lines), std::end(g_diag_push_lines), 0);
     std::fill(std::begin(g_diag_push_float), std::end(g_diag_push_float), 0);
   }
+#endif
   g_rs_id_hits = g_rs_id_new = 0;
   for (u32 i = 0; i < kFastWhyCount; ++i) {
     if (g_fast_why[i])
@@ -9530,11 +9535,13 @@ std::string FastDrawReport() {
   if (g_lazy_mips_deferred || g_lazy_mips_made)  // banjo-nx (2026-10-28, banjo_renut_lazy_resolve_mips)
     out += fmt::format(" resolve host levels: {} left for their first read, {} made at it (the rest never read),",
                        std::exchange(g_lazy_mips_deferred, 0), std::exchange(g_lazy_mips_made, 0));
+#if defined(PLUME_DEKO3D)
   if (g_const_compared) {  // banjo-nx (2026-10-28)
     const uint64_t compared = std::exchange(g_const_compared, 0), same = std::exchange(g_const_same, 0);
     out += fmt::format(" written constant groups compared with the pushed {}, the same {:.1f} %,", compared,
                        100.0 * double(same) / double(compared));
   }
+#endif
   if (HostPacketsOn())  // banjo-nx (2026-10-28, host packets)
     out += fmt::format(" host packets (banjo_renut_host_packets): {} found, {} not, {} stale, {} made,",
                        std::exchange(g_packet_hits, 0), std::exchange(g_packet_misses, 0),
@@ -10185,9 +10192,9 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   SetShared(sc, sc.pixel_origin, viewport.pixel_origin);  // Renut upstream 574b488
   if (call.primitive == kPointList) {
     // PA_SU_POINT_SIZE: height 0-15, width 16-31, half the size in 12.4 fixed
-    // point (SetRenderState_PointSize 0x8264C6C0 stores the size * 8);
+    // point (SetRenderState_PointSize 0x82635CC0 stores the size * 8);
     // PA_SU_POINT_MINMAX: minimum 0-15, maximum 16-31, the size in 12.4
-    // (SetRenderState_PointSizeMin 0x8264C720 stores the minimum * 16).
+    // (SetRenderState_PointSizeMin 0x82635D20 stores the minimum * 16).
     const auto *tessellator = reinterpret_cast<const be_u32 *>(dev.m_TessellatorPacket);
     const u32 point_size = tessellator[0], point_min_max = tessellator[1];
     float point_state[4];
@@ -11765,10 +11772,10 @@ void ClearStateLocked(const u8 *device_state, u32 flags, const ClearRect *rect,
   if (!GatherTargets(device, targets))
     return;
 
-  // D3D clamps clears to the viewport (CDevice viewport floats at 0x3168).
+  // D3D clamps clears to the viewport (CDevice viewport floats at 0x3170).
   ClearRect r = rect ? *rect : ClearRect{0, 0, int32_t(targets.width), int32_t(targets.height)};
-  const float vx = device.F32(0x3168), vy = device.F32(0x316C);
-  const float vw = device.F32(0x3170), vh = device.F32(0x3174);
+  const float vx = device.F32(0x3170), vy = device.F32(0x3174);
+  const float vw = device.F32(0x3178), vh = device.F32(0x317C);
   if (vw > 0.0f && vh > 0.0f) {
     int32_t vx2 = int32_t(vx + vw), vy2 = int32_t(vy + vh);
     // A target grown for tiling: D3D bounds the viewport by the tile-sized

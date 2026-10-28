@@ -14,9 +14,9 @@ namespace renut::gpu {
 
 // Render state values as the Xbox D3D API takes them. The game's
 // D3DDevice_SetRenderState_* setters write them into the control registers
-// unchanged: SrcBlend / DestBlend (0x82230090 / 0x822307B8, RB_BLENDCONTROL
-// bits 0-4 / 8-12), BlendOp (0x82226380, bits 5-7), ZFunc (0x821FB7B0,
-// RB_DEPTHCONTROL bits 4-6), StencilFail (0x8264C268, bits 11-13).
+// unchanged: SrcBlend / DestBlend (0x821FF1D0 / 0x821FF8D8, RB_BLENDCONTROL
+// bits 0-4 / 8-12), BlendOp (0x821F54F0, bits 5-7), ZFunc (0x821CB040,
+// RB_DEPTHCONTROL bits 4-6), StencilFail (0x82635868, bits 11-13).
 enum class D3DBlend : u32 {
   Zero = 0,
   One = 1,
@@ -67,7 +67,7 @@ enum class D3DStencilOp : u32 {
 
 // The GPU texture formats (the low 6 bits of a D3DFORMAT, fetch constant
 // dword 1 bits 0-5), by their XDK names. The game's per-format table at
-// 0x820052F8 (bits per pixel in its low byte) agrees with the sizes.
+// 0x82005200 (bits per pixel in its low byte) agrees with the sizes.
 enum class GpuTextureFormat : u32 {
   Fmt8 = 2,
   Fmt1_5_5_5 = 3,
@@ -119,7 +119,7 @@ enum class GpuTextureFormat : u32 {
 };
 
 // The render target format in a surface's color info (bits 16-19), as the
-// game's SetSurfaceHeader (0x82655A50) picks it: the high nibble's low bits
+// game's SetSurfaceHeader (0x8263E618) picks it: the high nibble's low bits
 // of its per-format table entry, 1 for an 8_8_8_8 format whose X, Y and Z
 // are gamma.
 enum class GpuColorFormat : u32 {

@@ -79,6 +79,11 @@ def main():
         sys.exit('post_codegen: out/renut_image.bin is missing (the image dump of the code generator): run the PC '
                  'build through tools\\pc_env.bat, which sets REXGLUE_DUMP_IMAGE, or set it for one codegen run')
     xex = os.path.join(APP, 'assets', 'default.xex')
+    # banjo-nx (2026-10-29): and the title update's patch next to it (the image is the patched one).
+    xexp = xex + 'p'
+    if os.path.isfile(xexp) and os.path.getmtime(xexp) > os.path.getmtime(IMAGE):
+        sys.exit('post_codegen: out/renut_image.bin is older than app/assets/default.xexp: run the code generator with '
+                 'REXGLUE_DUMP_IMAGE set (tools\\pc_env.bat does) so it writes the dump of the patched image again')
     if os.path.isfile(xex) and os.path.getmtime(xex) > os.path.getmtime(IMAGE):
         sys.exit('post_codegen: out/renut_image.bin is older than app/assets/default.xex: run the code generator with '
                  'REXGLUE_DUMP_IMAGE set (tools\\pc_env.bat does) so it writes the dump again')
@@ -152,12 +157,12 @@ def main():
         run(tool('localize_native.py'), '--list', '--bulk')
         # cpu_aggressive B: the XAudio limiter's copy computes log10 only where the dB value is read (the recompiled
         # original stays as it is: the hook's guard compares the two). Switch back: BANJO_HOT_LAZY_LOG10=OFF
-        # (-DBANJO_LAZY_LOG10_ON=0) or the key banjo_cpu_native_sub_82B0D0C0.
+        # (-DBANJO_LAZY_LOG10_ON=0) or the key banjo_cpu_native_sub_82B6A678.
         run(tool('limiter_lazy_log10.py'), '--hot', os.path.join(gen, 'hot'))
     # cpu_aggressive C: the script interpreters' jump-table dispatch threaded into each handler (computed gotos, GCC
     # cross-jumping off for these functions only). Switch back: REX_SWITCH_THREAD_OFF / REX_SWITCH_GOTO_OFF.
     run(tool('switch_goto.py'), '--gen', gen, '--thread', '--only',
-        'sub_82948928,sub_8294EF68,sub_82949790,sub_82BDAED0,sub_82959230')
+        'sub_8299D480,sub_829A75E8,sub_8299E2E8,sub_82C3D4E8,sub_829AA068')
     # cpu_aggressive D: proven link-register write-backs (the value ctx.lr already holds) compile to nothing on the
     # Switch; REX_LR_WRITE_SAME_CHECK (PC verify) tests every one. Before r1_local.py (its patterns name ctx.r1).
     proofs = os.path.join(ROOT, 'out', 'cpu_aggressive_proofs')

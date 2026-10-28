@@ -53,7 +53,8 @@ void RecordResolve(u32 device_va, u32 flags, const ClearRect *source_rect, u32 d
 // D3DDevice_RunCommandBuffer on a recording device: records the run.
 void RecordRun(u32 device_va, u32 command_buffer_va);
 // banjo-nx (2026-10-26, banjo_renut_diag_fast_census): replayed recordings against the frame before's; empty when none.
-std::string RepeatCensusReport();
+// (2026-10-29: its own name; it shared render/draw.h's, one definition of the two was linked.)
+std::string ReplayRepeatCensusReport();
 // banjo-nx (2026-10-28, banjo_renut_diag_packet_census): replayed draws a whole-state keyed cache would answer.
 std::string PacketCensusReport();
 std::string StateSourceReport();  // banjo-nx (2026-10-26, banjo_renut_diag_fast_census)

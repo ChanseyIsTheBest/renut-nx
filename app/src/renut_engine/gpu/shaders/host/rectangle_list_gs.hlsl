@@ -3,7 +3,7 @@
 // through this shader, which emits each rectangle as a two-triangle strip.
 //
 // The three corners do not come in a fixed order. N&B's D3D writes its own
-// (ClearRects_D3D, 0x822043D8) as (left, top), (right, top), (right, bottom),
+// (ClearRects_D3D, 0x821D3D20) as (left, top), (right, top), (right, bottom),
 // the right angle at the second; N&B's full-screen passes draw (-1, 1),
 // (1, 1), (-1, -1), the right angle at the first. So the shader finds the
 // corner whose two edges are perpendicular, and the fourth corner is the one

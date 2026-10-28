@@ -38,7 +38,7 @@ import struct
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ENTRY_POINT = 0x82718798  # banjo-nx: the image's PE header (AddressOfEntryPoint 0x718798 + base 0x82000000)
+ENTRY_POINT = 0x826F46F0  # banjo-nx: the image's PE header (AddressOfEntryPoint 0x6F46F0 + base 0x82000000; title update 3, the base's 0x82718798)
 
 
 def R(n):
