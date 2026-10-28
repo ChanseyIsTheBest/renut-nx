@@ -85,6 +85,12 @@ Answers to the questions Futari, SA2, Peggle 2 and SASRT asked while starting th
   running. Keep runs under 10 minutes.**
 - Known: Ryujinx answers a second `OpenDisplay` of "Default" like the console now (our fork); a game thread waiting on
   the display's vsync event stalled Banjo in the emulator (not explained; Banjo's display_sync is off by default).
+- **A stall watchdog that pauses threads can freeze the whole game in Ryujinx (Banjo, 2026-10-29):** pausing a thread
+  with `svcSetThreadActivity` (to read its registers, as the watchdog from UnleashedRecomp-NX does) makes Ryujinx loop
+  on its global kernel lock until that thread leaves its core; on a busy PC the paused thread can lose the lock to the
+  loop indefinitely. The watchdog hangs with the thread still paused, and every guest thread soon waits on it (2 of 3
+  runs froze around the intro movies; 0 of 2 with the watchdog off). Turn the watchdog off for emulator runs
+  (`banjo_stall_watch_seconds = 0` in Banjo); keep it for the console.
 
 ## Traps other ports hit (reported by the ports)
 

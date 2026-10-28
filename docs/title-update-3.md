@@ -154,3 +154,16 @@ dynamic resolution's scale codes (fixed at 1.0): the new package has all 173 at 
   `#if defined(PLUME_DEKO3D)`, `far` as a variable name, two functions named `RepeatCensusReport`, the PGO hooks):
   fixed.
 - Switch build in the emulator, title screen (intro movies, title).
+- The PGO build (profile taken on the update's code, docs/pgo-lto.md) froze once in Ryujinx at the second intro
+  movie, as one run of the build before it had at the title: every guest thread stopped together (the hot-copy
+  reports' call counts flat), the host threads (uam compiles, reports) went on. In both, the stall watchdog
+  (`banjo_stall_watch_seconds`, `profiler/stall_watch_switch.cpp`: it pauses each thread with
+  `svcSetThreadActivity` to read its registers and stack) went silent at that moment: its next dump never came.
+  Ryujinx's `KThread.SetActivity(pause)` waits in a loop that takes and drops the kernel's global critical section
+  until the paused thread leaves its core; on a loaded host the thread it waits for can lose that lock to it every
+  time, so the watchdog hangs with a thread left paused, and every guest thread then blocks on what that thread
+  holds. The console's kernel takes the thread off its core at once, and the watchdog has run in every console
+  package since it was ported from UnleashedRecomp-NX. With `banjo_stall_watch_seconds = 0` the same NRO ran clean twice
+  (the movies, the title loop, 5,400 and 7,500 game frames in two 9-minute runs, no missing shader, no
+  `[hot] DIFFERENCE`): emulator runs set it to 0 from now on; console packages keep it on. Packaged as
+  `builds/2026-10-29_0654_tu3_dlc_pgo` (NRO 07a4a47f22b6).
