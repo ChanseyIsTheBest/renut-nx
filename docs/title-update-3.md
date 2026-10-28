@@ -129,6 +129,10 @@ dynamic resolution's scale codes (fixed at 1.0): the new package has all 173 at 
   `banjo_renderer` says.
 - PGO: the profile's generated-code functions have new names; the renderer and SDK parts still match.
 
+- reNut upstream's `game/level_pools.cpp` (the section pools' host textures released when the game frees their memory,
+  `ReleaseHostTexturesInMemoryLocked`, which banjo-nx's renderer has but nothing calls): a candidate for the next round;
+  it hooks the pool reset `sub_823333F0`, which `banjo_pool_lock.cpp` hooks too (off by default now), and only a run
+  through section changes shows its effect.
 - reNut upstream's renderer work after 574b488 (99cb2f4, 0a00f06: ambient occlusion, its SMAA, parallel recording,
   video-memory pools for PCIe, the title logo and menu colour, bloom and depth-of-field strength) is for its Vulkan /
   D3D12 path, which banjo-nx's deko3d record-time path and its own SMAA replaced; online play (EOS) is not for the

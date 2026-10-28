@@ -103,3 +103,14 @@ not an error, with the project's flags) and guesses for it.
 Pitfall: a background waiter that grepped the chain's output for "cycle done" matched the copy of the previous
 cycle's last lines the chain prints at its start, and started an incremental build in the release folder while the
 clean build was linking. Wait on a count of markers, or a marker only the awaited step prints.
+
+## The title update's profile (2026-10-29)
+
+Title update 3 recompiled the whole game (docs/title-update-3.md): every generated function has new code and most
+have new names, so the night_final profile matched only the renderer, the app and plume. Taken again: the base
+profile moved out of the repository (`pgo_profile_night_final_base` next to it; `pgo_merge.py` adds to files already
+there), the instrumented folder pointed at the distribution build's shader package (`BANJO_DEKO3D_GLSL_CPP` in its
+CMakeCache: the update's 23 new runtime shaders), a 15-minute Ryujinx session of the scripted route (one 4.9 MB
+stream, 315 `.gcda`; at 0.3-3 fps the route covers boot, the movies, the title and the first menus), then
+the release folder rebuilt with every profiled source touched (ninja does not follow the `.gcda` files). A console
+session of the instrumented NRO merged in later would cover the levels.
