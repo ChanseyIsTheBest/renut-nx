@@ -124,7 +124,11 @@ dynamic resolution's scale codes (fixed at 1.0): the new package has all 173 at 
   string table first). A mid-asm hook on each `bl 0x824fa180` (id = `r10 >> 3` at `0x8258CF64`, `r11 >> 3` at
   `0x8258C4D4`) can write "reNut Settings" into `r4` and jump past the call. The input handler (`sub_8258C948`) reads
   the pause object at the base's offsets; the dispatch callback (base `sub_825A8D68`, mapped to `sub_8258E008` at
-  0.34 similarity) needs checking by hand first.
+  0.34 similarity) needs checking by hand first. reNut upstream itself replaced its pause tab with a GRAPHICS row in
+  Display Settings (`src/renut_engine/game/graphics_menu.cpp` at 0a00f06, on the update's addresses: the pause's and
+  the main menu's Display Settings scene, Game Information's list as the options page); taking it is the simpler way
+  back to an in-game settings menu, with banjo-nx's own option list (its options are the `renut_*` keys of its Vulkan
+  renderer) and a check through the main menu's Display Settings.
 - The native renderer (`app/src/me`, `app/src/native`) reads the base's CDevice layout: Renut's renderer runs whatever
   `banjo_renderer` says.
 - PGO: the profile's generated-code functions have new names; the renderer and SDK parts still match.
