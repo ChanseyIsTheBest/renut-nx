@@ -11,11 +11,11 @@ No game data is included. The game's files, its shaders and the update come from
 
 ## Install
 
-Use **renut-nx-webinstaller**: a web page that builds the Switch package from your Xbox 360 disc image (or the
+Use **[renut-nx-webinstaller](https://chanseyisthebest.github.io/renut-nx-webinstaller/)**: a web page that builds the Switch package from your Xbox 360 disc image (or the
 folder it was extracted to), title update 3's package and, if you have it, the DLC package. It runs in your browser
 and uploads nothing.
 
-1. Open the web installer, choose your game, then title update 3's package (`TU_16L61VD_0000004000000.00000000000O1`)
+1. Open the web installer (https://chanseyisthebest.github.io/renut-nx-webinstaller/), choose your game, then title update 3's package (`TU_16L61VD_0000004000000.00000000000O1`)
    and the DLC (`E41F20AAF7094B9AFCA8CC90489D689D72A5062B4D`, optional).
 2. Press **Create renut-nx.zip** and wait: the page makes the game's shaders and compiles them for the Switch.
 3. Extract `renut-nx.zip` to the root of the SD card: it makes `switch/renut-nx/`.
