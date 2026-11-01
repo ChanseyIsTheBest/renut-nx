@@ -2,6 +2,7 @@
  * @file    gpu/render/graphics_options.cpp
  */
 #include "renut_engine/gpu/render/graphics_options.h"
+#include "banjo_switch_default.h"  // banjo-nx (2026-11-01): the shipped Switch defaults
 
 #include <cstdlib>
 #include <string>
@@ -23,7 +24,7 @@ REXCVAR_DEFINE_STRING(renut_ambient_occlusion, "Half", "Nuts&Bolts/Graphics",
                       "or Full.")
     .allowed({"Half", "Full"});
 
-REXCVAR_DEFINE_BOOL(banjo_renut_dynamic_resolution, false, "Nuts&Bolts/Graphics",
+REXCVAR_DEFINE_BOOL(banjo_renut_dynamic_resolution, BANJO_SWITCH_DEFAULT(true, false), "Nuts&Bolts/Graphics",
                     "Dynamic resolution (2026-10-28, the user's request; not pixel-identical while it acts): the 3D "
                     "image between banjo_renut_dynamic_handheld_low and _high in handheld mode, _docked_low and _high "
                     "docked (in place of banjo_renut_render_height_handheld / _docked): the low height while the GPU's "
@@ -38,8 +39,9 @@ REXCVAR_DEFINE_INT32(banjo_renut_dynamic_handheld_high, 720, "Nuts&Bolts/Graphic
                      "banjo_renut_dynamic_resolution: the handheld range's high height")
     .range(360, 1080)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(banjo_renut_dynamic_docked_low, 720, "Nuts&Bolts/Graphics",
-                     "banjo_renut_dynamic_resolution: the docked range's low height")
+REXCVAR_DEFINE_INT32(banjo_renut_dynamic_docked_low, BANJO_SWITCH_DEFAULT(540, 720), "Nuts&Bolts/Graphics",
+                     "banjo_renut_dynamic_resolution: the docked range's low height (2026-11-01, the user's request: 540 on "
+                     "the Switch, 720 before)")
     .range(360, 1080)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(banjo_renut_dynamic_docked_high, 1080, "Nuts&Bolts/Graphics",
@@ -79,7 +81,7 @@ REXCVAR_DEFINE_STRING(renut_anisotropic_filtering, "Game", "Nuts&Bolts/Graphics"
                       "16x.")
     .allowed({"Game", "2x", "4x", "8x", "16x"});
 
-REXCVAR_DEFINE_STRING(renut_post_process_precision, "High", "Nuts&Bolts/Graphics",
+REXCVAR_DEFINE_STRING(renut_post_process_precision, BANJO_SWITCH_DEFAULT("Game", "High"), "Nuts&Bolts/Graphics",
                       "Precision of the bloom, depth of field and SSAO buffers: Game keeps the "
                       "console's 8 bits (faint glow shows as blobs sliding over dark areas), High "
                       "uses 16 bits.")

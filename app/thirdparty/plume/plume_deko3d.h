@@ -71,6 +71,11 @@ namespace plume {
         // banjo-nx (2026-10-19): copy-engine and 2D-engine work, by kind (each fenced by Full barriers in Renut):
         // buffer copies, buffer-to-image (texture uploads), image-to-buffer (readbacks), image copies, resolves, blits.
         std::atomic<uint64_t> copyBuffer{0}, copyUpload{0}, copyReadback{0}, copyImage{0}, copyResolve{0}, copyBlit{0};
+        // sasrt-nx (2026-10-30): pipelines made for a multisampled target, those of them with alpha to coverage, and
+        // the multisampled ones given the standard sample positions (Deko3DOptions::msaaPositions).
+        std::atomic<uint64_t> msaaPipelines{0}, msaaAlphaToCoverage{0}, msaaPositioned{0};
+        // sasrt-nx (2026-10-30, Deko3DOptions::stripRestart): indexed strip draws drawn with primitive restart.
+        std::atomic<uint64_t> stripRestartDraws{0};
     };
     // banjo-nx (2026-10-19, render-thread proposal 13): read inline (no call per draw).
     extern Deko3DStats g_deko3dStats;
@@ -172,12 +177,27 @@ namespace plume {
         uint32_t txqMask = 0;
     };
 
+    // banjo-nx (2026-11-01, the console's out-of-memory crash): a shader's GLSL, unpacked when it is needed. Every shader
+    // object kept its whole text (35 KB on average, 161 MB for the whole package) for as long as it lived, and the game
+    // loads more shaders in every area. With a loader (Deko3DShaderSetGlslLoader: the text unpacked again from the
+    // package in memory), the text lives only while a lookup or a compile uses it, plus the last few used
+    // (Deko3DGlslSource::text). Without one it is kept, as before.
+    struct Deko3DGlslSource {
+        std::mutex mutex;
+        std::shared_ptr<const std::string> kept;     // no loader: the text, for good
+        std::weak_ptr<const std::string> unpacked;   // with a loader: the text while something holds it
+        std::function<std::string()> loader;  // the text again; empty when it cannot
+        // The text (nullptr if the loader fails).
+        std::shared_ptr<const std::string> text();
+    };
+
     struct Deko3DShader : RenderShader {
         Deko3DDevice *device = nullptr;
         DkStage stage = DkStage_Vertex;
         // banjo-nx (2026-10-21): shared, so a background compile (and a pipeline waiting for one) holds the text without
-        // a copy, also after the shader object is gone (Renut's prebuild workers destroy theirs).
-        std::shared_ptr<const std::string> glsl;
+        // a copy, also after the shader object is gone (Renut's prebuild workers destroy theirs). 2026-11-01: the source
+        // (Deko3DGlslSource), not the text itself.
+        std::shared_ptr<Deko3DGlslSource> glsl;
         std::vector<uint8_t> defaultDksh;
         Deko3DShaderUsage usage;
         // Specialization constant ids the GLSL defines (SPIRV_CROSS_CONSTANT_ID_n), so a variant key holds only those.
@@ -252,7 +272,7 @@ namespace plume {
     // shared text, the defines plume inserts after its first line, the stage and the shader's name (for the log).
     struct Deko3DVariantRequest {
         uint64_t key = 0;
-        std::shared_ptr<const std::string> glsl;
+        std::shared_ptr<Deko3DGlslSource> glsl;  // banjo-nx (2026-11-01): the source; the uam thread unpacks the text
         std::string defines;
         DkStage stage = DkStage_Vertex;
         std::string name;
@@ -272,6 +292,7 @@ namespace plume {
         bool dynamicStencilReference = false;
         bool dynamicDepthBias = false;
         std::atomic<bool> provisional{false};  // (see pending, below; counted in g_deko3dProvisionalPipelines)
+        Deko3DGraphicsPipeline();   // banjo-nx (2026-11-01): counted (Deko3DPipelineCount)
         ~Deko3DGraphicsPipeline();  // banjo-nx (2026-10-28): a provisional pipeline that goes leaves the count
         DkPrimitive primitive = DkPrimitive_Triangles;
         uint32_t stageMask = 0;
@@ -496,6 +517,10 @@ namespace plume {
         // banjo-nx (2026-10-19, render-thread proposal 13): per-draw counters of this list, added to the totals at end()
         // (no atomic read-modify-write per draw: the A57 has no LSE).
         uint64_t statDraws = 0, statWindowDraws = 0;
+        uint64_t statStripRestarts = 0;  // sasrt-nx (2026-10-30)
+        // sasrt-nx (2026-10-30, Deko3DOptions::stripRestart): the restart index set on the queue (0: off), 1 when not
+        // known (a list's start: the queue keeps whatever the list before it set).
+        uint32_t boundRestart = 1;
         uint64_t statTexRuns = 0, statTexSkips = 0;  // banjo-nx (2026-10-27): into Deko3DStats at end()
         void emitBarrier(DkBarrier mode, uint32_t invalidate);
         void flushBarriers() {
@@ -747,6 +772,10 @@ namespace plume {
     // constants (Deko3DSetSharedWords) the renderer changed (bit i = line i).
     void Deko3DSetTextureSkip(bool on);
     void Deko3DSharedLinesWritten(RenderCommandList *commandList, uint32_t lines);
+    // katamari-nx (2026-10-30): fragment-stage textures bound by descriptor slot (sampler 0), bindings first.., for a
+    // host pipeline whose shader declares them bound (tools/deko3d_glsl.py: host shaders' multisampled textures,
+    // dk_ms_b<k>); the stage's tracked handles are forgotten, so the next pipeline with bound textures binds its own.
+    bool Deko3DBindFragmentTextures(RenderCommandList *commandList, uint32_t first, const uint32_t *slots, uint32_t count);
     bool Deko3DPushUniformSlow(RenderCommandList *commandList, uint64_t address, uint32_t uboSize, uint32_t offset,
                                const void *data, uint32_t size);
     // banjo-nx (2026-10-27, deko3d recording): one piece (every push the renderer makes: 64-byte constant groups and
@@ -773,6 +802,21 @@ namespace plume {
     // banjo-nx (2026-10-21, asyncVariants): this thread does not draw (Renut's pipeline prebuild workers): the variants it
     // asks for are compiled after the draws' ones, and only so many wait at a time (the rest when a draw needs them).
     void Deko3DSetBackgroundThread(bool background);
+    // banjo-nx (2026-10-31): on such a thread, the pipeline it builds next is one a draw waits for (Renut's specialised
+    // pipelines; the draw goes on with the generic one): its variants are queued as a draw's (ahead of the background
+    // ones). Set before the build, cleared after it.
+    void Deko3DSetDrawVariants(bool draw);
+    // banjo-nx (2026-11-01): on such a thread, the pipeline it builds next draws much slower with generic variants (the
+    // water's fetch constants): the variants it lacks are read or compiled now, on this thread, as a compile the
+    // thread waits for (ahead of the background ones; it ends their rest). Set before the build, cleared after it.
+    void Deko3DSetUrgentVariants(bool urgent);
+    // banjo-nx (2026-11-01): the shader's GLSL is unpacked by 'loader' when it is needed instead of being kept (see
+    // Deko3DGlslSource). The loader must give the same text every time.
+    void Deko3DShaderSetGlslLoader(RenderShader *shader, std::function<std::string()> loader);
+    // banjo-nx (2026-11-01): shader objects alive, and the GLSL bytes kept or unpacked now (for the memory report).
+    void Deko3DShaderMemory(uint64_t &shaders, uint64_t &glslBytes);
+    // banjo-nx (2026-11-01): graphics pipeline objects alive (for the memory report).
+    uint64_t Deko3DPipelineCount();
     // banjo-nx (2026-10-28, the console's OOM): called when a memory block's storage cannot be had from the heap, before
     // asking again (any thread; it must not take the application's renderer lock): the application's spares go back.
     void Deko3DSetMemoryPressureCallback(void (*callback)());
@@ -877,6 +921,22 @@ namespace plume {
         // waits for the work before it but keeps the texture cache: only a read after a write needs it invalidated,
         // and that read's own transition does it.
         bool leanBarriers = false;
+        // sasrt-nx (2026-10-30): a multisampled pipeline gets the standard sample positions for its sample count
+        // (dkMultisampleStateSetLocations with none given, as nouveau's gm200_validate_sample_locations). deko3d's
+        // dkMultisampleStateDefaults puts every sample at the pixel's centre and dkCmdBufBindMultisampleState always
+        // writes them (method 0x11E0, libdeko3d disassembled): without this, 2x/4x targets had no edge antialiasing at
+        // all on the console. Ryujinx keeps the standard positions either way.
+        bool msaaPositions = true;
+        // sasrt-nx (2026-10-30): the hardware's alpha-to-coverage dither, which dkMultisampleStateDefaults turns on
+        // and nothing turned off: a fixed screen-space grid where a texture's alpha gives the coverage (seen in
+        // Final Fantasy XIII's ice on deko3d). The other back ends (Vulkan, D3D12) give no dither control and Xenos
+        // dithers with its own offsets (RB_COLORCONTROL ALPHA_TO_MASK_OFFSET), not this pattern.
+        bool alphaToCoverageDither = false;
+        // sasrt-nx (2026-10-30): an indexed strip (triangle or line) restarts at the all-ones index of its index size,
+        // as the Vulkan back end (primitiveRestartEnable for strips) and D3D's strip cut. deko3d never turns
+        // primitive restart on (only dkCmdBufSetPrimitiveRestart writes method 0x591, libdeko3d disassembled) and
+        // plume did not either, so a cut drew triangles to and from vertex 65535 on deko3d alone.
+        bool stripRestart = true;
         // banjo-nx (2026-10-21, after a console freeze in a run-time compile that never ended): a variant missing from
         // the cache is compiled on the uam thread in the background; until it is done the pipeline draws with the
         // shader's generic variant (without the specializations that only fold what the shader reads at run time:

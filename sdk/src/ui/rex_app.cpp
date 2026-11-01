@@ -69,7 +69,8 @@ extern "C" int RexSwitchInitSystemCore(void);
 extern "C" int RexSwitchEnsureForwarderNpdm(void);
 #endif
 
-REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
+#include <rex/banjo_switch_default.h>  // banjo-nx (2026-11-01): the shipped Switch defaults
+REXCVAR_DEFINE_STRING(gpu_plugin, BANJO_SWITCH_DEFAULT("xenos", ""), "GPU",
                       "GPU emulation plugin to load at startup (e.g. 'xenos'); empty disables "
                       "GPU emulation")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);

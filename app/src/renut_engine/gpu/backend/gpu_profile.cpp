@@ -2,6 +2,7 @@
  * @file    gpu/backend/gpu_profile.cpp
  */
 #include "renut_engine/gpu/backend/gpu_profile.h"
+#include "banjo_switch_default.h"  // banjo-nx (2026-11-01): the shipped Switch defaults
 
 #include <algorithm>
 #include <array>

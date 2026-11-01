@@ -168,7 +168,7 @@ rexglue_setup_target(renut GPU_PLUGINS xenos)
 # banjo-nx (2026-10-17): Ryujinx starts NROs without argv[0]; the SDK then takes the NRO's usual place on the SD
 # (sdk/src/core/filesystem_posix.cpp). A console's hbloader always passes the path, so nothing changes there.
 if(REXGLUE_PLATFORM_SWITCH AND TARGET rexcore)
-    target_compile_definitions(rexcore PRIVATE REX_SWITCH_FALLBACK_EXE="/switch/banjo-nx/banjo-nx.nro")
+    target_compile_definitions(rexcore PRIVATE REX_SWITCH_FALLBACK_EXE="/switch/renut-nx/renut-nx.nro")
 endif()
 
 # banjo-nx (2026-10-16): Renut's Direct3D-level renderer as a second renderer, chosen at boot (banjo_renderer = "renut";
@@ -588,7 +588,7 @@ foreach(_dep imgui xxhash renderdoc)
 endforeach()
 
 # Nintendo Switch: renut.nro next to the ELF. On the SD card it goes in
-# sdmc:/switch/banjo-nx/ with the extracted disc in game_root/ beside it.
+# sdmc:/switch/renut-nx/ (as renut-nx.nro, 2026-11-01) with the extracted disc in game_root/ beside it.
 if(REXGLUE_PLATFORM_SWITCH)
     # Link map: which object each function came from, for ranking the profiler's samples per function
     # (tools/switch-cpu-profile.py). It must come from the same build as the NRO that was profiled.
@@ -600,8 +600,8 @@ if(REXGLUE_PLATFORM_SWITCH)
     endif()
     rexglue_switch_add_nro(renut
         NAME "Banjo-Kazooie Nuts and Bolts"  # no "&": cmd.exe would split the post-build command
-        AUTHOR "reNut / banjo-nx"
-        VERSION "0.1.0"
+        AUTHOR "ChanseyIsTheBest"  # 2026-11-01, the public build (the user's choice)
+        VERSION "1.0.0"
         ${RENUT_ICON_ARG})
 endif()
 

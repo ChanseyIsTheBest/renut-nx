@@ -35,6 +35,7 @@
 
 // The generated code's macros and helpers: the copies are made of generated statements.
 #include "renut_pch.h"
+#include "banjo_switch_default.h"  // banjo-nx (2026-11-01): the shipped Switch defaults
 
 // banjo-nx (2026-10-19): whether the generated code marks the store cards (tools/store_cards.py ran and
 // REX_STORE_CARDS_OFF is not set): Renut proves its cached copies by them only then (banjo_renut_store_cards).
@@ -65,12 +66,12 @@ extern "C" const bool g_banjo_store_cards = false;
 #include "hot/banjo_hot_all.h"  // app/generated/hot: the copies (tools/localize_native.py)
 
 REXCVAR_DECLARE(bool, banjo_cpu_verify);
-REXCVAR_DEFINE_INT32(banjo_hot_guard_calls, 64, "Banjo/Enhancements",
+REXCVAR_DEFINE_INT32(banjo_hot_guard_calls, BANJO_SWITCH_DEFAULT(0, 64), "Banjo/Enhancements",
                      "Native copies of hot game functions: the first N guarded calls of each thread come one after "
                      "the other (each runs the copy and the recompiled original and compares them)")
     .range(0, 4000)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(banjo_hot_guard_period, 4096, "Banjo/Enhancements",
+REXCVAR_DEFINE_INT32(banjo_hot_guard_period, BANJO_SWITCH_DEFAULT(0, 4096), "Banjo/Enhancements",
                      "Native copies of hot game functions: after the first N, one call in P is guarded (rounded up to a "
                      "power of two, at most 1048576). 0 with banjo_hot_guard_calls = 0: no guard at all, every hook "
                      "calls its copy directly (no countdown; bejeweled3-nx's direct dispatch)")

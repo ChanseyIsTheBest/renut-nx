@@ -113,6 +113,97 @@ captures in `app/out/pc-me/shader_capture`):
 The 150 shaders of the October 22 package came out the same from the passes except 30, whose old GLSL predates the
 dynamic resolution's scale codes (fixed at 1.0): the new package has all 173 at the current translator.
 
+## The function table under the base image (found 2026-10-29, fixed in the SDK)
+
+The base `default.xex` has an image of 0x10A0000 bytes, the update's 0xF20000. The SDK puts the indirect-call table
+at the image's end by the generated `REX_IMAGE_SIZE` (the patched size: 0x82F20000) before the XEX is loaded; the
+loader then loads the base image (to 0x830A0000) over the table's first 1.5 MB, and `XexModule::ApplyPatch` zeroed
+and decommitted everything past the new image size. Every slot for the code at 0x821B0000-0x82270000 was empty, so
+each indirect call there went through `ResolveIndirectFunction` and `FunctionDispatcher::GetFunction` (a recursive
+mutex and a map lookup): 2.7 % of the main thread in the first console run of the update. It also made the PC's
+promoted-call self-check report those targets as "not the function the generated code calls" (77 targets, all below
+0x8226A000), which is why the first promotion list was cut to 57.
+
+Fix (`sdk/src/system`): `ApplyPatch` no longer decommits a function table, and `UserModule` writes every registered
+function into the table again after a successful patch (`FunctionDispatcher::RewriteFunctionTable`; the log says
+"XEX patch: N function table entries written again"). Any port that runs a title update whose image is smaller than
+the base game's needs the same.
+
+## Indirect promotions again (2026-10-29)
+
+`app/indirect_promotions.txt` made again: 287 sites. A PC census of the update's code (`banjo_diag_indirect_census`,
+the scripted route then the sticks wandering, 15 minutes: 3,168 sites, 345 million calls) merged with the 57 sites
+mapped from the base, without targets whose table entry is another function by design (native and localized copies
+of `config/hot_functions.txt` and the copy lists, app hooks); then a second census on that tree (the first census's
+tree still had the first list's promotions, whose calls a census does not see: a list change needs a fresh codegen,
+`post_codegen.py` never undoes a promotion) added 17 sites. PC check (the route, 9 minutes, the native copies under a
+heavy guard): 188 million promoted calls and 0 wrong, 502 native copies 0 differences.
+
+The promoted-call self-check (`RexPromotedMismatch`, `app/src/cpu/banjo_codegen_checks.cpp`) now names each target
+once; it named the first 16 calls before, which were the same few targets, so a list made from them left the rest in.
+
+## PGO with a level (2026-10-29)
+
+The first profile on the update's code (the 0654 package) had boot and the menus only: its emulator session ran in
+an old Ryujinx data folder whose shader files did not match (0.3-3 fps, it never left the menus). Taken again with the
+287-site tree: the instrumented build (`app/out/switch-pgo-gen`), Ryujinx in the current data folder, the scripted
+route (`route_script.txt`) into the game and then `input_script_sticks` wandering, 15 minutes (13 captures: Showdown
+Town on foot and in a vehicle from about 2 minutes in), merged with `tools/pgo_merge.py` into `pgo/` (315 files),
+then a clean `switch-dist` build (ninja does not see a changed `.gcda`). The menus-only profile is kept in
+`../pgo_profile_tu_menus`.
+
+## 1.0.0's font and dialogue boxes (2026-10-30, the user's request)
+
+The update is Rare's December 2008 patch for small text on SD TVs. It changed three things about text:
+
+- **Text size.** The game decides between big and normal text in `sub_823B42D8` / `sub_823B43D0`:
+  - It uses the profile byte at +131 (bit 0x2 = set, bit 0x4 = big) when the profile has one.
+  - Otherwise it uses the word at 0x82E0BD58, where 0 means big.
+  - Big text takes the stylesheet's `speechbig_prefix` (`sub_8255CDA0` loads the four styles).
+  - The options menu has a "Use big font" tick box (`useBigFontButton`, `sub_82560958`).
+- **The font.** `sub_822F4EE8` picks the font cache's ini files by language:
+  - 1.0.0 sent English (0) to `metafont_euro.ini` and `euro.sbp`, which is Andy Bold.
+  - The update sends every Latin and Cyrillic language to the russian files, a bold Comic Sans. Both inis claim to
+    be "MS Comic Sans".
+  - Both .sbp files hold the same 33,974 glyphs (Latin, Cyrillic and CJK) in the same 48x48 cells.
+  - The format: a 6-byte header with the count at +4; then 10-byte entries (u16 char, u32 file offset, s8 ?, s8 left
+    bearing, u8 width, s8 right bearing); then one zlib stream per glyph, 4 bits a pixel.
+- **The dialogue boxes.**
+  - XUI scenes are named `<type>_<project>_<name>.<ext>` (`sub_823B7950`; the tables are at 0x82DA29B4).
+  - Each scene has a descriptor: +0 type, +4 package (the table at 0x82D90C50), +8 name, +268 project.
+  - The update moved `ingame_dialogdisplay` (0x82D91D68) and `frontend_dialogdisplay` (0x82D979A8) from
+    `BanjoX_Ingame` (2) and `BanjoX_CoreMP` (4) into its own always-loaded `BanjoX_TU15` (11), as banjoxdlc scenes.
+    Their box is `aid_texture_banjoxdlc_ui_menu_dialogueboxnew`, with no cogs.
+  - 1.0.0's scenes are still in the disc's bundles. The in-game one is in `Bundle/4f/685374`: the
+    `aid_texture_banjox_ui_menu_dialoguebox` nine-grid and two cog images.
+  - 1.0.0's scenes have every element the update's code binds except `scrollUpArrow` and `scrollDownArrow`. An
+    element that is not found is a null handle, and every XUI call refuses one without harm.
+  - The update added `background2`, the box for a speaker on the right (descriptor word +0 of the scene's start data,
+    which also picks `dialogModelLeft` or `dialogModelRight`). 1.0.0's scene has a `background2` too.
+
+Two keys, both off by default, applied at boot (`title_update.cpp`, `ApplyStyleOptions`, from
+`RenutApp::OnPostSetup`). Each one checks the bytes it replaces first and logs a warning instead if they differ:
+
+- `banjo_font_andy_bold`: the two russian ini paths in the image (0x82112AF4, 0x82112B20) are rewritten to the euro
+  ones, so every Latin and Cyrillic language gets Andy Bold at the update's size.
+- `banjo_dialogue_boxes_original`: the two scene descriptors get their 1.0.0 package and the banjox project back.
+- Text sizes (`banjo_text_style_log_s`, a PC diagnostic: it logs the inputs and the four style prefixes):
+  - The speech styles are `<FONT SIZE="29">` (big) and `"18"` (normal); info text is 24 and 18.
+  - The default word at 0x82E0BD58 is 0 in the image, but the game sets it to 1 itself during boot. So on an HD screen
+    the text is normal-size (18) unless the profile ticks "Use big font". All the PC checks above were at 18.
+  - A boot-time write of the word does nothing, because the game overwrites it.
+  - Big text (29) in 1.0.0's box is checked on the console with the tick box (2026-10-30).
+- Switch build in Ryujinx (NRO 2eaaf3175534, 2026-10-30 22:25): both keys log "2 of 2" (the page unprotect and
+  restore work there), no crash, title screen right.
+
+The code and read-only data pages are read-only on the host, the Switch included (`XexModule` page descriptors), so
+the writes unprotect the page and then restore it. The big-text choice is not changed: the update's tick box still
+works.
+
+Tools:
+- Scratchpad `sbp_text.py` renders a line of text from an .sbp file.
+- Scratchpad `xdec/xdec.exe` is reNut's `mods/xcompress.cpp` built for the host; it decompresses a bundle.
+
 ## Not carried over yet
 
 - The reNut Settings pause tab (`cvar_menu.cpp`): the update inlined the section title setter (base `sub_825A7CF0`)
@@ -131,7 +222,8 @@ dynamic resolution's scale codes (fixed at 1.0): the new package has all 173 at 
   renderer) and a check through the main menu's Display Settings.
 - The native renderer (`app/src/me`, `app/src/native`) reads the base's CDevice layout: Renut's renderer runs whatever
   `banjo_renderer` says.
-- PGO: the profile's generated-code functions have new names; the renderer and SDK parts still match.
+- PGO: the profile's generated-code functions have new names; the renderer and SDK parts still match. (Done
+  2026-10-29: see "PGO with a level" below.)
 
 - reNut upstream's `game/level_pools.cpp` (the section pools' host textures released when the game frees their memory,
   `ReleaseHostTexturesInMemoryLocked`, which banjo-nx's renderer has but nothing calls): a candidate for the next round;
@@ -152,7 +244,8 @@ dynamic resolution's scale codes (fixed at 1.0): the new package has all 173 at 
   under `banjo_native_reverb_verify`: 51,500 calls, 0 mismatching.
 - Promoted indirect calls: the self-check (`REX_PROMOTED_CALL`) found targets whose dispatch entry is not the function
   the promoted call jumps to (localized copies, and seven others); every promotion naming one was dropped (57 left of
-  the base's 187; the census in `banjo_codegen_checks.cpp` makes a fresh list from a PC run).
+  the base's 187; the census in `banjo_codegen_checks.cpp` makes a fresh list from a PC run). Later that day: the
+  "seven others" were empty table slots ("The function table under the base image"), and the list is 287 sites.
 - `limiter_lazy_log10.py` matches the update's limiter again (one label: `loc_82B6A758`).
 - Found on the way, the PC build had been broken since the deko3d-only render-thread rounds (helpers inside
   `#if defined(PLUME_DEKO3D)`, `far` as a variable name, two functions named `RepeatCensusReport`, the PGO hooks):

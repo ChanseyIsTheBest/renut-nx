@@ -1092,7 +1092,11 @@ freeze's stack had a thread waiting on it while uam ran). Now:
   Deko3DVariantRequest (the key, the shared text, the defines: a few hundred bytes); the uam thread makes the text when it
   takes the job, one at a time; the text outlives a destroyed shader object while a request holds it;
 - a draw's request goes ahead of the background threads' ones (Deko3DSetBackgroundThread: Renut's prebuild workers), and
-  at most 256 background requests wait; one that found no room is queued by the first draw that refreshes its pipeline.
+  at most 256 background requests wait; one that found no room is queued by the first draw that refreshes its pipeline;
+- (2026-10-31) a prebuild worker building a specialised pipeline a draw asked for (Renut's `Job::for_draw`; the draw
+  uses the generic pipeline meanwhile) queues that pipeline's variants as a draw's (Deko3DSetDrawVariants), and the job
+  goes to the front of the prebuild queue. The first water fetch-spec run in the emulator had the specialised water
+  vertex shader queued behind the list's background compiles and their rests for 6 minutes.
 With cache 60 none of this happens in play (it has every variant the lists name, and the generic ones of every shader).
 
 ## 29. Host textures released when the heap runs short (2026-10-22, package 36z7)
@@ -1602,6 +1606,9 @@ the fetch data put together on the GPU), each copy between full barriers.
 - `banjo_renut_convert_reuse` (on, A/B target 23): a stream conversion (stream_convert_cs between two full barriers)
   already made in the frame from the same export slot, offset, vertices, strides and elements, with no export recorded
   since (g_export_generation), is used again. City: half of them (about 14 a frame).
+  **Beneficial (console A/B, 2026-10-30, da8ea3599258, 3-core stock, city):** GPU -1.06 ms a frame, render thread
+  -0.54 ms, +0.41 fps (on minus off). It won in all 3 city pairs, against control noise of ±0.26 ms GPU and ±0.45 fps.
+  Keep it on.
 - Not done, measured or reasoned: colour hand-over at the end of the main pass (its resolve and clear come in two
   halves, 0-384 and 384-720; one 648p copy, 0.2-0.3 ms; parked); the mid-frame colour and depth copies for the water
   (the same target keeps being drawn: needed); seeds through the 3D engine's inline data (about 600 KB a frame);
@@ -1611,3 +1618,88 @@ the fetch data put together on the GPU), each copy between full barriers.
 Package builds/2026-10-26_1937_stages_gpu1 (NRO f102648be906): renut.toml, renut_steps_off.toml (every switch of
 batch 7, steps 1-3, stages 1-4 and the two GPU items off), renut_ab_stages.toml (targets 20-24 in turn, 30 s off and
 on each).
+
+## 39. plume's deko3d defaults (2026-10-30, found and fixed by sasrt-nx)
+
+The SASRT port (sasrt-nx, `docs/enhancements.md`, "plume's deko3d defaults") found four places where banjo-nx's plume
+deko3d back end left deko3d's defaults in, or had a bug. It fixed them in this tree.
+
+- **The Zcull invalidate after copies had no braces** (`invalidateZcullAfterCopy`, section 13). Only `flushBarriers()`
+  was conditional. `dkCmdBufBarrier(..., DkInvalidateFlags_Zcull)` was recorded after every texture upload, copy,
+  resolve and blit, into any texture, with Zcull on or off.
+  - With Zcull on (banjo's default), every such copy left the bound depth target's Zcull invalid until its next clear.
+    For the rest of the frame after the first upload or resolve, Zcull culled little or nothing. The fix keeps the
+    invalidate for copies into a depth target only, so more of the frame is culled. Pixels are the same; only the
+    console shows the gain, because Ryujinx emulates no Zcull.
+  - With Zcull off, SASRT's console stopped twice during the boot (an invalidate on a queue with no Zcull context).
+    `banjo_deko3d_zcull = false` is now safe to use as a fallback.
+  - Watch for geometry missing or flickering on the console. That would mean something writes a depth target's memory
+    without going through a copy, such as a colour view of the depth words. Zcull would then cull draws the depth lets
+    through, and the invalidate after every copy had hidden that until now.
+- **MSAA sample positions** (`banjo_deko3d_msaa_positions`, default on): `dkMultisampleStateDefaults` puts every sample
+  at the pixel's centre, and `dkCmdBufBindMultisampleState` always writes the positions. Multisampled pipelines now get
+  the standard positions for their sample count (`dkMultisampleStateSetLocations(&ms, nullptr, 0)`). Banjo has MSAA
+  off, so the report's "multisampled pipelines" should stay 0 here.
+- **Alpha-to-coverage dither** (`banjo_deko3d_a2c_dither`, default off): deko3d turns it on by default, giving a fixed
+  screen-space grid. Banjo already turns pipeline alpha to coverage off on its single-sampled targets
+  (`banjo_renut_alpha_to_mask_test`, section 12), so this changes nothing here.
+- **Primitive restart for indexed strips** (`banjo_deko3d_strip_restart`, default on): deko3d never turns restart on
+  (only `dkCmdBufSetPrimitiveRestart` writes it). An all-ones index in a strip drew triangles to and from vertex 65535,
+  where the Vulkan back end restarts. `drawIndexedInstanced` now sets the restart index for triangle and line strips
+  (0xFFFF, 0xFFFFFFFF, 0xFF by index size) and turns it off for other draws, only when it changes. The report counts
+  "indexed strips drawn with primitive restart".
+
+The `Deko3DOptions` fields default to the fixed behaviour. The deko3d report line gives the new counts.
+
+## 40. The console's out-of-memory crash: GLSL unpacked on demand (2026-11-01)
+
+The user's shader-gathering session (a save that visits many areas) crashed after 9 minutes and about 7 level loads:
+`std::bad_alloc` in a command buffer arena's growth (`ReserveArena`, guest/command_buffers.cpp).
+
+- The Switch's heap is 3,084 MB in two pools. newlib had handed out 1,713 MB: the game's committed memory (684 MB,
+  the profiler's "guest backing" figure) and the renderer's host data. The GPU region at its top was 1,298 MB, with
+  1,007 MB in blocks and 291 MB free in 12 ranges.
+- newlib had 74 MB left and its free pieces were small. The region's free ranges are of no use to newlib, and the region
+  only gives back free space at its bottom. Its peak (1,261 MB in blocks, at a level change) set its size.
+- Earlier sessions show the same pattern with more room: 154 to 267 MB left after 6 to 8 level loads.
+
+What grows with every new area in newlib: each deko3d shader object kept its whole GLSL text (35 KB on average; the
+installed package unpacks to 161 MB, 142 MB of it pixel shaders), and shader objects are never destroyed.
+
+- Now a shader's text comes from `plume::Deko3DGlslSource`. A shader made from a package in memory (the installer's
+  package with its dictionary, and the NRO's) gets a loader (`Deko3DShaderSetGlslLoader`, Renut's `UnpackGlsl`) and
+  its text is dropped. `text()` unpacks it again when a new variant key or a compile needs it. A weak pointer keeps
+  it while a lookup or a queued compile holds it, and the last 32 texts are held a little longer.
+- The variant keys are unchanged: the same text, so the DKSH cache keeps every entry.
+- A package read from the card (no dictionary) keeps its texts, as before.
+- The memory report has a new line: "Memory: heap users: guest memory N MB committed in N chunks; deko3d N shader
+  objects, N MB of GLSL alive, N graphics pipeline objects".
+
+Considered and not taken: the game's committed memory from the GPU region. The game commits its 684 MB in the first
+two minutes and keeps it, while the region's free ranges appear later, at level changes, so the two would rarely meet.
+deko3d may also leave a freed block's pages with another memory attribute, and the game's memory is mapped as process
+code memory, which could fail on such pages.
+
+## 41. renut-nx 1.0.0, the public build (2026-11-01)
+
+- **Names.** The project is renut-nx (GitHub `ChanseyIsTheBest/renut-nx`, was `renut_nx`), the NRO `renut-nx.nro` in
+  `sdmc:/switch/renut-nx/` (REX_SWITCH_FALLBACK_EXE), the installer renut-nx-webinstaller. NACP: title "Banjo-Kazooie
+  Nuts and Bolts", author ChanseyIsTheBest, version 1.0.0; icon `tools/switch/icon/banjo_icon.jpg` (the square cover,
+  colour-matched in Lab to the poster).
+- **Logs off but crash logs.** `log_level` "off" on the Switch: no log file, no `rex_stderr.log`, no `rex_profile.log`,
+  no `deko3d.log`; the stall watchdog off; the diagnostics off. `rex_crash.log` is written by the crash handler as
+  before. `log_level = "info"` in renut.toml turns them on.
+- **Four cores from any player's Sphaira forwarder**: docs/four-core-mode.md.
+- **The web installer's GLSL package, compressed at the first start** (`CompressInstalledPackage`,
+  banjo_renut_deko3d.cpp; the user's idea). The page writes `deko3d_glsl.bin` with raw zstd frames (it has no
+  compressor): read from the card shader by shader, its texts kept (section 40 needs a package in memory). The
+  installer ships the native package's dictionary as `deko3d_glsl.dict` (128 KB). At the first start renut-nx compresses
+  every shader with it (zstd level 3, one CDict: 161 MB of GLSL to about 23 MB), writes `deko3d_glsl.bin.tmp`, then
+  replaces the file; from then on it is the in-memory form with a dictionary, as on the user's console. The texts do not
+  change, so the variant keys and the DKSH cache stay valid. A stop between removing the old file and renaming the new
+  one is finished at the next start.
+- **The installer's reference run** (test/full_node.mjs on the user's game files, 2026-11-01): 4,731 shaders, shader
+  table numbers all native, 4,726 GLSL texts the user's own (the other 5: the fetchspec vertex shaders, the same
+  constants in another order of passes); 28,570 variants from the user's pipeline list (68,590 pipelines; 97 of the 100
+  run-time compiles in the console logs among them, the other 3 added) compiled with 0 failures, and the 21,076 that the
+  user's deko3d_shaders.bin also has byte for byte the console's.

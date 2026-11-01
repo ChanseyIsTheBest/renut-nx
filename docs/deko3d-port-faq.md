@@ -94,6 +94,42 @@ Answers to the questions Futari, SA2, Peggle 2 and SASRT asked while starting th
 
 ## Traps other ports hit (reported by the ports)
 
+- **Multisampled depth resolve reads 0 in Ryujinx (katamari-nx, 2026-10-30, their commit 32330443).**
+  - The problem: `depth_resolve_ms_ps` (ResolveDepth variant 1) fetches the multisampled depth through a bindless
+    handle (TLD.MS). Ryujinx's translator logs "Failed to find handle source for bindless access of type texture2DMS"
+    and replaces the fetch with 0, so the resolve is all 0 and the depth of field blurs everything. Bindless 2D fetches
+    are fine; only the multisampled one fails.
+  - The fix, in three parts:
+    - `tools/deko3d_glsl.py` emits a bound `sampler2DMS` (`dk_ms_b<k>`, binding k; the meta line keeps tex=1 and adds
+      msb=<count>) for host shaders.
+    - plume gets `Deko3DBindFragmentTextures` (dkMakeTextureHandle + dkCmdBufBindTextures for the fragment stage,
+      then `boundTexCount[2] = 0` and `texPipeline = nullptr` so the next draw rebinds its own textures).
+    - `ResolveDepth` binds {source_slot, sampler or source} at 0-1 for variant 1 on deko3d before its push
+      constants.
+  - Banjo took it on 2026-10-30, for completeness (the user's call). The scene runs with `disable_msaa = true`, and
+    the 2x MSAA portrait's depth is never resolved: 201 depth resolves in the 2026-10-29 console log, all
+    single-sample, and none of Banjo's 204 Ryujinx runs logged the warning. So it only matters with MSAA on. It was
+    checked in Ryujinx with `disable_msaa = false`.
+  - Their other note, for `tools/localize_native.py`: the inlined hand-native wrapper loads back registers the callee
+    may change only on the declined path. That matters only for natives that write registers (move the after-load
+    behind `else if (s.Stopped()) return;`). Banjo's natives write none.
+  - RenderDoc on Ryujinx: with VK_LAYER_PATH set, the layer is explicit and also needs
+    VK_INSTANCE_LAYERS=VK_LAYER_RENDERDOC_Capture.
+- **plume's deko3d defaults (SASRT, 2026-10-30):** four fixes in `plume_deko3d*.cpp`, documented in
+  `docs/deko3d-renderer.md` section 39. A port with an older copy of these files should take all four:
+  - the Zcull invalidate after copies had no braces, so it ran after every copy, Zcull on or off. With Zcull off,
+    SASRT's boot froze;
+  - MSAA sample positions were all at the pixel centre (`banjo_deko3d_msaa_positions`);
+  - the alpha-to-coverage dither was left on (`banjo_deko3d_a2c_dither`);
+  - indexed strips drew without primitive restart (`banjo_deko3d_strip_restart`).
+
+- **A title update with a smaller image than the base game (Banjo, 2026-10-29):** the SDK places the indirect-call
+  table right after the patched image (`REX_IMAGE_SIZE`) before loading the XEX; the loader loads the base image over
+  the table's start and the patch zeroes it. Nothing crashes: every indirect call into that part of the code takes the
+  dispatcher's locked map lookup instead (`FunctionDispatcher::GetFunction` in a console profile). Check
+  `base image size > update image size` (security info +4 of each XEX); banjo-nx's SDK writes the table again after
+  the patch (`docs/title-update-3.md`, "The function table under the base image").
+
 - **Post-codegen direct calls (SA2):** ports using masseffect-nx's `tools/direct_calls.py` turn `sub_X` calls into
   `__imp__sub_X` for every function the tool does not see hooked. Renut's new hooks (CreateDevice, XGRegister*, ...)
   were bypassed and every draw was dropped as "vertex shader not one the renderer knows". Re-run post-codegen after

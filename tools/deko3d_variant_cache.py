@@ -110,9 +110,12 @@ def read_cache(path):
 # samples, 4 blend controls, 9 more u32 fields (offset 108 on), bool_mask[8], bool_values[8], blend_skip, output_trim;
 # version 4 (2026-10-18) adds alpha_func at 180 (constant 903 + 1, banjo_deko3d_alpha_spec; version 3 had padding there)
 # and a reserved word.
-LIST_KEY_SIZES = {3: 184, 4: 192}
+# version 5 (2026-10-31, banjo_gpu_fetch_spec) adds fetch_types[4] at 192 (constants 920-923, each + 1) and tess_kind at
+# 208 (constant 904 + 1 for a tessellated draw), and a padding word.
+LIST_KEY_SIZES = {3: 184, 4: 192, 5: 216}
 LIST_KEY_SIZE = 184
 OFF_BOOL_MASK, OFF_BOOL_VALUES, OFF_BLEND_SKIP, OFF_OUTPUT_TRIM, OFF_ALPHA_FUNC = 108, 140, 172, 176, 180
+OFF_FETCH_TYPES, OFF_TESS_KIND = 192, 208
 OFF_PER_INSTANCE, OFF_RECT_LIST, OFF_POINT_SPRITE = 96, 100, 104
 OFF_DEPTH_CONTROL = 76  # banjo-nx (2026-10-19): RB_DEPTHCONTROL (constant 909, banjo_deko3d_early_z)
 OFF_STENCIL_REF_MASK = 80  # 2026-10-20: ref, read mask, write mask (bits 16-23)
@@ -211,7 +214,8 @@ def read_list(path, blend_skip_on, alpha_guess=ALPHA_GUESS):
     data = open(path, 'rb').read()
     magic, version, key_size, streams = struct.unpack_from('<4sIII', data, 0)
     if magic != b'RNPL' or LIST_KEY_SIZES.get(version) != key_size:
-        sys.exit(f'deko3d_variant_cache: {path}: not a version 3 or 4 pipeline list ({magic}, {version}, {key_size})')
+        sys.exit(f'deko3d_variant_cache: {path}: not a version 3, 4 or 5 pipeline list ({magic}, {version}, '
+                 f'{key_size})')
     at = 16
     out = []
     while at + 4 <= len(data):
@@ -226,6 +230,8 @@ def read_list(path, blend_skip_on, alpha_guess=ALPHA_GUESS):
         alpha_func = struct.unpack_from('<I', data, at + OFF_ALPHA_FUNC)[0] if version >= 4 else 0
         per_instance, rect_list, point_sprite = struct.unpack_from('<III', data, at + OFF_PER_INSTANCE)
         depth_control, stencil_ref_mask = struct.unpack_from('<II', data, at + OFF_DEPTH_CONTROL)
+        fetch_types = struct.unpack_from('<4I', data, at + OFF_FETCH_TYPES) if version >= 5 else (0, 0, 0, 0)
+        tess_kind = struct.unpack_from('<I', data, at + OFF_TESS_KIND)[0] if version >= 5 else 0
         at += size
         tail = {FLAG_TESS: per_instance, FLAG_GS: rect_list | point_sprite,
                 FLAG_DEPTH_WRITES: depth_writes(depth_control, stencil_ref_mask)}
@@ -236,13 +242,19 @@ def read_list(path, blend_skip_on, alpha_guess=ALPHA_GUESS):
         spec = dict(tail)
         if alpha_func:
             spec[903] = alpha_func
+        # 2026-10-31 (banjo_gpu_fetch_spec): a tessellated draw's patch kind and bound fetch types (render/pipeline.cpp)
+        if tess_kind:
+            spec[904] = tess_kind
+        for k in range(4):
+            if fetch_types[k]:
+                spec[920 + k] = fetch_types[k]
         for w in range(8):
             for b in range(32):
                 if mask[w] >> b & 1:
                     spec[1000 + w * 32 + b] = values[w] >> b & 1
         hashes = (f'{vs:016X}', f'{ps:016X}')
         out.append((hashes, spec))
-        if any(mask) or alpha_func:
+        if any(mask) or alpha_func or tess_kind or any(fetch_types):
             out.append((hashes, tail))  # the generic pipeline a specialised key draws with until it is built
         if not alpha_func and ps:
             for guess in alpha_guess:

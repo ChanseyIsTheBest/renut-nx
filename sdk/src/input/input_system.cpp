@@ -13,6 +13,7 @@
 #include <chrono>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>  // banjo-nx (2026-10-31): sscanf for the stick moves
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -248,6 +249,7 @@ const std::vector<ScriptedPress>& InputScript() {
   static const std::vector<ScriptedPress> presses = [] {
     std::vector<ScriptedPress> out;
     const std::string text = REXCVAR_GET(input_script);
+    // (stick moves, 'LS' / 'RS' items, are InputScriptSticks')
     size_t at = 0;
     while (at < text.size()) {
       size_t end = text.find(',', at);
@@ -269,6 +271,37 @@ const std::vector<ScriptedPress>& InputScript() {
     return out;
   }();
   return presses;
+}
+// banjo-nx (2026-10-31): held stick segments in input_script, 'seconds:LSx/y/duration' (left stick, moves the player)
+// or 'seconds:RSx/y/duration' (right stick, the camera); x and y from -1 to 1 (up is +y), held for duration seconds.
+struct ScriptedStick {
+  double at, duration;
+  bool right;
+  int16_t x, y;
+};
+const std::vector<ScriptedStick>& InputScriptSticks() {
+  static const std::vector<ScriptedStick> sticks = [] {
+    std::vector<ScriptedStick> out;
+    const std::string text = REXCVAR_GET(input_script);
+    size_t at = 0;
+    while (at < text.size()) {
+      size_t end = text.find(',', at);
+      if (end == std::string::npos) end = text.size();
+      const std::string item = text.substr(at, end - at);
+      at = end + 1;
+      const size_t colon = item.find(':');
+      if (colon == std::string::npos || item.size() < colon + 3) continue;
+      const std::string name = item.substr(colon + 1, 2);
+      if (name != "LS" && name != "RS") continue;
+      double x = 0.0, y = 0.0, duration = 0.0;
+      if (std::sscanf(item.c_str() + colon + 3, "%lf/%lf/%lf", &x, &y, &duration) != 3) continue;
+      auto axis = [](double v) { return int16_t(std::clamp(v, -1.0, 1.0) * 32767.0); };
+      out.push_back({std::atof(item.substr(0, colon).c_str()), duration, name == "RS", axis(x), axis(y)});
+    }
+    if (!out.empty()) REXLOG_INFO("input_script: {} stick moves scripted", out.size());
+    return out;
+  }();
+  return sticks;
 }
 // Seconds since the first input poll (the script's clock).
 double ScriptSeconds() {
@@ -378,7 +411,16 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
       out_state->packet_number = packet;
       out_state->gamepad.buttons = buttons;
       ScriptedSticks(out_state->gamepad);  // banjo-nx (2026-10-23)
-      if (REXCVAR_GET(input_script_sticks) > 0)
+      // banjo-nx (2026-10-31): held stick moves override the wander while they last.
+      bool held = false;
+      const double now = ScriptSeconds();
+      for (const ScriptedStick& s : InputScriptSticks()) {
+        if (now < s.at || now >= s.at + s.duration) continue;
+        held = true;
+        (s.right ? out_state->gamepad.thumb_rx : out_state->gamepad.thumb_lx) = s.x;
+        (s.right ? out_state->gamepad.thumb_ry : out_state->gamepad.thumb_ly) = s.y;
+      }
+      if (REXCVAR_GET(input_script_sticks) > 0 || held)
         out_state->packet_number = ++packet;  // the sticks change at every read
     }
     return X_ERROR_SUCCESS;

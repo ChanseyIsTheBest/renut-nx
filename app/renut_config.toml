@@ -69,6 +69,8 @@ fcti_inline = true
 # by tools/locals_choice.py). The tools never undo a function they converted, so a new list needs a fresh codegen: edit
 # this comment (the build re-runs the generator when this file changes). List revision 3 (2026-10-19: two of the
 # four hottest opted-out functions taken back off it, measured on the A57 code; config/locals_optout.txt).
+# Fresh codegen 2026-10-29 (title update 3), fourth: app/indirect_promotions.txt from a PC census of the update's code (287
+# sites; the SDK now writes the function table again after the XEX patch); the tree had kept the promotions of the update's first, longer list.
 # dcbt_prefetch (2026-10-16, proposed by marathon-nx, which emits its 276 always): the game's 1,785 dcbt / dcbtst hints
 # as the host's prefetch of the same address (REX_PREFETCH in the pch). PRFM never faults and changes no value; the
 # A57's hardware prefetcher may already cover the sequential ones. CMake BANJO_GEN_DCBT_PREFETCH=OFF compiles them to

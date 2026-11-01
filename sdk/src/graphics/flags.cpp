@@ -13,7 +13,8 @@
 #include <rex/logging.h>
 #include <rex/ui/renderdoc_api.h>
 
-REXCVAR_DEFINE_BOOL(gpu_allow_invalid_fetch_constants, false, "GPU",
+#include <rex/banjo_switch_default.h>  // banjo-nx (2026-11-01): the shipped Switch defaults
+REXCVAR_DEFINE_BOOL(gpu_allow_invalid_fetch_constants, BANJO_SWITCH_DEFAULT(true, false), "GPU",
                     "Allow invalid fetch constants");
 REXCVAR_DEFINE_BOOL(native_2x_msaa, true, "GPU", "Enable native 2x MSAA");
 REXCVAR_DEFINE_BOOL(depth_float24_round, false, "GPU", "Round float24 depth values");

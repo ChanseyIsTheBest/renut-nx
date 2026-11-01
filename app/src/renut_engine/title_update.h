@@ -16,4 +16,11 @@ namespace banjo::title_update {
 // there (the code is the update's: without the patch the game would run the base XEX's data through it).
 void ConfigurePaths(rex::PathConfig &paths);
 
+// banjo-nx (2026-10-30, the user's request): RenutApp::OnPostSetup, with the patched image in memory and before the game
+// loads its fonts and scenes. Two of 1.0.0's looks the update replaced, both off by default:
+// - banjo_font_andy_bold: Latin and Cyrillic text in 1.0.0's font (Andy Bold, euro.sbp) instead of the update's bold
+//   Comic Sans (russian.sbp). The same glyph size, so the update's big text stays big.
+// - banjo_dialogue_boxes_original: 1.0.0's dialogue scenes (the old box with its cogs) instead of the update's.
+void ApplyStyleOptions();
+
 }  // namespace banjo::title_update

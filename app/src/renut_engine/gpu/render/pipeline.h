@@ -83,6 +83,13 @@ struct PipelineKey {
   // pass alpha); 0 = read at run time. Like the bools: a key with it not built yet draws with the generic one (0).
   uint32_t alpha_func;
   uint32_t reserved;  // 0 (the key is compared and hashed as bytes)
+  // banjo-nx (banjo_gpu_fetch_spec, 2026-10-31): a tessellated draw's vertex fetch as its vertex shader's constants:
+  // the type words of its first four bound fetches (SharedConstants.bound_fetch[k][3]) + 1 as constants 920-923, and
+  // the patch kind (SharedConstants.tessellation[0]) + 1 as 904. 0: read at run time (every other draw; lists from
+  // before, whose records get 0 here). Like the bools: a key not built yet draws with the generic one.
+  uint32_t fetch_types[4];
+  uint32_t tess_kind;
+  uint32_t fetch_pad;  // 0 (the key's size stays a multiple of 8)
 };
 
 // banjo-nx (banjo_gpu_blend_skip): for the key's other fields, 1 when its one target keeps its value for a source alpha

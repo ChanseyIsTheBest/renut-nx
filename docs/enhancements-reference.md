@@ -65,6 +65,17 @@ halves or more. 15 s pairs mark items slower (or faster) by chance.
   (`kernel_critsec_pcr_owner`, `thread_signal_skip_idle`), whose code reads the key directly.
 - `log_file_writer` is read when logging starts, before the master switches: the off configs set it to `false`
   themselves.
+- 2026-11-01 (the user's lean `renut.toml`): the package's `renut.toml` lists only the 23 keys the user wants to
+  change, by category: MSAA level and SMAA, resolution, fur detail, 1.0.0 look, frame cap, four-core mode, controls.
+  Every other key's Switch default is the value the long file had (`BANJO_SWITCH_DEFAULT(on_switch, elsewhere)` in
+  `sdk/include/rex/banjo_switch_default.h`; 51 keys, among them `target_refreshRate` 0, `banjo_renderer` "renut",
+  the diagnostics, and the old renderer's and the SDK emulated GPU's keys, which nothing reads with Renut's renderer
+  but which keep the long file's values so the `[enhancements]` line stays the same). The PC keeps its old defaults.
+  A key from an older toml still works when a toml sets it.
+  - `disable_msaa` became `msaa_level`: 0 = off (the Switch default), 2 = the game's 2x (the PC default). Higher
+    values count as 2, because the game's tiling is laid out for 2x. `disable_msaa = true` still turns it off.
+  - `tools/toml_lean_check.py <long toml> <lean toml>` (run from banjo-nx) compares every key of the long file with
+    the value it gets now. On 2026-11-01 it listed only `disable_msaa` (now `msaa_level` 0, the same result).
 
 ## What the log shows
 
@@ -267,7 +278,8 @@ line): 1 `banjo_renut_precise_barriers`, 2 the render thread's pin to `banjo_rin
 `banjo_renut_shared_dedupe`, 4 `banjo_renut_push_point_only`, 5 `banjo_renut_capture_pool`, and since package 27
 6 `banjo_renut_exact_streams`, 7 `banjo_gpu_bool_spec`, 8 `banjo_gpu_blend_skip`, 9 `banjo_gpu_tess_grid`, and since
 package 27c 10 `banjo_renut_check_worker`, and since package 28 11 `banjo_gpu_depth_only`, 12 `banjo_gpu_output_trim`,
-13 `banjo_gpu_depth_words_view`.
+13 `banjo_gpu_depth_words_view`. Since 2026-10-31, 69 `banjo_gpu_fetch_spec` (tessellated draws' fetch types and
+patch kind as vertex shader constants; docs/shader.md, the water's vertex fetch).
 
 ## Every key
 
@@ -416,7 +428,7 @@ console run decides), **not exact** (off, and stays off), **measurement off** (t
 | `banjo_renut_push_point_only` | CPU | `true` | speed | Renut's renderer |
 | `banjo_renut_capture_pool` | CPU | `true` | speed | Renut's renderer |
 | `banjo_renut_neon_swap` | CPU | `true` (ARM) | speed | Renut's renderer |
-| `banjo_renut_shared_dedupe` | CPU | `true` | speed | Renut's renderer |
+| `banjo_renut_shared_dedupe` | CPU | `true` | speed; **beneficial** (console A/B target 3, 2026-10-30: render thread -0.30 ms in all 4 pairs, +0.12 fps) | Renut's renderer |
 | `banjo_renut_queue_notify_idle` | CPU | `true` | speed | Renut's renderer |
 | `banjo_renut_linked_stages` | non-CPU | `true` | speed | Renut's renderer |
 | `banjo_renut_check_worker` | CPU | `true` | speed | Renut's renderer |
@@ -425,6 +437,7 @@ console run decides), **not exact** (off, and stays off), **measurement off** (t
 | `banjo_gpu_depth_words_view` | non-CPU | `true` | speed | Renut's renderer |
 | `banjo_renut_cache_save_quiet` | non-CPU | `true` | stutter | Renut's renderer |
 | `banjo_gpu_tess_grid` | non-CPU | `true` | speed | Shader package |
+| `banjo_gpu_fetch_spec` | non-CPU | `true` | speed (2026-10-31: the water's vertex shader 2,494 -> 411 instructions; A/B 69) | Renut's renderer, deko3d |
 | `banjo_gpu_bool_spec` | non-CPU | `true` | speed | Shader package |
 | `banjo_gpu_bool_spec_direct` | non-CPU | `true` | compile time | Shader package |
 | `banjo_gpu_spec_per_stage` | non-CPU | `true` | compile time | Shader package |
@@ -1793,6 +1806,9 @@ the ones the A/B list switches have their target in brackets.
   casters of at most this many indices are not drawn into the shadow maps (depth-only draws into a square depth target:
   N&B's 1024 and 768 maps). `renut_shadowcull.toml` sets 300 (about 14 % of the shadow draws on the emulator's title
   screen; 3000 would be about 65 %). The 10 s line "shadow casters skipped" counts them.
+  2026-11-01, the user's console run (Nutty Acres): some vehicles lost their shadows (N&B vehicles are built of small
+  parts, each a caster under 300 indices), and the level was no faster: its shadow maps cost 0.94 ms a frame (202
+  depth draws into the 768 map) next to the sea's 18.4 ms. The two shadowcull tomls are no longer in the packages.
   `banjo_renut_diag_shadow_census` (Banjo/Debug): the depth-only draws by depth target and index count.
 - `banjo_xma_frame_cache` (Banjo/Audio, on), `banjo_xma_frame_cache_verify` (Banjo/Debug), `banjo_xma_frame_cache_mb`
   (24): a decoded XMA frame kept under the chain of frames its codec decoded since it was opened (the format at the root,

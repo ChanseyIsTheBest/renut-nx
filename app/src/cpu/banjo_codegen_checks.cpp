@@ -138,7 +138,20 @@ extern "C" void RexRoMismatch(unsigned address) noexcept {
 
 extern "C" void RexPromotedMismatch(unsigned target) noexcept {
   ::me::native::VerifyDifference();
-  if (g_promoted_mismatches.fetch_add(1, std::memory_order_relaxed) < 16) {
+  g_promoted_mismatches.fetch_add(1, std::memory_order_relaxed);
+  // banjo-nx (2026-10-29): each target once (it was the first 16 calls, which named the same few targets, so a list
+  // made from them left the rest in), up to 1024 targets.
+  static std::mutex mutex;
+  static std::vector<unsigned> seen;
+  bool first = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (seen.size() < 1024 && std::find(seen.begin(), seen.end(), target) == seen.end()) {
+      seen.push_back(target);
+      first = true;
+    }
+  }
+  if (first) {
     REXLOG_ERROR("[enhancements] DIFFERENCE: promoted indirect call: the dispatch table's entry for {:08X} is not the "
                  "function the generated code calls",
                  target);

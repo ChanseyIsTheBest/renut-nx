@@ -38,8 +38,11 @@
 #include <rex/sys_counters.h>
 #include <rex/thread.h>
 
+#include <rex/banjo_switch_default.h>  // banjo-nx (2026-11-01)
 #if REX_PLATFORM_SWITCH
 #include "threading_switch.h"
+// banjo-nx (2026-11-01): ui/switch_crash_hooks.c, stderr to logs/rex/rex_stderr.log.
+extern "C" void RexSwitchRedirectStderr(void);
 #endif
 
 #ifdef __SWITCH__
@@ -60,7 +63,9 @@
 REXCVAR_DEFINE_STRING(log_network, "", "Log",
                       "Switch: also send every log line (and stdout/stderr, e.g. NVK's messages) over TCP to this "
                       "host:port, for watching a run live (e.g. 192.168.1.76:28771). Empty = off");
-REXCVAR_DEFINE_STRING(log_level, "info", "Log",
+// banjo-nx (2026-11-01, the public build): off on the Switch (crash logs only: rex_crash.log is written by the
+// crash handler itself); "info" in renut.toml turns the logs on again.
+REXCVAR_DEFINE_STRING(log_level, BANJO_SWITCH_DEFAULT("off", "info"), "Log",
                       "Global log level: trace, debug, info, warn, error, critical, off")
     .allowed({"trace", "debug", "info", "warn", "error", "critical", "off"});
 
@@ -572,8 +577,16 @@ void InitLogging(const LogConfig& config) {
   }
 
   // File sink (rotating) with sequential naming fallback
+  // banjo-nx (2026-11-01, the public build): none when the level is off (no empty log file each start), and on the
+  // Switch stderr goes to rex_stderr.log only when logging is on.
+  const bool logging_off = config.default_level == spdlog::level::off;
+#if REX_PLATFORM_SWITCH
+  if (!logging_off)
+    RexSwitchRedirectStderr();
+#endif
   std::string resolved_path;
-  if (config.log_file) {
+  if (logging_off) {
+  } else if (config.log_file) {
     resolved_path = config.log_file;
   } else if (!config.app_name.empty()) {
     auto log_dir = config.log_dir.empty() ? std::filesystem::current_path() / "logs"

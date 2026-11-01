@@ -118,6 +118,9 @@ constexpr size_t kFrames = 10;
 // 0-32 renderer/audio counters (see RexSwitchPerfAdd); 40-55 host-runtime overhead (include/rex/sys_counters.h).
 constexpr unsigned kCounterCount = 64;
 // In <NRO folder>/logs/rex/ (switch_crash_hooks.c computes it at startup).
+// banjo-nx (2026-11-01, the public build): whether rex_profile.log is written (logging on, or stack sampling).
+bool g_write_reports = true;
+
 std::string ReportPath() {
   return std::string(RexSwitchLogDir()) + "rex_profile.log";
 }
@@ -453,7 +456,7 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
   std::sort(order.begin(), order.end(),
             [](size_t a, size_t b) { return g_slots[a].cpu > g_slots[b].cpu; });
 
-  FILE* f = std::fopen(ReportPath().c_str(), "a");
+  FILE* f = g_write_reports ? std::fopen(ReportPath().c_str(), "a") : nullptr;  // banjo-nx (2026-11-01)
   if (!f) {
     g_sample_count = 0;
     return;
@@ -1025,7 +1028,9 @@ void ProfilerMain(void*) {
   for (unsigned i = 0; i < kCounterCount; ++i) {
     counters_last[i] = g_counters[i].load(std::memory_order_relaxed);
   }
-  if (FILE* f = std::fopen(ReportPath().c_str(), "w")) {
+  // banjo-nx (2026-11-01, the public build): rex_profile.log only with logging on (log_level not "off").
+  g_write_reports = rex::cvar::GetFlagByName("log_level") != "off" || sample_stacks;
+  if (FILE* f = g_write_reports ? std::fopen(ReportPath().c_str(), "w") : nullptr) {
     std::fprintf(f, "image 0x%016" PRIx64 ", code up to 0x%016" PRIx64 "\n\n", g_base,
                  g_text_hi);
     std::fprintf(f, "Stack sampling: %s\n", sample_stacks ? "active (1 ms)" : "disabled");

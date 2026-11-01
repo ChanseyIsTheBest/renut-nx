@@ -2,6 +2,7 @@
 #include "renut_engine/gpu/banjo_renut_deko3d.h"
 
 #include <algorithm>
+#include <chrono>  // renut-nx (2026-11-01)
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
@@ -28,6 +29,7 @@
 // one, hence weak.
 extern const uint8_t g_deko3dGlslPackage[] __attribute__((weak));
 extern const size_t g_deko3dGlslPackageSize __attribute__((weak));
+REXCVAR_DECLARE(std::string, log_level);  // banjo-nx (2026-11-01): the SDK's (deko3d.log only with logging on)
 
 namespace banjo::renut_gpu::deko3d {
 
@@ -144,10 +146,129 @@ bool ReadAt(FILE *f, long at, std::vector<T> &out, size_t count) {
   return std::fseek(f, at, SEEK_SET) == 0 && (count == 0 || std::fread(out.data(), sizeof(T), count, f) == count);
 }
 
+// renut-nx (2026-11-01, the public build, the user's idea): the web installer writes deko3d_glsl.bin with raw frames and
+// no dictionary (the page has no zstd compressor), so each shader would be read from the card when it is made and its
+// text kept. With the dictionary the installer puts beside it (deko3d_glsl.dict: the native package's, trained on the
+// shaders' GLSL), the package is compressed here once, at the first start (zstd level 3: 161 MB of GLSL to about 23 MB),
+// and written over the file; from then on OpenInstalled holds it in memory, as the native package. The texts are the
+// same bytes, so every variant key and the DKSH cache stay valid. Any failure leaves the file as it was.
+void CompressInstalledPackage(const std::string &path) {
+  const std::string tmp_path = path + ".tmp";
+  // A conversion stopped between removing the old file and renaming the new one: the new one is whole.
+  if (FILE *done = std::fopen(tmp_path.c_str(), "rb")) {
+    std::fclose(done);
+    if (FILE *old = std::fopen(path.c_str(), "rb")) {
+      std::fclose(old);
+      std::remove(tmp_path.c_str());  // a write that did not finish
+    } else {
+      std::rename(tmp_path.c_str(), path.c_str());
+    }
+  }
+  std::vector<uint8_t> dict;
+  {
+    FILE *d = std::fopen(NextToExecutable("deko3d_glsl.dict").string().c_str(), "rb");
+    if (!d)
+      return;
+    std::fseek(d, 0, SEEK_END);
+    const long n = std::ftell(d);
+    const bool ok = n > 8 && n <= long(4u << 20) && ReadAt(d, 0, dict, size_t(n));
+    std::fclose(d);
+    if (!ok)
+      return;
+  }
+  FILE *f = std::fopen(path.c_str(), "rb");
+  if (!f)
+    return;
+  PackageHeader h{};
+  std::fseek(f, 0, SEEK_END);
+  const long length = std::ftell(f);
+  std::vector<uint8_t> in;
+  const bool raw = length > long(sizeof(h)) && std::fseek(f, 0, SEEK_SET) == 0 && std::fread(&h, sizeof(h), 1, f) == 1 &&
+                   std::memcmp(h.magic, "BDKG", 4) == 0 && h.version == 2 && h.dictSize == 0;
+  const bool read = raw && ReadAt(f, 0, in, size_t(length));
+  std::fclose(f);
+  if (!read)
+    return;  // already compressed, or not a package of ours
+  const uint64_t info_offset = h.reserved[0], info_size = h.reserved[1];
+  if (uint64_t(h.tableOffset) + 56ull * h.count > in.size() || h.dataOffset > in.size() ||
+      info_offset + info_size > in.size())
+    return;
+  std::vector<PackageEntry> entries(h.count);
+  std::memcpy(entries.data(), in.data() + h.tableOffset, 56ull * h.count);
+  const auto start = std::chrono::steady_clock::now();
+  ZSTD_CDict *cdict = ZSTD_createCDict(dict.data(), dict.size(), 3);
+  ZSTD_CCtx *cctx = ZSTD_createCCtx();
+  ZSTD_DCtx *dctx = ZSTD_createDCtx();
+  std::vector<uint8_t> data, text;
+  bool ok = cdict && cctx && dctx;
+  for (PackageEntry &e : entries) {
+    if (!ok)
+      break;
+    if (uint64_t(h.dataOffset) + e.offset + e.compressedSize > in.size() || e.size > (16u << 20)) {
+      ok = false;
+      break;
+    }
+    text.resize(e.size);
+    const size_t n = ZSTD_decompressDCtx(dctx, text.data(), e.size, in.data() + h.dataOffset + e.offset, e.compressedSize);
+    if (ZSTD_isError(n) || n != e.size) {
+      ok = false;
+      break;
+    }
+    const size_t at = data.size(), bound = ZSTD_compressBound(e.size);
+    data.resize(at + bound);
+    const size_t c = ZSTD_compress_usingCDict(cctx, data.data() + at, bound, text.data(), e.size, cdict);
+    if (ZSTD_isError(c)) {
+      ok = false;
+      break;
+    }
+    data.resize((at + c + 7) & ~size_t(7));
+    e.offset = uint32_t(at);
+    e.compressedSize = uint32_t(c);
+  }
+  ZSTD_freeCDict(cdict);
+  ZSTD_freeCCtx(cctx);
+  ZSTD_freeDCtx(dctx);
+  if (!ok) {
+    REXLOG_ERROR("[deko3d] installed GLSL package {}: could not be compressed with deko3d_glsl.dict; kept as it is", path);
+    return;
+  }
+  // header | dictionary | table | info | data, each part 8-byte aligned
+  const auto align8 = [](uint64_t v) { return (v + 7) & ~uint64_t(7); };
+  PackageHeader out = h;
+  out.dictSize = uint32_t(dict.size());
+  out.tableOffset = uint32_t(align8(32 + dict.size()));
+  out.reserved[0] = uint32_t(out.tableOffset + 56ull * h.count);
+  out.reserved[1] = uint32_t(info_size);
+  out.dataOffset = uint32_t(align8(out.reserved[0] + info_size));
+  std::vector<uint8_t> file(out.dataOffset, 0);
+  std::memcpy(file.data(), &out, sizeof(out));
+  std::memcpy(file.data() + 32, dict.data(), dict.size());
+  std::memcpy(file.data() + out.tableOffset, entries.data(), 56ull * h.count);
+  std::memcpy(file.data() + out.reserved[0], in.data() + info_offset, info_size);
+  in.clear();
+  in.shrink_to_fit();
+  FILE *w = std::fopen(tmp_path.c_str(), "wb");
+  bool written = w && std::fwrite(file.data(), 1, file.size(), w) == file.size() &&
+                 std::fwrite(data.data(), 1, data.size(), w) == data.size();
+  if (w)
+    written = std::fclose(w) == 0 && written;
+  if (!written) {
+    std::remove(tmp_path.c_str());
+    REXLOG_ERROR("[deko3d] installed GLSL package {}: the compressed copy could not be written; kept as it is", path);
+    return;
+  }
+  std::remove(path.c_str());
+  std::rename(tmp_path.c_str(), path.c_str());
+  REXLOG_INFO("[deko3d] installed GLSL package {}: compressed with deko3d_glsl.dict once ({} MB of shader data, {:.1f} s)",
+              path, (file.size() + data.size()) >> 20,
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+}
+
 InstalledPackage &OpenInstalled() {
   std::call_once(g_installed.once, [] {
     InstalledPackage &p = g_installed;
     const std::string path = NextToExecutable("deko3d_glsl.bin").string();
+    CompressInstalledPackage(path);  // renut-nx (2026-11-01): the web installer's raw package, once
     FILE *f = std::fopen(path.c_str(), "rb");
     if (!f) {
       REXLOG_INFO("[deko3d] no installed GLSL package ({}): the NRO's own shaders only", path);
@@ -336,68 +457,98 @@ bool InstalledShaderTable(std::vector<ShaderCacheEntry> &entries, std::vector<Sh
 
 #if defined(PLUME_DEKO3D)
 
-std::unique_ptr<plume::RenderShader> CreateGameShader(plume::RenderDevice *device, uint64_t hash) {
-  // The installer's package first (made from the player's files), then the NRO's own.
+// banjo-nx (2026-11-01): a shader's GLSL from the package that has it, the installer's first (empty: in neither, or it did
+// not unpack). in_memory: that package is in memory (unpacking it again later reads no card).
+static std::string UnpackGlsl(uint64_t hash, uint32_t &stage, bool &in_memory) {
   InstalledPackage &f = OpenInstalled();
   Package &p = Open();
   const PackageEntry *installed = Find(f, hash);
   const PackageEntry *e = installed ? installed : Find(p, hash);
-  if (!e || !device) {
+  in_memory = false;
+  if (!e) {
     static int logged = 0;
     if ((f.ok || p.ok) && logged++ < 16)
       REXLOG_ERROR("[deko3d] shader {:016X} is in no GLSL package", hash);
-    return nullptr;
+    return {};
   }
-  std::vector<uint8_t> blob(sizeof(plume::Deko3DShaderBlob) + e->size);
-  plume::Deko3DShaderBlob header;
-  header.stage = e->stage;
-  header.glslSize = e->size;
-  header.dkshSize = 0;
-  std::memcpy(blob.data(), &header, sizeof(header));
+  stage = e->stage;
+  std::string text(e->size, '\0');
   if (installed && f.ddict) {
     // banjo-nx (2026-10-23): from memory (a package with a dictionary).
     std::lock_guard<std::mutex> lock(f.mutex);
-    const size_t n = ZSTD_decompress_usingDDict(f.dctx, blob.data() + sizeof(header), e->size, f.data.data() + e->offset,
+    const size_t n = ZSTD_decompress_usingDDict(f.dctx, text.data(), e->size, f.data.data() + e->offset,
                                                 e->compressedSize, f.ddict);
     if (ZSTD_isError(n) || n != e->size) {
       REXLOG_ERROR("[deko3d] shader {:016X}: the installed GLSL did not unpack ({})", hash,
                    ZSTD_isError(n) ? ZSTD_getErrorName(n) : "short");
-      return nullptr;
+      return {};
     }
+    in_memory = true;
   } else if (installed) {
     std::lock_guard<std::mutex> lock(f.mutex);
     std::vector<uint8_t> frame(e->compressedSize);
     const bool read = std::fseek(f.file, long(f.data_offset + e->offset), SEEK_SET) == 0 &&
                       std::fread(frame.data(), 1, frame.size(), f.file) == frame.size();
-    const size_t n = read ? ZSTD_decompressDCtx(f.dctx, blob.data() + sizeof(header), e->size, frame.data(), frame.size())
-                          : 0;
+    const size_t n = read ? ZSTD_decompressDCtx(f.dctx, text.data(), e->size, frame.data(), frame.size()) : 0;
     if (!read || ZSTD_isError(n) || n != e->size) {
       REXLOG_ERROR("[deko3d] shader {:016X}: the installed GLSL did not read ({})", hash,
                    !read ? "card" : ZSTD_isError(n) ? ZSTD_getErrorName(n) : "short");
-      return nullptr;
+      return {};
     }
   } else {
     std::lock_guard<std::mutex> lock(p.mutex);
-    const size_t n = p.dict ? ZSTD_decompress_usingDDict(p.dctx, blob.data() + sizeof(header), e->size,
-                                                         p.data + e->offset, e->compressedSize, p.dict)
-                            : ZSTD_decompressDCtx(p.dctx, blob.data() + sizeof(header), e->size, p.data + e->offset,
-                                                  e->compressedSize);
+    const size_t n = p.dict ? ZSTD_decompress_usingDDict(p.dctx, text.data(), e->size, p.data + e->offset,
+                                                         e->compressedSize, p.dict)
+                            : ZSTD_decompressDCtx(p.dctx, text.data(), e->size, p.data + e->offset, e->compressedSize);
     if (ZSTD_isError(n) || n != e->size) {
       REXLOG_ERROR("[deko3d] shader {:016X}: the GLSL did not unpack ({})", hash,
                    ZSTD_isError(n) ? ZSTD_getErrorName(n) : "short");
-      return nullptr;
+      return {};
+    }
+    in_memory = true;
+  }
+  return text;
+}
+
+std::unique_ptr<plume::RenderShader> CreateGameShader(plume::RenderDevice *device, uint64_t hash) {
+  // The installer's package first (made from the player's files), then the NRO's own.
+  if (!device)
+    return nullptr;
+  uint32_t stage = 0;
+  bool in_memory = false;
+  const std::string glsl = UnpackGlsl(hash, stage, in_memory);
+  if (glsl.empty())
+    return nullptr;
+  std::vector<uint8_t> blob(sizeof(plume::Deko3DShaderBlob) + glsl.size());
+  plume::Deko3DShaderBlob header;
+  header.stage = stage;
+  header.glslSize = uint32_t(glsl.size());
+  header.dkshSize = 0;
+  std::memcpy(blob.data(), &header, sizeof(header));
+  std::memcpy(blob.data() + sizeof(header), glsl.data(), glsl.size());
+  auto shader = device->createShader(blob.data(), blob.size(), "main", plume::RenderShaderFormat::DEKO3D);
+  if (shader) {
+    shader->setName(fmt::format("{}_{:016X}", stage == 4 ? "ps" : "vs", hash));
+    // banjo-nx (2026-11-01, the console's out-of-memory crash): the text is not kept with the shader; plume unpacks it
+    // again when a new variant needs it (plume::Deko3DGlslSource). A package read from the card keeps it, as before.
+    if (in_memory) {
+      plume::Deko3DShaderSetGlslLoader(shader.get(), [hash] {
+        uint32_t st = 0;
+        bool mem = false;
+        return UnpackGlsl(hash, st, mem);
+      });
     }
   }
-  auto shader = device->createShader(blob.data(), blob.size(), "main", plume::RenderShaderFormat::DEKO3D);
-  if (shader)
-    shader->setName(fmt::format("{}_{:016X}", e->stage == 4 ? "ps" : "vs", hash));
   return shader;
 }
 
 void InstallShaderCache() {
   // The back end's messages into this log (plume writes them to stderr otherwise), and into deko3d.log next to the NRO,
   // flushed at each line: the log's buffer is lost when the process dies.
-  static FILE *diag = std::fopen(NextToExecutable("deko3d.log").string().c_str(), "w");
+  // banjo-nx (2026-11-01, the public build): only with logging on (log_level not "off").
+  static FILE *diag = REXCVAR_GET(log_level) != "off"
+                          ? std::fopen(NextToExecutable("deko3d.log").string().c_str(), "w")
+                          : nullptr;
   static std::mutex diag_mutex;
   plume::SetDeko3DLogCallback([](const char *message) {
     REXLOG_INFO("[deko3d] {}", message);
@@ -411,6 +562,9 @@ void InstallShaderCache() {
   plume::Deko3DOptions options;
   options.depthCompression = Deko3DDepthCompressionOn();
   options.zcull = Deko3DZcullOn();
+  options.msaaPositions = Deko3DMsaaPositionsOn();  // 2026-10-30, from sasrt-nx
+  options.alphaToCoverageDither = Deko3DA2cDitherOn();
+  options.stripRestart = Deko3DStripRestartOn();
   options.vsOutputs = Deko3DVsOutputsOn();
   options.uamFlags = Deko3DUamFlags();
   options.mergeBarriers = Deko3DBarrierMergeOn();  // banjo-nx (2026-10-19, GPU)
@@ -499,7 +653,7 @@ std::string Report() {
                      "background rests {:.1f} s), "
                      "DKSH cache {} hits, {} added; memory: images {} MB, buffers {} MB, code {} KB, commands {} KB; "
                      "barriers: {} primitives, {} fragments, {} full ({} invalidating textures); copy and 2D engines: {} "
-                     "buffer copies, {} texture uploads, {} readbacks, {} image copies, {} resolves, {} blits",
+                     "buffer copies, {} texture uploads, {} readbacks, {} image copies, {} resolves, {} blits; multisampled pipelines {} ({} with alpha to coverage, {} given the standard sample positions: banjo_deko3d_msaa_positions); indexed strips drawn with primitive restart {} (banjo_deko3d_strip_restart)",
                      st.draws.load(), st.windowDraws.load(), st.pipelineBinds.load(), st.stateBinds.load(),
                      st.textureRuns.load(), st.textureSkips.load(), compiles,
                      compiles ? double(st.shaderCompileNs.load()) / 1e6 / double(compiles) : 0.0,
@@ -511,7 +665,8 @@ std::string Report() {
                      st.bufferBytes.load() >> 20, st.codeBytes.load() >> 10, st.commandBytes.load() >> 10,
                      st.barriersPrimitives.load(), st.barriersFragments.load(), st.barriersFull.load(),
                      st.barriersImageInvalidate.load(), st.copyBuffer.load(), st.copyUpload.load(), st.copyReadback.load(),
-                     st.copyImage.load(), st.copyResolve.load(), st.copyBlit.load());
+                     st.copyImage.load(), st.copyResolve.load(), st.copyBlit.load(), st.msaaPipelines.load(),
+                     st.msaaAlphaToCoverage.load(), st.msaaPositioned.load(), st.stripRestartDraws.load());
 }
 
 #else

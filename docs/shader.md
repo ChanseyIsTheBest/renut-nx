@@ -177,6 +177,35 @@ Candidates, largest first. Each must stay exact. **The full list (110 candidates
   (`k_32_32_32_FLOAT` at stride 9 in VS n414) still load word by word.
 - **The water's tessellation.** Done (`banjo_gpu_tess_grid`, package 21): one invocation per grid point instead of
   per triangle corner, 25,344 -> 5,049 a draw.
+- **The water's vertex fetch (2026-10-31, `banjo_gpu_fetch_spec`, A/B 69).** Nutty Acres' sea (PS
+  `9ED9E1A8E6A44361`, VS `F09B139EE9188255`) cost 18-19 ms of GPU a frame at 540p on the console (logs of 2026-10-30),
+  and the cost does not follow the resolution: it is the vertex shader.
+  - The console ran 94.7 M grid vertices per 10 s there (about 660k a frame at 14 fps).
+  - Each grid vertex ran 2,494 instructions: the generic bound fetch switches over fifteen Xenos formats per stream
+    (rows 66-69 of the shared constants, `bound_fetch[k][3]`), with the patch-kind code (904) read at run time too.
+  - That is about 1.6 G instructions a frame, roughly 14 ms at 460 MHz.
+  - The pixel shader is 530 instructions and 13-16 texture reads at 31-32 GPRs, full occupancy. Its 4 blended draws
+    are not what costs.
+  - Pass `fetchspec` (`tools/deko3d_glsl_opt.py`) reads the type words through constants 920-923. A tessellated
+    draw's key carries the draw's own words and patch kind (`PipelineKey::fetch_types`, `tess_kind`; pipeline list
+    version 5).
+  - Result: the water vertex shader drops 2,494 -> 411 instructions (25 -> 16 GPRs). The 8 vertex shaders with the
+    generic fetch are the only ones it touches: 3 in the NRO's package, 5 in the installed one
+    (`tools/deko3d_glsl_patch.py` patches an installed package in place).
+  - Exact: the constants hold the values the shader would read. The pipeline caches that skip `MakeKey` compare them
+    (`FetchSpecDiffers`).
+  - First time a key is seen, the draw uses the generic pipeline while the specialised one is built. The first
+    emulator run kept the generic water for 6 minutes: the job's vertex variant was queued as a background compile,
+    behind the pipeline list's compiles and their CPU-share rests. Since then, a job a draw asked for
+    (`Job::for_draw`) goes to the front of the prebuild queue. Its variants are queued as a draw's
+    (`plume::Deko3DSetDrawVariants`). A variant already in the shader cache file is a read, ahead of every compile.
+  - 2026-11-01, the user's first console run with it (NRO b37ed58bb667): the sea still cost 18.4 ms a frame. The
+    specialised water variant never compiled in 6 minutes. The uam thread compiled 19 variants in the whole session
+    (about 5 s each, then rests of up to 30 s: 210 s of rests), behind a backlog, and a draw's request still waits its
+    turn there. Now a pipeline with fetch constants (`FetchSpecialised`) is built with its own variants compiled on
+    the prebuild worker itself (`plume::Deko3DSetUrgentVariants`): a compile that thread waits for, which goes ahead of
+    every background one and ends their rest. The draws use the generic pipeline meanwhile. The log says
+    "fetch spec (banjo_gpu_fetch_spec): VS ...'s pipeline ... built in N ms".
 - **Skinning repeated per pass.** The level skins the same meshes in the scene, the small pass and the shadow passes
   (PS n538's VS n770: 55,185 vertices in each). Skinning once per frame and reusing the result would need the vertex
   shader split at the bone blend and a buffer for its results; not started.

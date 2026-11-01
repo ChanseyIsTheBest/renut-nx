@@ -1,6 +1,7 @@
 // banjo-nx: on/off switches for every performance enhancement (see banjo_enhancements.h).
 
 #include "banjo_enhancements.h"
+#include "banjo_switch_default.h"  // banjo-nx (2026-11-01): the shipped Switch defaults
 
 #include <rex/cvar.h>
 #include <rex/logging.h>

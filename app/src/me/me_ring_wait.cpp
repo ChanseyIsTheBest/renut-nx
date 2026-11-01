@@ -36,7 +36,8 @@ REXCVAR_DEFINE_BOOL(masseffect_wait_blocking_ring, false, "Mass Effect",
                     "Native renderer: the game's D3D sleeps while waiting for the ring thread to advance "
                     "instead of spinning in sub_821FEBE0")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(masseffect_notify_no_lock, false, "Mass Effect",
+#include <rex/banjo_switch_default.h>  // banjo-nx (2026-11-01): the shipped Switch defaults
+REXCVAR_DEFINE_BOOL(masseffect_notify_no_lock, BANJO_SWITCH_DEFAULT(true, false), "Mass Effect",
                     "Ring thread: NotifyRingProgress takes the progress mutex only when the game's D3D wait is "
                     "registered as sleeping (sequentially consistent handshake on both sides) instead of on every call "
                     "(one per fence write and per ring segment). Same wake-ups")

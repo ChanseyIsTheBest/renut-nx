@@ -82,6 +82,16 @@ region of type 1, debug flags as theirs (force_debug_prod). One difference: addr
 games use, so the address space Banjo has under title takeover) where NetherSX2_nx's has 1 (36-bit). Like every
 homebrew NPDM its ACID is unsigned: it loads where the forwarder's own NPDM loads (the same loader patches).
 
+**renut-nx 1.0.0 (2026-11-01): any player's Sphaira forwarder.** The players make the forwarder in Sphaira (X,
+Install Forwarder, Address Space 39-bit, Create Forwarder). Sphaira's program id depends on the NRO's path
+(sphaira `source/owo.cpp`): the first 8 bytes of the SHA-256 of the path written twice (the forwarder's arguments
+default to the path), little-endian, as `05xxxxxxxxxxx000` (homebrew) or, in its native-game mode, `01xxxxxxxxxxx000`
+with bit 12 clear. The user's `05D6EA1333487000` is that of `sdmc:/switch/banjo-nx/banjo-nx.nro`. renut-nx computes
+the ids of its own `argv[0]` (with and without `sdmc:`, both modes) and writes the NPDM for them as for
+`banjo_forwarder_program_id` (`SphairaForwarderOfThisNro`, `threading_switch.cpp`); for
+`sdmc:/switch/renut-nx/renut-nx.nro` they are `059270E176E83000` and `019270E176E82000`. A retail game's id (title
+takeover) never matches.
+
 The log line at the render thread's start says what happened:
 `[banjo] system core: process cores 0xF, system core 3 (banjo_system_core 1; game threads on 0x7); forwarder NPDM in
 place: sdmc:/atmosphere/contents/05D6EA1333487000/exefs/main.npdm`. With `written (launch the forwarder again ...)`

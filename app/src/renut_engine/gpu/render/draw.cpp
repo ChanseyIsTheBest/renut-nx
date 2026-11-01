@@ -2,6 +2,7 @@
  * @file    gpu/render/draw.cpp
  */
 #include "renut_engine/gpu/render/draw.h"
+#include "banjo_switch_default.h"  // banjo-nx (2026-11-01): the shipped Switch defaults
 #include "renut_engine/gpu/render/smaa.h"
 #include "renut_engine/gpu/render/ui_scale.h"  // banjo-nx (2026-10-21, internal resolution)  // banjo-nx (2026-10-21): banjo_renut_smaa
 
@@ -5827,11 +5828,37 @@ const u32 *BoolSpecMask(const ShaderRecord *r) {
   return r->bool_spec_mask;
 }
 
+// banjo-nx (banjo_gpu_fetch_spec, 2026-10-31): a tessellated draw's PipelineKey::fetch_types and tess_kind, the words
+// its vertex shader reads at run time (SharedConstants.bound_fetch[k][3] and tessellation[0], both written before the
+// key is made): each + 1, 0 for none. The types only for a vertex shader with bound fetches (the generic fetch). The
+// pipeline caches that skip MakeKey compare these too (a declaration's layout hash names its host formats, not its
+// D3D types).
+struct FetchSpec {
+  u32 types[4];
+  u32 kind;
+};
+FetchSpec FetchSpecWords(const SharedConstants &sc, const ShaderRecord &vs, bool per_instance, int ab_off) {
+  FetchSpec s{};
+  if (!per_instance || !banjo::renut_gpu::FetchSpecOn() || ab_off == 69)
+    return s;
+  s.kind = sc.tessellation[0] + 1;
+  if (DrawSummaryOf(vs).bound_fetches) {
+    for (u32 k = 0; k < 4; ++k)
+      s.types[k] = sc.bound_fetch[k][3] + 1;
+  }
+  return s;
+}
+bool FetchSpecDiffers(const PipelineKey &key, const FetchSpec &s) {
+  return key.tess_kind != s.kind || std::memcmp(key.fetch_types, s.types, sizeof(s.types)) != 0;
+}
+
 PipelineKey MakeKey(const GuestDevice &device, const ShaderRecord *vs, const ShaderRecord *ps,
                     const VertexDeclarationRecord *declaration, const Targets &t, u32 primitive,
-                    bool per_instance, const u32 *booleans, u32 alpha_test_func) {
+                    bool per_instance, const u32 *booleans, u32 alpha_test_func, const FetchSpec &fetch_spec) {
   PipelineKey key;
   std::memset(&key, 0, sizeof(key));
+  std::memcpy(key.fetch_types, fetch_spec.types, sizeof(key.fetch_types));  // banjo-nx (banjo_gpu_fetch_spec)
+  key.tess_kind = fetch_spec.kind;
   // banjo-nx (banjo_gpu_bool_spec): the draw's values of the bools its shaders specialise (the same words the shaders
   // read at run time, SharedConstants.booleans).
   if (banjo::renut_gpu::BoolSpecOn()) {
@@ -8899,6 +8926,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
                                                                   : RenderStateIdLocked(f.rs, targets);
   const uint64_t prebuild_epoch = PrebuildEpochLocked();
   const u32 misc = call.primitive | u32(geometry.per_instance) << 8 | alpha_test_func << 9 | u32(ab_off) << 16;
+  const FetchSpec fetch_spec = FetchSpecWords(sc, *vs, geometry.per_instance, ab_off);  // banjo-nx (2026-10-31)
   const ShaderCacheEntry *const ps_entry = ps ? ps->entry : nullptr;
   // banjo-nx (2026-10-27, shadow sort): the key reads the shaders through their cache entries and the declaration
   // through its layout hash (MakeKey, BoolSpecMask), so another shader object of the same contents (N&B makes one per
@@ -8907,7 +8935,8 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
                           misc != f.key_misc || f.prebuild_epoch != prebuild_epoch ||
                           ((shaders_changed || (fields & kFieldDecl)) &&
                            (vs->entry != f.kp->vertex_shader || ps_entry != f.kp->pixel_shader ||
-                            declaration->layout_hash != f.kp->layout_hash || ab_off == 41));  // A/B 41: as before
+                            declaration->layout_hash != f.kp->layout_hash || ab_off == 41)) ||  // A/B 41: as before
+                          (geometry.per_instance && FetchSpecDiffers(*f.kp, fetch_spec));  // banjo_gpu_fetch_spec
   if (key_inputs) {
     FastPipeline &c = g_fast_pipelines[FastPipelineIndex(f.rs_epoch, vs->entry, ps_entry, declaration->layout_hash,
                                                          misc)];
@@ -8915,7 +8944,8 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     if (c.pipeline && c.rs_epoch == f.rs_epoch && c.vs == vs->entry && c.ps == ps_entry &&
         c.layout_hash == declaration->layout_hash && c.misc == misc &&
         (c.prebuild_epoch == prebuild_epoch || (!c.provisional && ab_off != 63)) &&
-        c.generation == g_fast_pipeline_generation) {
+        c.generation == g_fast_pipeline_generation &&
+        (!geometry.per_instance || !FetchSpecDiffers(c.key, fetch_spec))) {  // banjo_gpu_fetch_spec
       ++g_fast_pipeline_hits;
       f.kp = &c.key;
       f.kp_hot = c.hot;
@@ -8930,7 +8960,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
                                  : c.generation == g_fast_pipeline_generation ? 2
                                                                               : 3];
       c.key = MakeKey(device, vs, ps, declaration, targets, call.primitive, geometry.per_instance, sc.booleans,
-                      sc.alpha_test_func);
+                      sc.alpha_test_func, fetch_spec);
       c.blend_used = BlendConstantUsed(c.key);
       c.hot = KeyHot::Of(c.key);
       f.kp = &c.key;
@@ -8953,7 +8983,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   }
   if (verify) {
     const PipelineKey key = MakeKey(device, vs, ps, declaration, targets, call.primitive, geometry.per_instance,
-                                    sc.booleans, sc.alpha_test_func);
+                                    sc.booleans, sc.alpha_test_func, fetch_spec);
     plume::RenderPipeline *made = GetPipelineLocked(key, {host_vs, draw_host_ps, &declaration->layout});
     if (std::memcmp(&key, f.kp, sizeof(key)) != 0 || made != f.pipeline) {
       static uint32_t logged = 0;
@@ -10484,6 +10514,9 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
                 reuse.surface_epoch == surface_epoch && reuse.ab_off == ab_off;
   for (u32 i = 0; reused && i < targets.color_count; ++i)
     reused = reuse.colors[i] == targets.colors[i];
+  const FetchSpec fetch_spec = FetchSpecWords(sc, *vs, geometry.per_instance, ab_off);  // banjo-nx (2026-10-31)
+  if (reused && geometry.per_instance && FetchSpecDiffers(reuse.key, fetch_spec))
+    reused = false;
   PipelineKey key;
   if (reuse_on)
     CountReuse(3, reused);  // banjo-nx (2026-10-23)
@@ -10491,7 +10524,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     key = reuse.key;
     if (reuse_verify) {
       const PipelineKey made = MakeKey(device, vs, ps, declaration, targets, call.primitive, geometry.per_instance,
-                                       sc.booleans, sc.alpha_test_func);
+                                       sc.booleans, sc.alpha_test_func, fetch_spec);
       if (std::memcmp(&made, &key, sizeof(key)) != 0) {
         static uint32_t logged = 0;
         if (logged++ < 8)
@@ -10502,7 +10535,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     }
   } else {
     key = MakeKey(device, vs, ps, declaration, targets, call.primitive, geometry.per_instance, sc.booleans,
-                  sc.alpha_test_func);
+                  sc.alpha_test_func, fetch_spec);
   }
   if (reuse_on) {
     reuse.seq = hint.seq;
@@ -11502,6 +11535,17 @@ bool ResolveDepth(HostSurface *surface, HostTexture *dest, const ClearRect &src,
   push.param0 = GpuTextureFormat(surface->format_word & 0x3F) == GpuTextureFormat::Fmt24_8_Float
                     ? 1.0f
                     : 0.0f;
+#if defined(PLUME_DEKO3D)
+  // katamari-nx (2026-10-30, their commit 32330443): the multisampled variant's deko3d shader reads the depth target
+  // (binding 0) and its stencil view (binding 1) as BOUND textures (tools/deko3d_glsl.py). Bindless, the multisampled
+  // fetch was one Ryujinx's shader translator cannot follow ("Failed to find handle source for bindless access of type
+  // texture2DMS") and read 0. Banjo does not resolve a multisampled depth today (disable_msaa; the 2x portrait's depth
+  // is not resolved): this is for MSAA turned on.
+  if (variant == 1 && IsDeko3D()) {
+    const uint32_t slots[2] = {source_slot, push.param1 != 0.0f ? push.sampler_index : source_slot};
+    plume::Deko3DBindFragmentTextures(cmd, 0, slots, 2);
+  }
+#endif
   cmd->setGraphicsPushConstants(0, &push, 0, sizeof(push));
   cmd->drawInstanced(3, 1, 0, 0);
   TransitionTextureLocked(dest, plume::RenderTextureLayout::SHADER_READ);

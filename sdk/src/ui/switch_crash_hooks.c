@@ -87,10 +87,21 @@ static void RexSwitchExitHook(void) {
 __attribute__((constructor(101)))
 static void RexSwitchCrashHooksInit(void) {
     RexSwitchInitLogDir();
+    atexit(RexSwitchExitHook);
+}
+
+/*
+ * banjo-nx (2026-11-01, the public build): stderr to rex_stderr.log, called by the SDK's logging once the toml is read
+ * and only when logging is on (log_level not "off"). The crash log itself (rex_crash.log) does not need it.
+ */
+void RexSwitchRedirectStderr(void) {
+    static int done = 0;
+    if (done)
+        return;
+    done = 1;
     char path[FS_MAX_PATH];
     snprintf(path, sizeof(path), "%srex_stderr.log", g_rex_log_dir);
     if (freopen(path, "w", stderr)) {
         setvbuf(stderr, NULL, _IONBF, 0);
     }
-    atexit(RexSwitchExitHook);
 }

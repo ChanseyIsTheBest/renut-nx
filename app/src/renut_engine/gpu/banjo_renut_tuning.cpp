@@ -1,5 +1,6 @@
 // banjo-nx (2026-10-17): see banjo_renut_tuning.h.
 #include "renut_engine/gpu/backend/render_thread.h"
+#include "banjo_switch_default.h"  // banjo-nx (2026-11-01): the shipped Switch defaults
 #include "renut_engine/gpu/backend/video.h"
 #include <rex/frame_latency.h>
 #include "renut_engine/display_sync.h"
@@ -169,6 +170,11 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_tess_spec, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-18): a pipeline that is not a tessellated draw's gives its vertex shader "
                     "the patch kind 0 as specialization constant 904: the tessellation code goes. No new pipelines. "
                     "Same pixels");
+REXCVAR_DEFINE_BOOL(banjo_gpu_fetch_spec, true, "Banjo/Enhancements",
+                    "deko3d renderer (2026-10-31): a tessellated draw (the water) gives its vertex shader the vertex "
+                    "types of its first four bound fetches (constants 920-923) and its patch kind (904): the generic "
+                    "fetch decodes one format instead of switching over fifteen (the water's vertex shader 2,494 -> "
+                    "411 instructions). A/B 69. Same pixels");
 REXCVAR_DEFINE_BOOL(banjo_deko3d_vs_outputs, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-18): a pipeline's vertex shader writes only the outputs its pixel shader "
                     "reads (none for depth-only draws: the shadow maps), specialization constant 905: the others and "
@@ -213,19 +219,19 @@ REXCVAR_DEFINE_INT32(banjo_renut_fur_shells, 1, "Banjo/Enhancements",
                      "first always: 2 draws 11 of Banjo's 21 shells (thinner fur, the same length). The fur is about "
                      "18 ms of the heaviest frame's GPU at the stock clock")
     .range(1, 4);
-REXCVAR_DEFINE_INT32(banjo_renut_fur_shells_percent, 100, "Banjo/Enhancements",
+REXCVAR_DEFINE_INT32(banjo_renut_fur_shells_percent, BANJO_SWITCH_DEFAULT(75, 100), "Banjo/Enhancements",
                      "NOT exact, the user's call (2026-10-21): the share of each fur part's shells drawn, spread evenly "
                      "(75: three of every four, the 4th, 8th, ... left out: 16 of Banjo's 21, his outermost shell drawn, "
                      "so the fur keeps its length), the first always (it writes the skin-once rows); the dialogue "
                      "portrait's too. 100 draws every shell as "
                      "the game. Below 100 it takes the place of banjo_renut_fur_shells and banjo_renut_portrait_fur_shells")
     .range(25, 100);
-REXCVAR_DEFINE_INT32(banjo_renut_portrait_fur_shells_percent, 100, "Banjo/Enhancements",
+REXCVAR_DEFINE_INT32(banjo_renut_portrait_fur_shells_percent, BANJO_SWITCH_DEFAULT(50, 100), "Banjo/Enhancements",
                      "NOT exact, the user's call (2026-10-21): banjo_renut_fur_shells_percent for the fur drawn into "
                      "targets of 128 x 128 or less (the dialogue portrait, 96 x 96): 50 draws every other shell (11 of "
                      "21, the first always). 100: the same share as the rest of the fur")
     .range(25, 100);
-REXCVAR_DEFINE_INT32(banjo_renut_portrait_msaa_samples, 0, "Banjo/Enhancements",
+REXCVAR_DEFINE_INT32(banjo_renut_portrait_msaa_samples, BANJO_SWITCH_DEFAULT(2, 0), "Banjo/Enhancements",
                      "NOT exact, the user's call (2026-10-21): the samples of the colour and depth targets of 128 x 128 "
                      "or less that the game makes with MSAA (the dialogue portrait's 96 x 96 box, 4x). 0 as the game; 2: "
                      "2x (half the samples to test, write and resolve; the edges still smoothed); 1: single-sampled (no "
@@ -242,7 +248,7 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_uam_wide_rows, true, "Banjo/Enhancements",
                     "32-bit loads, with a DKSH cache of its own (deko3d_shaders_f447.bin)");
 REXCVAR_DEFINE_BOOL(banjo_renut_diag_null_ps, false, "Banjo/Diagnostics",
                     "Diagnostic (2026-10-20): the fur family's pixel shaders (tools/nullps_shaders.txt) discard at once, so the GPU profile shows their draws' vertex and rasterisation cost alone. The fur vanishes: a measurement, not a picture (configs/banjo_renut_diag_fur_vertex_only.toml)");
-REXCVAR_DEFINE_BOOL(banjo_renut_smaa, false, "Banjo/Enhancements",
+REXCVAR_DEFINE_BOOL(banjo_renut_smaa, BANJO_SWITCH_DEFAULT(true, false), "Banjo/Enhancements",
                     "SMAA 1x (2026-10-21, the user's request; Jimenez et al.'s SMAA, MIT: app/thirdparty/smaa): "
                     "anti-aliasing of the game's 3D image right after its final composite (a draw with one of the pixel "
                     "shaders of banjo_renut_smaa_after_ps), before the HUD is drawn over it, so the HUD and its text stay "
@@ -262,7 +268,7 @@ REXCVAR_DEFINE_STRING(banjo_renut_smaa_after_ps, "981A6A58F2ABFA42", "Banjo/Enha
                       "final composite; SMAA runs on its target right after it, once a frame. N&B: 981A6A58F2ABFA42, "
                       "the bloom and depth-of-field composite before the HUD (emulator trace of 2026-10-21)");
 // banjo-nx (2026-10-21, internal resolution, the user's request; sa2-nx and Peggle 2 switch resolution by mode too).
-REXCVAR_DEFINE_INT32(banjo_renut_render_height_handheld, 720, "Banjo/Enhancements",
+REXCVAR_DEFINE_INT32(banjo_renut_render_height_handheld, BANJO_SWITCH_DEFAULT(648, 720), "Banjo/Enhancements",
                      "NOT exact, the user's request (2026-10-21): on deko3d, the height of the 3D image in handheld mode: "
                      "720 = the game's 1280x720; 648 = 1152x648 (0.81 of the pixels to shade); any height from 360 to "
                      "1080, rounded to a multiple of 9 (whole pixels at every 16:9 size the game uses; package 36z2). "
@@ -273,18 +279,18 @@ REXCVAR_DEFINE_INT32(banjo_renut_render_height_handheld, 720, "Banjo/Enhancement
                      "resolution whole. Shadow maps and the post-processing buffers keep the console's sizes. From the "
                      "next frame")
     .range(480, 1080);
-REXCVAR_DEFINE_INT32(banjo_renut_render_height_docked, 720, "Banjo/Enhancements",
+REXCVAR_DEFINE_INT32(banjo_renut_render_height_docked, BANJO_SWITCH_DEFAULT(864, 720), "Banjo/Enhancements",
                      "NOT exact, the user's request (2026-10-21): banjo_renut_render_height_handheld for docked mode "
                      "(864 = 1536x864, 1.2x the game's; 900 = 1600x900; with banjo_renut_display_height_docked = 1080 "
                      "the HUD at 1920x1080). Read at start")
     .range(480, 1080);
-REXCVAR_DEFINE_INT32(banjo_renut_display_height_docked, 720, "Banjo/Enhancements",
+REXCVAR_DEFINE_INT32(banjo_renut_display_height_docked, BANJO_SWITCH_DEFAULT(1080, 720), "Banjo/Enhancements",
                      "The display's resolution when docked on deko3d (2026-10-21; the swapchain change from sa2-nx "
                      "1.0.3.1): 720 = 1280x720, which the console scales to the TV; 1080 = the swapchain made at "
                      "1920x1080 and the HUD, menus and text drawn at it (1.5x). Docking and undocking switch at the next "
                      "frame")
     .range(720, 1080);
-REXCVAR_DEFINE_BOOL(banjo_renut_host_mips, true, "Banjo/Enhancements",
+REXCVAR_DEFINE_BOOL(banjo_renut_host_mips, BANJO_SWITCH_DEFAULT(false, true), "Banjo/Enhancements",
                     "Renut's renderer: a resolve destination drawn above 1x (docked: the 3D image at 1.2x, the HUD at "
                     "1.5x) gets an extra host mip level, rebuilt after every resolve, so minified reads of it filter as "
                     "the guest's 1x texture would (Renut's, made for 1440p and 4K). Off (2026-10-21, NOT exact above "
@@ -299,9 +305,9 @@ REXCVAR_DEFINE_INT32(banjo_renut_diag_smaa_compare_s, 0, "Banjo/Diagnostics",
                      "banjo_renut_smaa comparison pictures (2026-10-21): every N seconds the same frame's 3D image "
                      "before and after SMAA (the HUD not drawn yet) as capturas/smaa_NNN_off.tga and _on.tga next to "
                      "the NRO, at full size (0 = off; render/smaa.cpp)");
-REXCVAR_DEFINE_BOOL(banjo_deko3d_eager_kicks, false, "Banjo/Enhancements",
+REXCVAR_DEFINE_BOOL(banjo_deko3d_eager_kicks, BANJO_SWITCH_DEFAULT(true, false), "Banjo/Enhancements",
                     "Input latency A/B (2026-10-20): the frame goes to the GPU in more, earlier parts: a command list ends at a game kick once it holds 100 draws (not 200, at most 6 a frame, not 3) and goes to the GPU at that kick (its upload memory cleaned first), not at the next one. At the frame cap the GPU then works while the render thread is still replaying the frame instead of mostly after the present: the frame is done sooner after its controller read (the [latency] line's \"input -> GPU done\"). The same commands in the same order (configs/banjo_deko3d_eager_kicks_ab.toml; in-run A/B target 18)");
-REXCVAR_DEFINE_BOOL(banjo_deko3d_skin_once, false, "Banjo/Enhancements",
+REXCVAR_DEFINE_BOOL(banjo_deko3d_skin_once, BANJO_SWITCH_DEFAULT(true, false), "Banjo/Enhancements",
                     "GPU A/B (2026-10-20): the fur's skinned meshes (tools/skinonce_shaders.txt) skinned once a frame: a part's first draw of the frame writes each vertex's three skinned matrix rows to a buffer (constant 913, shared word v[84].z = 1), its other shells read them there (= 2) instead of loading 12 bone rows and blending them (the vertex shader about half as long). Only where every input of the skinning is the same draw for draw (shaders, index and vertex buffers, bone data and its constants); the same rows, bit for bit, so the same pixels (configs/banjo_deko3d_skin_once_on.toml; in-run A/B target 17)");
 REXCVAR_DEFINE_BOOL(banjo_deko3d_light_branch, false, "Banjo/Enhancements",
                     "GPU A/B (2026-10-20): in the heaviest lit pixel shaders (tools/lightbranch_shaders.txt) each point light's work runs in a branch on its attenuation test, so warps whose pixels the light does not reach skip it (a light is about 35 instructions); where every light reaches, the branches cost a few instructions. The same pixels; whether it is faster is the console's to say (configs/banjo_deko3d_light_branch_on.toml)");
@@ -475,6 +481,22 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_barrier_lean, true, "Banjo/Enhancements",
 REXCVAR_DEFINE_BOOL(banjo_deko3d_zcull, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-18): hierarchical depth culling (Zcull) on the queue: tiles a draw cannot "
                     "pass the depth test in are skipped before shading. Same pixels");
+REXCVAR_DEFINE_BOOL(banjo_deko3d_msaa_positions, true, "Banjo/Enhancements",
+                    "deko3d renderer (2026-10-30, from sasrt-nx): a multisampled target's pipelines get the "
+                    "standard sample positions for their sample count (dkMultisampleStateSetLocations, as nouveau). "
+                    "Off: deko3d's default, every sample at the pixel's centre, so 2x/4x targets have no edge "
+                    "antialiasing on the console (Ryujinx keeps the standard positions either way)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_deko3d_a2c_dither, false, "Banjo/Enhancements",
+                    "deko3d renderer (2026-10-30, from sasrt-nx): the hardware's alpha-to-coverage dither (deko3d "
+                    "turns it on by default). On: a fixed screen-space grid where alpha to coverage draws on a "
+                    "multisampled target; off: the coverage from alpha alone, as the Vulkan and D3D12 back ends")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_deko3d_strip_restart, true, "Banjo/Enhancements",
+                    "deko3d renderer (2026-10-30, from sasrt-nx): an indexed triangle or line strip starts again at "
+                    "the all-ones index (0xFFFF for 16-bit indices), as the Vulkan back end and D3D. Off: deko3d's "
+                    "default, no restart, so a cut joins the strips with stray triangles to vertex 65535")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_deko3d_gpu_region, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-28, h10, after the night_gpu2 console freeze): GPU memory blocks of 64 KB "
                     "and more from a region of their own at the heap's top, growing down as needed, not from the heap "
@@ -617,7 +639,7 @@ REXCVAR_DEFINE_BOOL(banjo_renut_memory_policy, kMemoryPolicyDefault, "Banjo",
                     "banjo_renut_stream_cache_mb and emptied of copies idle banjo_renut_stream_cache_idle_s, upload ring "
                     "chunks of a heavy frame released after banjo_renut_upload_trim_frames. The same picture: a released "
                     "texture or copy is made again from guest memory. Not under a master switch");
-REXCVAR_DEFINE_INT32(banjo_renut_textures_reserve_mb, 192, "Banjo",
+REXCVAR_DEFINE_INT32(banjo_renut_textures_reserve_mb, BANJO_SWITCH_DEFAULT(384, 192), "Banjo",
                      "banjo_renut_memory_policy: with less than this much of the GPU memory budget left, or the "
                      "bindless table three quarters full (checked every 32 frames), the host textures not bound for "
                      "120 frames are released (made again from guest memory when bound). Never a resolve destination "
@@ -887,6 +909,7 @@ const char *AbName(int target) {
   case 65: return "host draw packets (banjo_renut_host_packets: made and taken)";  // 2026-10-28
   case 66: return "resolve host levels made at their first read (banjo_renut_lazy_resolve_mips, from sa2-nx)";  // 2026-10-28
   case 67: return "whole clears of a target holding that clear already not sent (banjo_renut_clear_repeat, from sa2-nx)";
+  case 69: return "tessellated draws' vertex fetch types and patch kind as constants (banjo_gpu_fetch_spec)";  // 2026-10-31
   case 68: return "no pipeline read for the provisional check while none is provisional (banjo_deko3d_provisional_count)";
   default: return "none";
   }
@@ -1350,6 +1373,9 @@ bool RecordWorkerAbOn() {
 
 bool Deko3DDepthCompressionOn() { return REXCVAR_GET(banjo_deko3d_depth_compression); }
 bool Deko3DZcullOn() { return REXCVAR_GET(banjo_deko3d_zcull); }
+bool Deko3DMsaaPositionsOn() { return REXCVAR_GET(banjo_deko3d_msaa_positions); }  // 2026-10-30, from sasrt-nx
+bool Deko3DA2cDitherOn() { return REXCVAR_GET(banjo_deko3d_a2c_dither); }
+bool Deko3DStripRestartOn() { return REXCVAR_GET(banjo_deko3d_strip_restart); }
 bool Deko3DGpuRegionOn() { return REXCVAR_GET(banjo_deko3d_gpu_region); }
 bool Deko3DBarrierMergeOn() { return REXCVAR_GET(banjo_deko3d_barrier_merge); }
 bool Deko3DBarrierLeanOn() { return REXCVAR_GET(banjo_deko3d_barrier_lean); }
@@ -2059,6 +2085,7 @@ void LatchTuning() {
   g_latched.output_trim = ::renut::gpu::UsesVulkanBindings() && EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_output_trim));
   g_latched.depth_words_view = EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_depth_words_view));
   g_latched.tess_spec = REXCVAR_GET(banjo_deko3d_tess_spec);
+  g_latched.fetch_spec = REXCVAR_GET(banjo_gpu_fetch_spec);
   g_latched.alpha_spec = REXCVAR_GET(banjo_deko3d_alpha_spec);
   g_latched.draw_resolves = REXCVAR_GET(banjo_deko3d_draw_resolves);
   g_latched.resolve_skip = REXCVAR_GET(banjo_renut_resolve_skip);

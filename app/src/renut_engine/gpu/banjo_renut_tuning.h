@@ -46,6 +46,7 @@ struct Latched {
   bool output_trim = false;
   bool depth_words_view = false;
   bool tess_spec = false;
+  bool fetch_spec = false;  // banjo_gpu_fetch_spec (2026-10-31)
   bool alpha_spec = false;
   bool draw_resolves = false;
   bool resolve_skip = false;
@@ -232,6 +233,10 @@ void CountDepthFloatSampled();
 // banjo_deko3d_depth_compression / banjo_deko3d_zcull (2026-10-18): read before the deko3d device is made.
 bool Deko3DDepthCompressionOn();
 bool Deko3DZcullOn();
+// 2026-10-30, from sasrt-nx: banjo_deko3d_msaa_positions, _a2c_dither, _strip_restart (plume Deko3DOptions).
+bool Deko3DMsaaPositionsOn();
+bool Deko3DA2cDitherOn();
+bool Deko3DStripRestartOn();
 bool Deko3DGpuRegionOn();  // banjo-nx (2026-10-28, h10): banjo_deko3d_gpu_region
 // banjo_deko3d_barrier_merge / _lean (2026-10-19, GPU): fewer pipeline drains and texture cache invalidations.
 bool Deko3DBarrierMergeOn();
@@ -244,6 +249,8 @@ bool Deko3DAsyncVariantsOn();  // banjo_deko3d_async_variants (2026-10-21)
 [[gnu::always_inline]] inline bool AlphaSpecOn() { return Latch().alpha_spec; }
 // banjo_deko3d_tess_spec / banjo_deko3d_vs_outputs (2026-10-18): constants 904 and 905 of the deko3d shaders.
 [[gnu::always_inline]] inline bool TessSpecOn() { return Latch().tess_spec; }
+// banjo_gpu_fetch_spec (2026-10-31): tessellated draws' fetch types (constants 920-923) and patch kind (904).
+[[gnu::always_inline]] inline bool FetchSpecOn() { return Latch().fetch_spec; }
 bool Deko3DVsOutputsOn();
 // banjo_deko3d_uam_prmt (2026-10-18): uam's PRMT pass, and the DKSH cache file that goes with it.
 bool Deko3DUamPrmtOn();

@@ -128,6 +128,7 @@ namespace plume {
         viewportCount = scissorCount = 0;
         indexAddress = 0;
         boundIndexFormat = DkIdxFormat_Uint16;
+        boundRestart = 1;  // sasrt-nx (2026-10-30)
         boundTexCount[0] = boundTexCount[1] = boundTexCount[2] = 0;
         texPipeline = nullptr;  // banjo-nx (2026-10-27)
         texLinesWritten = ~0u;
@@ -174,7 +175,9 @@ namespace plume {
         st.windowDraws.store(st.windowDraws.load(std::memory_order_relaxed) + statWindowDraws, std::memory_order_relaxed);
         st.textureRuns.store(st.textureRuns.load(std::memory_order_relaxed) + statTexRuns, std::memory_order_relaxed);
         st.textureSkips.store(st.textureSkips.load(std::memory_order_relaxed) + statTexSkips, std::memory_order_relaxed);
+        st.stripRestartDraws.store(st.stripRestartDraws.load(std::memory_order_relaxed) + statStripRestarts, std::memory_order_relaxed);
         statDraws = statWindowDraws = 0;
+        statStripRestarts = 0;
         statTexRuns = statTexSkips = 0;
     }
 
@@ -492,7 +495,18 @@ namespace plume {
         if (graphicsPipeline->boundTextures)
             bindTextures();
         flushBarriers();
-        dkCmdBufDrawIndexed(cmd, graphicsPipeline->primitive, indexCount, instanceCount, startIndex, baseVertex, startInstance);
+        // sasrt-nx (2026-10-30, Deko3DOptions::stripRestart): a strip cut at the all-ones index, as on Vulkan.
+        const DkPrimitive prim = graphicsPipeline->primitive;
+        uint32_t restart = 0;
+        if ((prim == DkPrimitive_TriangleStrip || prim == DkPrimitive_LineStrip) && Deko3DGetOptions().stripRestart) {
+            restart = boundIndexFormat == DkIdxFormat_Uint32 ? 0xFFFFFFFFu : boundIndexFormat == DkIdxFormat_Uint8 ? 0xFFu : 0xFFFFu;
+            ++statStripRestarts;
+        }
+        if (restart != boundRestart) {
+            dkCmdBufSetPrimitiveRestart(cmd, restart != 0, restart);
+            boundRestart = restart;
+        }
+        dkCmdBufDrawIndexed(cmd, prim, indexCount, instanceCount, startIndex, baseVertex, startInstance);
         ++statDraws;
     }
 
@@ -1107,9 +1121,14 @@ namespace plume {
         // banjo-nx (2026-10-18): deko3d drops the Zcull data only when another depth target is bound; a copy into the
         // bound one (the copy engine does not update Zcull) leaves it describing the old depth, which would cull draws
         // the new depth passes.
-        if (Deko3DGetOptions().zcull && (dst->desc.flags & RenderTextureFlag::DEPTH_TARGET))
+        // sasrt-nx (2026-10-30): the braces. Without them only flushBarriers() was conditional and the Zcull
+        // invalidate was recorded after every copy and upload, into any texture, with Zcull on or off. With the queue's
+        // Zcull off (banjo_deko3d_zcull = false) sasrt-nx's console stopped during the boot twice (its newlogs6), most
+        // likely this: a Zcull invalidate on a queue without a Zcull context.
+        if (Deko3DGetOptions().zcull && (dst->desc.flags & RenderTextureFlag::DEPTH_TARGET)) {
             flushBarriers();
             dkCmdBufBarrier(cmd, DkBarrier_None, DkInvalidateFlags_Zcull);
+        }
     }
 
     void Deko3DCommandList::copyBuffer(const RenderBuffer *dst, const RenderBuffer *src) {
@@ -1214,6 +1233,19 @@ namespace plume {
             cl->ssboBoundStages[slot] = 0;
             cl->graphicsBuffersDirty = true;
         }
+        return true;
+    }
+
+    bool Deko3DBindFragmentTextures(RenderCommandList *commandList, uint32_t first, const uint32_t *slots, uint32_t count) {
+        Deko3DCommandList *cl = static_cast<Deko3DCommandList *>(commandList);
+        if (!cl || !cl->cmd || !slots || count == 0 || count > 8 || first + count > 32)
+            return false;
+        DkResHandle handles[8];
+        for (uint32_t k = 0; k < count; k++)
+            handles[k] = dkMakeTextureHandle(slots[k] & 0xFFFFFu, 0);
+        dkCmdBufBindTextures(cl->cmd, DkStage_Fragment, first, handles, count);
+        cl->boundTexCount[2] = 0;  // the next bindTextures binds the whole stage again
+        cl->texPipeline = nullptr;  // and does not skip its run
         return true;
     }
 

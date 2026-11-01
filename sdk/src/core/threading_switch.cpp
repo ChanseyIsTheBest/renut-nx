@@ -610,6 +610,30 @@ void RexSwitchSampleCoreIdle(void) {
   s.at.store(now, std::memory_order_release);
 }
 
+// renut-nx (2026-11-01, the public build): whether 'program' is the id Sphaira's "Install Forwarder" gives a forwarder
+// of this NRO (sphaira source/owo.cpp, forwarder_path_hash and the tid functions): the first 8 bytes of the SHA-256 of
+// the NRO path written twice (the forwarder's arguments default to the path) as 05xxxxxxxxxxx000, or, in its native-game
+// mode, 01xxxxxxxxxxx000 with bit 12 clear; the path with "sdmc:" and without (its older installs). Checked against the
+// user's forwarder: "sdmc:/switch/banjo-nx/banjo-nx.nro" gives 05D6EA1333487000. A retail game's id (title takeover)
+// never matches, so its NPDM is never replaced.
+extern "C" int __system_argc;      // libnx: the NRO's path in argv[0] (as filesystem_posix.cpp)
+extern "C" char** __system_argv;
+static bool SphairaForwarderOfThisNro(u64 program) {
+  if (__system_argc <= 0 || !__system_argv || !__system_argv[0] || !__system_argv[0][0]) return false;
+  const std::string path = __system_argv[0];
+  const std::string rooted = path.rfind("sdmc:", 0) == 0 ? path.substr(5) : path;
+  for (const std::string& p : {std::string("sdmc:") + rooted, rooted}) {
+    const std::string hashed = p + p;
+    u64 digest[4] = {};
+    sha256CalculateHash(digest, hashed.data(), hashed.size());
+    const u64 h = digest[0];
+    if (program == (0x0500000000000000ull | (h & 0x00FFFFFFFFFFF000ull)) ||
+        program == (0x0100000000000000ull | (h & 0x00FFFFFFFFFFE000ull)))
+      return true;
+  }
+  return false;
+}
+
 int RexSwitchEnsureForwarderNpdm(void) {
   const std::string want_text = REXCVAR_GET(banjo_forwarder_program_id);
   if (want_text.empty()) {
@@ -618,7 +642,10 @@ int RexSwitchEnsureForwarderNpdm(void) {
   }
   const u64 want = std::strtoull(want_text.c_str(), nullptr, 16);
   u64 program = 0;
-  if (R_FAILED(svcGetInfo(&program, InfoType_ProgramId, CUR_PROCESS_HANDLE, 0)) || want == 0 || program != want) {
+  // renut-nx (2026-11-01, the public build): also a forwarder Sphaira made for this NRO (SphairaForwarderOfThisNro):
+  // its id depends on the NRO's path, so a player's is not the user's.
+  if (R_FAILED(svcGetInfo(&program, InfoType_ProgramId, CUR_PROCESS_HANDLE, 0)) || want == 0 ||
+      (program != want && !SphairaForwarderOfThisNro(program))) {
     char text[160];
     std::snprintf(text, sizeof(text), "not written: running as %016llX, not the forwarder %016llX",
                   (unsigned long long)program, (unsigned long long)want);

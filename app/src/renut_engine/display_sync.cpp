@@ -2,6 +2,7 @@
 // futari_vblank_phase_auto (the user's own port, docs/futari-notes.md "Input lag"), for a game paced by the frame
 // limiter rather than by its vertical blank, whose frames take more than one refresh from release to image.
 #include "renut_engine/display_sync.h"
+#include "banjo_switch_default.h"  // banjo-nx (2026-11-01): the shipped Switch defaults
 
 #include <algorithm>
 #include <atomic>
@@ -24,7 +25,7 @@
 #include <switch.h>  // viGetDisplayVsyncEvent
 #endif
 
-REXCVAR_DEFINE_BOOL(banjo_display_sync, false, "Banjo/Enhancements",
+REXCVAR_DEFINE_BOOL(banjo_display_sync, BANJO_SWITCH_DEFAULT(true, false), "Banjo/Enhancements",
                     "OFF by default (2026-10-19): in Ryujinx every run with the thread active stalled or hung (runs 65, "
                     "67, 68), the runs without it did not; to be tried on the console with configs/"
                     "banjo_display_sync_on.toml. Latency batch 3 (2026-10-19, the Switch): a thread follows the display's refresh (its vsync "

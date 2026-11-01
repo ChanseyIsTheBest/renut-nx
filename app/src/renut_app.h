@@ -181,6 +181,8 @@ public:
         // banjo-nx (2026-10-29): DLC packages in the "dlc" folder next to banjo-nx installed before the game starts
         // (reNut upstream's installer, renut_engine/dlc_install.cpp).
         renut::dlc::InstallPackages(runtime());
+        // banjo-nx (2026-10-30): 1.0.0's font and dialogue boxes, when asked for (renut_engine/title_update.h).
+        banjo::title_update::ApplyStyleOptions();
         // One log line with every enhancement and whether it is active (src/cpu/banjo_enhancements.h).
         banjo::LogEnhancements();
         // PC: function-level CPU profile (banjo_pc_profile_s = N seconds per report; 0 = off; from futari-nx).

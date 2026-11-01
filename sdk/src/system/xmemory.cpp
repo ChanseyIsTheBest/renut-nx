@@ -1030,6 +1030,33 @@ bool Memory::HasAnyFunctionTable() const {
   return !function_tables_.empty();
 }
 
+uint32_t Memory::FunctionTableBaseIn(uint32_t address, uint32_t size) const {
+  std::lock_guard lock(function_tables_mutex_);
+  uint32_t lowest = 0;
+  for (const auto& entry : function_tables_) {
+    if (entry.table_base >= address && uint64_t(entry.table_base) < uint64_t(address) + size &&
+        (!lowest || entry.table_base < lowest)) {
+      lowest = entry.table_base;
+    }
+  }
+  return lowest;
+}
+
+PPCFunc* Memory::TableFunction(uint32_t guest_address) const {
+  uint32_t table_address = 0;
+  {
+    std::lock_guard lock(function_tables_mutex_);
+    for (const auto& entry : function_tables_) {
+      uint32_t range_end = entry.code_base + entry.code_size + entry.thunk_reserve;
+      if (guest_address >= entry.code_base && guest_address < range_end) {
+        table_address = entry.table_base + uint32_t((uint64_t(guest_address) - entry.code_base) * 2);
+        break;
+      }
+    }
+  }
+  return table_address ? *TranslateVirtual<PPCFunc**>(table_address) : nullptr;
+}
+
 rex::memory::PageAccess ToPageAccess(uint32_t protect) {
   bool is_writable =
       (protect & memory::kMemoryProtectWrite) || (protect & memory::kMemoryProtectWriteCombine);

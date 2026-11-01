@@ -1,6 +1,7 @@
 // banjo-nx profiler core. See profiler.h.
 
 #include "profiler/profiler.h"
+#include "banjo_switch_default.h"  // banjo-nx (2026-11-01): the shipped Switch defaults
 
 #include <rex/cvar.h>
 #include <rex/platform.h>
@@ -20,7 +21,7 @@
 REXCVAR_DEFINE_BOOL(banjo_show_profiler, false, "Nuts&Bolts/Profiler",
     "Show the CPU/GPU profiler window (Unleashed's F1 profiler; F5 toggles it on PC).");
 // banjo-nx (2026-10-21, the user's request: off in every config): reNut's FPS counter in the top-left corner (F1 on PC).
-REXCVAR_DEFINE_BOOL(banjo_show_fps, true, "Nuts&Bolts/Profiler",
+REXCVAR_DEFINE_BOOL(banjo_show_fps, BANJO_SWITCH_DEFAULT(false, true), "Nuts&Bolts/Profiler",
     "Show reNut's FPS counter (frames per second, CPU and GPU ms) in the top-left corner (F1 toggles it on PC). Read "
     "at start.");
 REXCVAR_DEFINE_BOOL(banjo_cpu_profiler, false, "Nuts&Bolts/Profiler",
@@ -32,7 +33,8 @@ REXCVAR_DEFINE_INT32(banjo_slow_frame_profile_ms, 0, "Nuts&Bolts/Profiler",
     "their own (0 = off).")
     .range(0, 1000)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(banjo_stall_watch_seconds, 1, "Nuts&Bolts/Profiler",
+// banjo-nx (2026-11-01, the public build): off on the Switch (its dumps are not crash logs).
+REXCVAR_DEFINE_INT32(banjo_stall_watch_seconds, BANJO_SWITCH_DEFAULT(0, 1), "Nuts&Bolts/Profiler",
     "[Switch] Stall watchdog: after this many seconds without a game frame, write what every thread is doing to "
     "logs/rex/banjo_profiler.log, and count frames over 100 ms (0 = off).")
     .range(0, 60)
