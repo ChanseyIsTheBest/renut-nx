@@ -1703,3 +1703,8 @@ code memory, which could fail on such pages.
   constants in another order of passes); 28,570 variants from the user's pipeline list (68,590 pipelines; 97 of the 100
   run-time compiles in the console logs among them, the other 3 added) compiled with 0 failures, and the 21,076 that the
   user's deko3d_shaders.bin also has byte for byte the console's.
+
+## 42. renut-nx 1.0.1 (2026-11-02)
+
+The `language` key, by default the Switch's system language: docs/title-update-3.md, "The language key". The renderer and
+the shaders did not change: the 1.0.0 shader packages stay valid, and the installer's reference hashes are the same.

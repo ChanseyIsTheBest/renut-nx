@@ -601,7 +601,7 @@ if(REXGLUE_PLATFORM_SWITCH)
     rexglue_switch_add_nro(renut
         NAME "Banjo-Kazooie Nuts and Bolts"  # no "&": cmd.exe would split the post-build command
         AUTHOR "ChanseyIsTheBest"  # 2026-11-01, the public build (the user's choice)
-        VERSION "1.0.0"
+        VERSION "1.0.1"
         ${RENUT_ICON_ARG})
 endif()
 

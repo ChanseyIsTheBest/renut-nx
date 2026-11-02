@@ -204,6 +204,54 @@ Tools:
 - Scratchpad `sbp_text.py` renders a line of text from an .sbp file.
 - Scratchpad `xdec/xdec.exe` is reNut's `mods/xcompress.cpp` built for the host; it decompresses a bundle.
 
+## The language key (renut-nx 1.0.1, 2026-11-02, the user's request)
+
+`language` in renut.toml (`title_update.cpp`, `ApplyLanguage`, from `RenutApp::OnPostSetup`). The default `"system"` is
+the Switch's system language (`setGetSystemLanguage`); or one of the names below. English elsewhere (the PC build), for a
+name that is not one of these, and when the game folder has no `loctext/<name>`.
+
+The game chooses its language once at the start (`sub_8223ADB4` calls `sub_82363288`) from what a console's settings say,
+so the key sets those settings (`user_language`, `user_country`) and the game does the rest itself: the text folder
+`loctext\<name>\` (0x82D99F68: the name, +128 the folder, +256 the game's number) and the font files (`sub_822F4EE8`).
+
+| Name | Game's number | XConfig language | XConfig country |
+|---|---|---|---|
+| english (en-US) | 0 | 1 | 103 United States (the default) |
+| englishuk (en-GB, not listed in the toml) | | 1 | 35 Great Britain |
+| french | 2 | 4 | 103 |
+| german | 3 | 3 | 103 |
+| spanish | 4 | 5 | 103 |
+| italian | 6 | 6 | 103 |
+| korean | 8 | 7 | 103 |
+| tradchinese | 9 | 8 | 103 |
+| simpchinese | 10 | 10 | 103 |
+| japanese | 11 | 2 | 103 |
+| polish | 15 | 11 | 103 |
+| russian | 18 | 12 | 103 |
+| swedish | 12 | 1 | 90 Sweden |
+| norwegian | 13 | 1 | 75 Norway |
+| dutch | 14 | 1 | 74 Netherlands |
+| czech | 16 | 1 | 23 Czech Republic |
+
+- Five countries decide the language whatever the console's language is (XGetLocale's locales 9 and 29 Czech and Slovak
+  Republics, 16 Hungary, 23 Netherlands, 25 Norway, 32 Sweden): that is why those languages are a country.
+- The game's table also has `portuguese` (7) and `hungarian` (17), but the disc has no text for them: not offered, and a
+  Portuguese system language gets English. The update's `db_index.txt` has no `loctext_common` bundle for polish, czech
+  or simpchinese.
+- Switch system language codes: ja, en-US, en-GB, fr, fr-CA, de, it, es, es-419, zh-CN, zh-Hans, zh-TW, zh-Hant, ko, nl,
+  ru (and pl, in case a firmware has it); pt and pt-BR, and anything else, are English.
+- A `renut.toml` from before 1.0.1 gets the key at the first start (`AddLanguageKeyToToml`), with its comment, in front
+  of the first `[section]`: a key after the input tables would belong to them. A key the file has, or has commented out,
+  is left alone.
+- `banjo_text_style_log_s` also logs the language the game chose. (Its thread used `std::thread::detach()`, which throws
+  on the Switch: a crash at start with that diagnostic on, fixed.)
+
+Tests in Ryujinx (NRO 6cf2a6d6b3ae, PGO + LTO; the user stopped the rest and released): the key added to an old toml with
+and without the input tables; `system` on en-US (english, number 0) and on French (french, 2); `czech` (16, no update
+bundle, no new errors, correct accents). Title screen and main menu right in French and Czech; the ESRB line only in
+English. **Not checked:** the other languages one by one, the CJK fonts, in-game dialogue in any new language, en-GB,
+the Portuguese fallback and an invalid name.
+
 ## Not carried over yet
 
 - The reNut Settings pause tab (`cvar_menu.cpp`): the update inlined the section title setter (base `sub_825A7CF0`)

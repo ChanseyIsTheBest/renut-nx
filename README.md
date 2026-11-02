@@ -1,6 +1,6 @@
 # renut-nx
 
-**Banjo-Kazooie: Nuts & Bolts on the Nintendo Switch** (homebrew), version 1.0.0, by ChanseyIsTheBest. Formerly
+**Banjo-Kazooie: Nuts & Bolts on the Nintendo Switch** (homebrew), version 1.0.1, by ChanseyIsTheBest. Formerly
 banjo-nx.
 
 renut-nx is a Switch port of [reNut](https://github.com/masterspike52/reNut), masterspike52's static recompilation of
@@ -28,8 +28,9 @@ moves audio and the shader compiler to the fourth core (docs/four-core-mode.md).
 
 ## Settings
 
-`switch/renut-nx/renut.toml` lists the settings meant to be changed, by category: MSAA and SMAA, the dynamic
-resolution (handheld 540p-720p, docked 540p-1080p), fur detail, 1.0.0's font and dialogue boxes, the frame cap,
+`switch/renut-nx/renut.toml` lists the settings meant to be changed, by category: the language (`language`:
+`"system"`, the default, follows the Switch's system language; or one of the game's 15 by name), MSAA and SMAA, the
+dynamic resolution (handheld 540p-720p, docked 540p-1080p), fur detail, 1.0.0's font and dialogue boxes, the frame cap,
 four-core mode and the controls. Everything else is built in.
 
 ## Logs

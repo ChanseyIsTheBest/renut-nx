@@ -5,6 +5,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -13,8 +15,14 @@
 #include <rex/filesystem.h>
 #include <rex/logging.h>
 #include <rex/system.h>
+#include <rex/system/flags.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
+#include <rex/platform.h>
+
+#if REX_PLATFORM_SWITCH
+#include <switch.h>  // setGetSystemLanguage
+#endif
 
 REXCVAR_DEFINE_BOOL(banjo_font_andy_bold, BANJO_SWITCH_DEFAULT(true, false), "Banjo/Title update",
                     "1.0.0's text font: Latin and Cyrillic text in Andy Bold (euro.sbp), which the update replaced with "
@@ -23,6 +31,11 @@ REXCVAR_DEFINE_BOOL(banjo_font_andy_bold, BANJO_SWITCH_DEFAULT(true, false), "Ba
 REXCVAR_DEFINE_BOOL(banjo_dialogue_boxes_original, BANJO_SWITCH_DEFAULT(true, false), "Banjo/Title update",
                     "1.0.0's dialogue boxes: the in-game and menu dialogue scenes from 1.0.0's packages (the old box "
                     "with its cogs) instead of the update's")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(language, "system", "Banjo/Language",
+                      "The game's language: system (the Switch's system language; English elsewhere, and when the game "
+                      "has no text for it), english, french, german, spanish, italian, japanese, korean, tradchinese, "
+                      "simpchinese, russian, polish, czech, dutch, norwegian or swedish")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(banjo_text_style_log_s, 0, "Banjo/Title update",
                      "Diagnostics: every N seconds, log the text size inputs (the profile's choice, the default word) "
@@ -35,6 +48,9 @@ namespace banjo::title_update {
 namespace fs = std::filesystem;
 
 namespace {
+
+// OnConfigurePaths's folders, for ApplyLanguage.
+fs::path g_config_path, g_game_root;
 
 // Writes bytes of the game's image. Its code and read-only data are read-only on the host as well
 // (XexModule::LoadContinue's page descriptors), so the pages are made writable for the write.
@@ -120,12 +136,147 @@ void LogTextStyle(rex::memory::Memory *memory) {
   REXLOG_INFO("[title update] text style: game +182 {}, player 0x{:08X}, profile byte {} (0x2 set, 0x4 big), default "
               "word {}; prefixes speechbig/speech/infobig/infosmall:{}",
               g[182], player, profile_byte, ReadBe32(memory, kBigTextDefault), prefixes);
+  // What sub_82363288 chose (0x82D99F68: the name, +128 the text folder, +256 the game's language number).
+  REXLOG_INFO("[title update] the game's language: {} ({}), text folder {}",
+              memory->TranslateVirtual<const char *>(0x82D99F68), ReadBe32(memory, 0x82D99F68 + 256),
+              memory->TranslateVirtual<const char *>(0x82D99F68 + 128));
+}
+
+// renut-nx 1.0.1 (2026-11-02, the user's request): the language key. The game chooses its language once at the start
+// (sub_8223ADB4's call of sub_82363288) from what a console's settings say: the XConfig language (XTLGetLanguage) gives
+// the language, except that the XConfig country decides for five countries whatever the language is (XGetLocale's
+// locales 9 and 29 Czech and Slovak Republics, 16 Hungary, 23 Netherlands, 25 Norway, 32 Sweden). So a language is the
+// pair a console would have, and the game then does what it does on that console: loctext\<name>\ for the text, its
+// font files (sub_822F4EE8). Hungarian and Portuguese are in the game's table, but the disc has no text for them.
+struct Language {
+  const char *name;
+  uint32_t xlanguage;  // XConfig's language: 1 English, 2 Japanese, 3 German, 4 French, 5 Spanish, 6 Italian, 7 Korean,
+                       // 8 traditional Chinese, 10 simplified Chinese, 11 Polish, 12 Russian
+  uint32_t country;    // XConfig's country: 103 the United States (the default; the game looks at it for no language
+                       // but these), 35 Great Britain, 23 Czech Republic, 74 Netherlands, 75 Norway, 90 Sweden
+};
+constexpr uint32_t kCountryDefault = 103;
+constexpr Language kLanguages[] = {
+    {"english", 1, kCountryDefault}, {"englishuk", 1, 35},                // the game's "english" and "englishus"
+    {"french", 4, kCountryDefault},      {"german", 3, kCountryDefault},
+    {"spanish", 5, kCountryDefault}, {"italian", 6, kCountryDefault},     {"japanese", 2, kCountryDefault},
+    {"korean", 7, kCountryDefault},  {"tradchinese", 8, kCountryDefault}, {"simpchinese", 10, kCountryDefault},
+    {"russian", 12, kCountryDefault}, {"polish", 11, kCountryDefault},    {"czech", 1, 23},
+    {"dutch", 1, 74},                {"norwegian", 1, 75},                {"swedish", 1, 90},
+};
+
+// language = "system": the Switch's system language as the name of one of the game's. The language codes are the
+// system's (setGetSystemLanguage: "en-US", "fr-CA", ...), so a language a newer firmware adds is just not found. The
+// game has no text for Portuguese: English. Elsewhere (the PC build): English.
+const char *SystemLanguage() {
+#if REX_PLATFORM_SWITCH
+  struct Code {
+    const char *code, *name;
+  };
+  static constexpr Code kCodes[] = {
+      {"ja", "japanese"},       {"en-US", "english"},     {"en-GB", "englishuk"},  {"fr", "french"},
+      {"fr-CA", "french"},      {"de", "german"},         {"it", "italian"},       {"es", "spanish"},
+      {"es-419", "spanish"},    {"zh-CN", "simpchinese"}, {"zh-Hans", "simpchinese"}, {"zh-TW", "tradchinese"},
+      {"zh-Hant", "tradchinese"}, {"ko", "korean"},       {"nl", "dutch"},         {"ru", "russian"},
+      {"pl", "polish"},
+  };
+  u64 value = 0;
+  const Result init = setInitialize();
+  if (R_FAILED(init)) {
+    REXLOG_WARN("[language] the system language could not be read (0x{:X}): English", init);
+    return "english";
+  }
+  const Result got = setGetSystemLanguage(&value);
+  setExit();
+  if (R_FAILED(got)) {
+    REXLOG_WARN("[language] the system language could not be read (0x{:X}): English", got);
+    return "english";
+  }
+  char code[9] = {};
+  std::memcpy(code, &value, 8);
+  for (const Code &c : kCodes)
+    if (std::strcmp(code, c.code) == 0) {
+      REXLOG_INFO("[language] the Switch's system language is {}", code);
+      return c.name;
+    }
+  REXLOG_INFO("[language] the game has no text for the Switch's system language {}: English", code);
+#endif
+  return "english";
+}
+
+// A renut.toml from before 1.0.1 gets the key, with its explanation, so that a player who only replaces the NRO can find
+// it: in front of the first [section] (renut.toml's input tables: a key after them would belong to them). A key the file
+// already has, or has commented out, is left alone.
+void AddLanguageKeyToToml(const fs::path &path) {
+  std::string text;
+  {
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+      return;
+    text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  }
+  size_t section = std::string::npos;
+  for (size_t at = 0; at < text.size();) {
+    size_t end = text.find('\n', at);
+    if (end == std::string::npos)
+      end = text.size();
+    size_t k = at;
+    while (k < end && (text[k] == ' ' || text[k] == '\t' || text[k] == '#'))
+      ++k;
+    if (text.compare(k, 8, "language") == 0) {
+      k += 8;
+      while (k < end && (text[k] == ' ' || text[k] == '\t'))
+        ++k;
+      if (k < end && text[k] == '=')
+        return;
+    }
+    if (section == std::string::npos && at < end && text[at] == '[')
+      section = at;
+    at = end + 1;
+  }
+  const char *nl = text.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+  std::string block;
+  for (const char *line :
+       {"# ---- Language ----",
+        "# The game's language. \"system\" follows the Switch's system language (English if the game has no text for it).",
+        "# Or one of: \"english\", \"french\", \"german\", \"spanish\", \"italian\", \"japanese\", \"korean\", \"tradchinese\",",
+        "# \"simpchinese\", \"russian\", \"polish\", \"czech\", \"dutch\", \"norwegian\", \"swedish\".",
+        "language = \"system\""}) {
+    block += line;
+    block += nl;
+  }
+  if (section != std::string::npos) {
+    text.insert(section, block + nl);
+  } else {
+    if (!text.empty() && text.back() != '\n')
+      text += nl;
+    text += nl + block;
+  }
+  fs::path tmp = path;
+  tmp += ".tmp";
+  std::error_code ec;
+  {
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+    out.write(text.data(), std::streamsize(text.size()));
+    out.flush();
+    if (!out) {
+      out.close();
+      fs::remove(tmp, ec);
+      REXLOG_WARN("[language] could not add the language key to {}", rex::path_to_utf8(path));
+      return;
+    }
+  }
+  fs::remove(path, ec);
+  fs::rename(tmp, path, ec);
+  REXLOG_INFO("[language] language key added to {}", rex::path_to_utf8(path));
 }
 
 }  // namespace
 
 void ConfigurePaths(rex::PathConfig &paths) {
   std::error_code ec;
+  g_config_path = paths.config_path;
+  g_game_root = paths.game_data_root;
   if (paths.update_data_root.empty()) {
     const fs::path candidates[] = {
         rex::filesystem::GetExecutableFolder() / "update",
@@ -156,18 +307,50 @@ void ConfigurePaths(rex::PathConfig &paths) {
   }
 }
 
+void ApplyLanguage() {
+  if (!g_config_path.empty())
+    AddLanguageKeyToToml(g_config_path);
+  std::string name = REXCVAR_GET(language);
+  for (char &c : name)
+    c = (c >= 'A' && c <= 'Z') ? char(c - 'A' + 'a') : c;
+  if (name == "system")
+    name = SystemLanguage();
+  const Language *language = nullptr;
+  for (const Language &l : kLanguages)
+    if (name == l.name)
+      language = &l;
+  if (!language) {
+    REXLOG_WARN("[language] language = \"{}\" is not one of the game's: the game stays in English", name);
+    return;
+  }
+  if (language->xlanguage == 1 && language->country == kCountryDefault)
+    return;  // English: as the console defaults are
+  std::error_code ec;
+  // (English's text is not in loctext.)
+  if (language->country != 35 && !g_game_root.empty() &&
+      !fs::is_directory(g_game_root / "loctext" / language->name, ec)) {
+    REXLOG_WARN("[language] the game folder has no loctext/{}: the game stays in English", language->name);
+    return;
+  }
+  REXCVAR_SET(user_language, language->xlanguage);
+  REXCVAR_SET(user_country, language->country);
+  REXLOG_INFO("[language] {}: the console's language {}, country {}", language->name, language->xlanguage,
+              language->country);
+}
+
 void ApplyStyleOptions() {
   const bool andy_bold = REXCVAR_GET(banjo_font_andy_bold);
   const bool original_boxes = REXCVAR_GET(banjo_dialogue_boxes_original);
   rex::memory::Memory *memory = REX_KERNEL_MEMORY();
   // A diagnostic for PC tests: it follows game pointers from another thread, so not for console packages.
   if (const int every = REXCVAR_GET(banjo_text_style_log_s); every > 0) {
-    std::thread([memory, every]() {
+    // Never joined: detach() throws on the Switch.
+    new std::thread([memory, every]() {
       for (;;) {
         std::this_thread::sleep_for(std::chrono::seconds(every));
         LogTextStyle(memory);
       }
-    }).detach();
+    });
   }
   if (!andy_bold && !original_boxes)
     return;

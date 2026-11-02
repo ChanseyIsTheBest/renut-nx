@@ -65,6 +65,7 @@ halves or more. 15 s pairs mark items slower (or faster) by chance.
   (`kernel_critsec_pcr_owner`, `thread_signal_skip_idle`), whose code reads the key directly.
 - `log_file_writer` is read when logging starts, before the master switches: the off configs set it to `false`
   themselves.
+- 2026-11-02 (renut-nx 1.0.1): the 24th key, `language` (docs/title-update-3.md, "The language key").
 - 2026-11-01 (the user's lean `renut.toml`): the package's `renut.toml` lists only the 23 keys the user wants to
   change, by category: MSAA level and SMAA, resolution, fur detail, 1.0.0 look, frame cap, four-core mode, controls.
   Every other key's Switch default is the value the long file had (`BANJO_SWITCH_DEFAULT(on_switch, elsewhere)` in
