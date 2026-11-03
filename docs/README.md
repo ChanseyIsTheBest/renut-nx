@@ -22,7 +22,7 @@ disagree, trust the newer one.
 | Make a game function faster | [Beautiful Katamari's optimising functions guide](https://github.com/ChanseyIsTheBest/katamari-nx/blob/main/docs/optimising-functions.md) |
 | Build the release NRO | [pgo-lto.md](pgo-lto.md) |
 | Change the title update, DLC or language handling | [title-update-3.md](title-update-3.md) |
-| Port another Xbox 360 game from this one | [porting-start-here.md](porting-start-here.md) |
+| Port another Xbox 360 game from this one | [porting-start-here.md](porting-start-here.md), or start a session with [the porting prompt](porting-a-360-game-prompt.md) |
 | See which XDK a game was built with | [xdk-versions.md](xdk-versions.md) |
 
 ## The renderer
@@ -64,7 +64,7 @@ lists the method rules.
 | [porting-guide-renderer.md](porting-guide-renderer.md) | Moving a ReXGlue Switch port to this renderer: what each piece gains, the order of work, and (section 6b) what measured slower on the console |
 | [deko3d-native-renderer-kit.md](deko3d-native-renderer-kit.md) | The deko3d kit given to other ports: which parts to reuse, the route, and the traps. Older than the current renderer |
 | [deko3d-port-faq.md](deko3d-port-faq.md) | Answers to the questions other ports asked while following the kit. Older than the current renderer |
-| [porting-a-360-game-prompt.md](porting-a-360-game-prompt.md) | A fill-in prompt to paste into a new coding-agent session to start a port |
+| [porting-a-360-game-prompt.md](porting-a-360-game-prompt.md) | A generic fill-in prompt to paste into a new coding-agent session to start a port from katamari-nx |
 | [xdk-versions.md](xdk-versions.md) | The XDK build, title ID and kernel version of 19 of our Xbox 360 ports' games, and how they were read |
 
 ## Words used in these pages
