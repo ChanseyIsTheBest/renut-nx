@@ -1,8 +1,7 @@
 # Converting a ReXGlue Switch port to Banjo's renderer (2026-10-27)
 
 For the other ports (SA2, Sonic Transformed, Marathon-style titles, futari, bejeweled, Mass Effect, ...) that want
-what banjo-nx's renderer does today. It follows on from three earlier guides, which still hold for the first steps:
-`docs/rexglue-api-renderer-guide.md` (why an API-level renderer, Unleashed's and Marathon's model),
+what banjo-nx's renderer does today. It follows on from two earlier guides, which still hold for the first steps:
 `docs/renut-renderer-port.md` (bringing reNut's renderer into a port) and `docs/deko3d-native-renderer-kit.md`
 (the deko3d back end, shaders, the GPU). This one is about the render thread and the CPU around it: what Banjo built
 after those, in the order a port should take it, what each piece needs from your game, and how to check it.

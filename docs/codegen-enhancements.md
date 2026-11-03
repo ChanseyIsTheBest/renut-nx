@@ -137,7 +137,7 @@ Step notes:
 | `BANJO_HOT_LAZY_LOG10` | `ON` | step 25; OFF: `BANJO_LAZY_LOG10_ON=0`, the copy as before |
 | `BANJO_GEN_SWITCH_THREAD` | `ON` | step 26; OFF: `REX_SWITCH_THREAD_OFF`, one computed goto without the copies |
 | `BANJO_GEN_LR_WRITE_SAME` | `ON` | step 27; OFF: `REX_LR_WRITE_SAME_OFF`, every write-back made. The PC build checks each (`REX_LR_WRITE_SAME_CHECK`, the `[verify]` line) |
-| `BANJO_RENUT_RENDERER` | `ON` | (package 26) Renut's Direct3D-level renderer built into the same executable, chosen at run time with `banjo_renderer = "renut"` (`docs/renut-renderer-port.md`); not codegen, listed because it is a build option of `app/CMakeLists.txt` |
+| `BANJO_RENUT_RENDERER` | `ON` | (package 26) Renut's Direct3D-level renderer built into the executable (`docs/renut-renderer-port.md`); not codegen, listed because it is a build option of `app/CMakeLists.txt` |
 | `BANJO_SWITCH_OUTLINE_ATOMICS` | `OFF` | (package 27) OFF compiles the Switch build with `-mno-outline-atomics`, so no atomic read-modify-write becomes a call to a libgcc helper (`__aarch64_cas4_acq` and the like, which test for LSE). Measured: no effect, devkitA64's GCC does not outline them for this target; the 75 helper calls in the ELF are in the prebuilt NVK's Rust code, before and after |
 | `BANJO_GEN_VSEL_NEON` | `ON` | step 30; OFF: `REX_VSEL_OFF`, simde's expression |
 | `BANJO_GEN_HOT_LAYOUT` | `ON` | step 31; OFF: `REX_HOT_LAYOUT_OFF`, the declarations empty |
@@ -431,7 +431,7 @@ Also measured and not taken in this round: localized copies of the XAudio mixer,
 
 ## Package 34's codegen round (2026-10-19)
 
-From the CPU report (`docs/cpu-codegen-proposals-2026-10-19.md`, section 0):
+From the CPU report of 2026-10-19:
 
 - **Store cards** (`tools/store_cards.py`, the last post-codegen step; `BANJO_GEN_STORE_CARDS`, `REX_STORE_CARDS_OFF`):
   every guest store outside the stack also zeroes its 4 KB page's card (`REX_CARD(ea)` = `base[ea >> 12] = 0`, the

@@ -9,11 +9,11 @@ again (another update, another port of the family).
 
 | Where | What |
 | --- | --- |
-| game folder (`game_data_root`; on the Switch `sdmc:/switch/banjo-nx/game_root`) | the disc's files and `default.xex`, **plus the update's `default.xexp`** next to it |
+| game folder (`game_data_root`; on the Switch `sdmc:/switch/renut-nx/game_root`) | the disc's files and `default.xex`, **plus the update's `default.xexp`** next to it |
 | `update` folder (next to banjo-nx, or next to the game folder; `update_data_root` overrides) | the update's `db_index.txt` and its 12 bundle files |
 | `dlc` folder next to banjo-nx (`renut_dlc_folder`) | the DLC package file(s) as they come (LIVE / PIRS / CON), e.g. `E41F20AAF7094B9AFCA8CC90489D689D72A5062B4D` |
 
-On the Switch: `sdmc:/switch/banjo-nx/update/` and `sdmc:/switch/banjo-nx/dlc/`.
+On the Switch: `sdmc:/switch/renut-nx/update/` and `sdmc:/switch/renut-nx/dlc/`.
 
 - The runtime applies `default.xexp` itself (`sdk/src/system/user_module.cpp`: a sibling `<xex>p`), and mounts the
   update folder as `update:` (`sdk/src/system/runtime.cpp`). `app/src/renut_engine/title_update.cpp` finds the update
@@ -268,8 +268,6 @@ the Portuguese fallback and an invalid name.
   the main menu's Display Settings scene, Game Information's list as the options page); taking it is the simpler way
   back to an in-game settings menu, with banjo-nx's own option list (its options are the `renut_*` keys of its Vulkan
   renderer) and a check through the main menu's Display Settings.
-- The native renderer (`app/src/me`, `app/src/native`) reads the base's CDevice layout: Renut's renderer runs whatever
-  `banjo_renderer` says.
 - PGO: the profile's generated-code functions have new names; the renderer and SDK parts still match. (Done
   2026-10-29: see "PGO with a level" below.)
 

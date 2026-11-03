@@ -169,8 +169,7 @@ Answers to the questions Futari, SA2, Peggle 2 and SASRT asked while starting th
   and SA2): peggle2-nx/out/renut_port/device_offsets.md.
 - **The game's gamma ramp (Peggle 2; Banjo too):** Renut's present never applies the ramp the game loads
   (present_ps.hlsl `pow(c, param0)` with param0 = 1). Peggle's ramp is about x^1.17; N&B's is about the same (10-bit
-  entries [64] = 192, [128] = 459, [255] = 1019 where the identity is 257 / 514 / 1023; banjo-nx's native renderer
-  applies it, me_native_system.cpp NoteGammaRampWrite). Without it the image is brighter in the midtones than the
+  entries [64] = 192, [128] = 459, [255] = 1019 where the identity is 257 / 514 / 1023). Without it the image is brighter in the midtones than the
   console's. Banjo's Renut builds do not apply it yet (the user's call: it changes the look).
 - **Vertex colours R/B swapped in Ryujinx only (Peggle 2; Banjo too):** Ryujinx ignored VERTEX_ATTRIB_FORMAT bit 31
   (deko3d's `DkVtxAttribState.isBgra`, which plume sets for B8G8R8A8 attributes: every D3DCOLOR vertex colour). The

@@ -3,9 +3,10 @@
 banjo-nx, 2026-10-18, package 33. The game shaders on the deko3d back end are Renut's XenosRecomp SPIR-V, turned into
 GLSL by SPIRV-Cross and `tools/deko3d_glsl.py`, and compiled by **uam** (devkitPro's deko3d compiler: Mesa's GLSL front
 end, GLSL IR -> TGSI -> nouveau's nv50 IR codegen for Maxwell, SwitchWakerHD's patches) on the PC for the DKSH cache and
-on the console for the variants it meets first. uam is not NIR/NAK: much of what NAK folds by itself it leaves in.
+on the console for the variants it meets first. uam is an older compiler: it leaves in much of what a newer one folds by
+itself.
 This document is the shader half of the GPU work (the copies, depth compression and Zcull are in
-docs/deko3d-renderer.md section 13). docs/shader.md covers the NVK/NAK translator work of earlier packages.
+docs/deko3d-renderer.md section 13). docs/shader.md covers the chain and the translator.
 
 ## 1. Method
 

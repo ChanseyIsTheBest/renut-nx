@@ -1,38 +1,28 @@
-# deko3d renderer (from 2026-10-17)
+# deko3d renderer
 
-The user's order (2026-10-17): a separate deko3d renderer, made by converting **Renut's renderer** (the one `renut.toml`
-boots: Direct3D level, no ring, no PM4) to deko3d, with its Vulkan source kept as it is. The aim is lower CPU and GPU
-use on the console. Work continues without stopping between steps.
+The renderer the Switch build runs: **reNut's renderer** (Direct3D level, no command ring, no PM4) on deko3d, the Switch's
+native GPU API. This page is its record, feature by feature, in the order the work was done, so a later section can
+replace a detail in an earlier one. Numbers in the section titles have gaps where old material was removed; references from
+other pages still hold.
 
 ## 1. What it is
 
-Renut's renderer talks to the GPU through plume (`plume::RenderInterface`, Vulkan on the Switch through NVK). The deko3d
-renderer is **a plume back end on deko3d** (`thirdparty/plume/plume_deko3d.{h,cpp}`), chosen at boot with
-`renut_gpu_backend = "deko3d"`. Everything above plume stays Renut's renderer: the Direct3D hooks, the draw state, the
-texture and surface caches, the record worker, the GPU profile. The Vulkan back end, NVK and the SDK's renderer are
-untouched and still selectable. The deko3d paths added to the renderer itself are behind `IsDeko3D()`.
+Renut's renderer talks to the GPU through plume (`plume::RenderInterface`). The deko3d renderer is **a plume back end on
+deko3d** (`thirdparty/plume/plume_deko3d.{h,cpp}`). Everything above plume stays Renut's renderer: the Direct3D hooks, the
+draw state, the texture and surface caches, the GPU profile. The deko3d paths added to the renderer itself are behind
+`IsDeko3D()`. The Switch build can run nothing else (section 23); on the PC, `renut_gpu_backend` chooses plume's Vulkan or
+D3D12 back end, which is how a reference is captured.
 
-| `banjo_renderer` | `renut_gpu_backend` | What draws |
-|---|---|---|
-| `native` | (none) | banjo-nx's PM4/EDRAM renderer on NVK |
-| `renut` | `vulkan` | Renut's renderer on plume Vulkan / NVK (package 28b) |
-| `renut` | `deko3d` | Renut's renderer on plume deko3d (this page) |
-
-Why deko3d should cost less (console figures of logs 28, CPU-limited run): the render thread spent 22 % of its time in
-NVK and 2 % in plume's Vulkan layer. deko3d writes Maxwell methods straight into command memory: no pipeline objects to
-look up, no descriptor-set updates through the driver (a descriptor is 32 bytes the renderer writes itself), no
-Vulkan validation of barriers or layouts, and submission is a GPFIFO entry. SwitchWakerHD measured about 7 us per draw on
-deko3d against more for Mesa's GL driver on the same game. On the GPU side, the shaders are compiled by uam
-(Mesa nouveau's nv50_ir with fincs's Maxwell work) instead of NAK; which code is faster per shader is measured, not
-assumed.
+deko3d writes Maxwell methods straight into command memory: no pipeline objects to look up, no descriptor-set updates
+through a driver (a descriptor is 32 bytes the renderer writes itself), no validation of barriers or layouts, and submission
+is a GPFIFO entry. The shaders are compiled by uam (Mesa nouveau's nv50_ir with fincs's Maxwell work).
 
 ## 2. The references, and what is taken from each
 
 | Project | What it is | Taken |
 |---|---|---|
-| SwitchWakerHD (`github.com/centollOS/SwitchWakerHD`, MPL-2.0) | Wind Waker HD (Cemu) with a deko3d renderer | uam 1.1.0 with its patches (`thirdparty/uam`, PATCHES.md: real mutexes, in-memory DKSH, no exit/abort, deterministic scheduling, **no dual issue** (fixed 4x8-pixel speckles), stall before a new block); the list of deko3d 0.5.0 bugs (below); the memory layout (per-frame stream and command rings with a fence each, a first-fit image heap in 64 MB chunks, a bump-allocated code block); zcull off |
+| SwitchWakerHD (`github.com/centollOS/SwitchWakerHD`, MPL-2.0) | Wind Waker HD (Cemu) with a deko3d renderer | uam 1.1.0 with its patches (`thirdparty/uam`, PATCHES.md: real mutexes, in-memory DKSH, no exit/abort, deterministic scheduling, **no dual issue** (fixed 4x8-pixel speckles), stall before a new block); the list of deko3d 0.5.0 bugs (below); the memory layout (per-frame stream and command rings with a fence each, a first-fit image heap in 64 MB chunks, a bump-allocated code block) |
 | Tenkaichi-3-NX (`gitlab.com/alexyt2021es/Tenkaichi-3-NX`, MIT) | Budokai Tenkaichi 3 (PS2 GS) with a deko3d backend | `dkCmdBufReplayCmds`: raw Maxwell methods through deko3d's public API, which is how the 0.5.0 bugs are worked around without patching deko3d (its blend-state words are fincs's zlib code, `deko_blend_state.h`) |
-| dolphin-nx (`github.com/NaGaa95/dolphin-nx`) | Dolphin on the Switch | Not deko3d: Vulkan on a localized NVK, the same driver as ours. Nothing taken. |
 
 Their code is read, not run. Licences: uam is zlib (fincs) with Mesa files under MIT; SwitchWakerHD's changes to it are
 MPL-2.0, which is GPL-compatible (MPL section 3.3); deko3d is zlib; SPIRV-Cross (a PC build tool only) is Apache-2.0.
@@ -47,14 +37,14 @@ The NRO links devkitPro's `libdeko3d.a` 0.5.0 unchanged. Its known bugs, and wha
 | `dkImageLayoutInitialize` picks a tile height its level 0 shrinks, but the engines use the unshrunk one (SwitchWakerHD) | 6..8-row images (and BC images of 24..32 rows) written with one layout, read with another | `DkImageFlags_CustomTileSize` with the shrunk tile when the two differ (SwitchWakerHD's `image_tile_size_fix`) |
 | The framebuffer sRGB register (Maxwell `0x56E`) is never written (SwitchWakerHD) | sRGB render targets are not encoded | written with `dkCmdBufReplayCmds` when a target set is bound |
 | Depth images sample as (D, D, D, 1) where D3D returns (D, 0, 0, 1) for some formats (SwitchWakerHD) | wrong channels from depth textures | the image view's swizzle |
-| Zcull on by default (SwitchWakerHD) | lost 4x8 tiles with depth-biased decals | the queue is made with `DkQueueFlags_DisableZcull` |
+| Zcull on by default (SwitchWakerHD) | lost 4x8 tiles with depth-biased decals | first worked around with `DkQueueFlags_DisableZcull`; Zcull is on since package 33, without that problem (section 13) |
 | `dkCmdBufSetViewports` derives the clip rectangle from a negative height | garbage clip for flipped viewports | a positive-height call, then `ScaleY`/`TranslateY` (methods `0x281`/`0x284 + 8 * i`) written raw |
 
 ## 4. Mapping plume to deko3d
 
 | plume | deko3d |
 |---|---|
-| `RenderDevice` | `DkDevice` (`DkDeviceFlags_OriginUpperLeft \| DkDeviceFlags_DepthZeroToOne`), one graphics `DkQueue` (zcull off) |
+| `RenderDevice` | `DkDevice` (`DkDeviceFlags_OriginUpperLeft \| DkDeviceFlags_DepthZeroToOne`), one graphics `DkQueue` |
 | `RenderBuffer` | a suballocation of a CPU-visible `DkMemBlock` (`CpuUncached \| GpuCached`; `CpuCached` for readback); `getDeviceAddress()` is the `DkGpuAddr` |
 | `RenderTexture` | `DkImage` in the image heap (`GpuCached \| Image` blocks, 64 MB chunks, first-fit); layout from `DkImageLayoutMaker` with the tile fix |
 | `RenderTextureView` | `DkImageView` + a 32-byte `DkImageDescriptor` written where a descriptor set puts it |
@@ -138,20 +128,7 @@ start. `deko3d_variant_cache.py --merge` reads a console's file the same way.
 - Images: the image heap; frees wait for the frame that last used them.
 - Shader code: one `Code` block, bump allocated, with `dkCmdBufBarrier(..., DkInvalidateFlags_Shader)` after new code.
 
-## 7. Steps
-
-| Step | What | State |
-|---|---|---|
-| D0 | References read; design (this page) | done 2026-10-17 |
-| D1 | PC tools: SPIRV-Cross CLI, patched uam (`thirdparty/uam`, built for the PC with MinGW: no `_GNU_SOURCE`, winpthreads) | done 2026-10-17 |
-| D2 | `tools/deko3d_glsl.py`; the 11 host shaders to DKSH at build time (`tools/deko3d_host_shader.py`, gpu.cmake) | done |
-| D3 | The translator's deko3d mode (`BANJO_DEKO3D_SPIRV_DIR`); `tools/deko3d_shaders.py`: all 4,881 game shaders compile, no uam warning (exact divisions: `BANJO_UDIV`); vertex inputs renumbered for uam's 16; `tools/deko3d_shader_package.py`: 157 MB of GLSL in a 15 MB package in the NRO (dictionary, per shader) | done |
-| D4 | `plume_deko3d.{h,cpp}`, `plume_deko3d_commands.cpp` | done (builds) |
-| D5 | Renut's renderer on it: `renut_gpu_backend = "deko3d"`, `IsDeko3D()` / `UsesVulkanBindings()`, `banjo_renut_deko3d.cpp` (GLSL package, DKSH cache `deko3d_shaders.bin` next to the NRO, report line) | done (builds) |
-| D6 | Tests in Ryujinx (deko3d needs none of the NVK behaviour that stopped the emulator), then a console package | Ryujinx: boots to gameplay (run 20, section 10); package 29 (2026-10-17 22:11, `builds/2026-10-17_2211_round29_deko3d`): renut.toml on deko3d, `configs/banjo_renut_vulkan.toml` for the comparison, `deko3d_shaders.bin` (2,665 variants) next to the zip |
-| D7 | deko3d-only gains: bound textures instead of bindless where a shader allows, pre-encoded pipeline state, the record worker writing deko3d commands directly | |
-
-## 8. Audit before the first run (2026-10-17)
+## 8. Checked against deko3d's source (2026-10-17)
 
 Checked against deko3d's source (devkitPro/deko3d master; the NRO links 0.5.0) and fixed:
 
@@ -171,86 +148,44 @@ Confirmed: the blend registers' encoding (`getBlendFactorSetting`) and the alpha
 sets bind for compute too; constant buffers are 256-byte aligned in Renut's upload ring; `depthClipEnabled` means what
 plume's Vulkan back end makes of it; compressed render targets are a memory kind, so copies of them are right.
 
-## 9. Open questions (to be settled by tests)
+## 10. Running in Ryujinx
 
-- Front-face winding with deko3d's origin and D3D's clip space (a flip of Renut's front face if culling comes out
-  inverted). The intro's 2D frames are upright in Ryujinx; 3D culling is not checked yet.
-- uam's code against NAK's for the main pass's shaders (sizes and GPU time per shader with `banjo_renut_diag_gpu_shaders`).
-- Whether non-uniform bindless handles need anything on Maxwell (NAK emits none for them today).
+Ryujinx (Ryubing built from source) runs the NRO on the deko3d back end, and is the test bed before a console run. What it
+took, and what it cannot show:
 
-## 10. Ryujinx runs (2026-10-17)
+- **Its own shader cache.** Ryujinx keeps no shader cache for homebrew (`ProcessLoader.cs` nulls the title id), so a first
+  level's new pipelines took 12-25 s a frame in every run. The local Ryujinx build takes `RYUJINX_HOMEBREW_SHADER_CACHE_ID`
+  (16 hex digits; runs use `0500000042414E4A`) as the cache's id.
+- **Fences.** `waitForCommandFence` gave up after 10 s of a late fence, so the renderer reused command memory and uploads the
+  GPU had not read yet, and Ryujinx decoded garbage as shaders and lost its device. A fence is now waited for until it
+  signals or the queue is in an error state.
+- **Fetch data.** Storage binding 15 covered every buffer (about 500 MB). `draw.cpp` now binds each draw's fetch data alone
+  (`Deko3DBindFetchData`: from the address rounded down to 256 bytes, `vertex_fetch_bytes` long) and writes the offset from
+  there into the address's low word, which is all the shaders read of it, so the shaders are unchanged.
+- **A crash in Ryujinx, not the renderer.** `KScheduler.Schedule` asks a guest thread's name through the official SDK's TLS
+  layout (libnx has another), which led to endless recursion. Ryujinx's `KThread.GetThreadName` now checks that each read is
+  mapped.
+- **Ryujinx only, not the console.** Its shader translator logs "Failed to find storage buffer for global memory operation
+  Load" for 12-23 loads when the first level loads, and those loads read 0. It finds a storage buffer only for an address of
+  the form constant buffer + offset (+ constant); uam's code for some of the fetch reads reassociates the offset's terms. Its
+  GPU thread also stalls (about 11 s, "WaitOnSyncpoint ... took more than 1000ms") while it translates a burst of new shaders;
+  its own shader cache keeps them for the next run.
 
-Ryujinx (Ryubing built from source, `D:\New folder\Ryubing-src`) runs the NRO on the deko3d back end with
-`renut_gpu_backend = "deko3d"`, launched minimized with PowerShell's `Start-Process` (a `cmd /c start` with escaped
-quotes hung without starting it). What each run found:
+## 11. Why the blend skip is off (2026-10-17)
 
-| Runs | Found | Fix |
-|---|---|---|
-| 1-4 | Crash in glcpp (`linear_alloc_child`): NVK's newer Mesa's symbol bound into uam | uam linked as one relocatable object with its strong symbols localised (`plume_uam_localize.cmake`; weak and COMDAT ones stay global) |
-| 5 | `SetProcessMemoryPermission` throws in Ryujinx; a 1x1 swapchain resize | `RexGmProtect` does nothing without a loader; implausible sizes keep the swapchain |
-| 6 | A 4 GB storage binding: Ryujinx makes a host buffer of the bound size | the window bound to the highest buffer's end |
-| 7-9 | Heap corruption (crashes in `operator new`): the writable window made Ryujinx write the whole range back into guest memory | the window read only; memexport its own binding (14) |
-| 10-13 | Green, then black textures: Ryujinx's bindless elimination follows a handle to the constant buffer only for plain or masked words | sampler words pre-shifted; bound textures (`dkCmdBufBindTextures`) for 3,935 shaders |
-| 14 | Boots; the intro renders (Rare logo upright, right colours), 31-34 fps; 2 fps at each new shader (uam ~0.6 s a variant) | the offline DKSH cache (section 5) |
-| 15 | 0 uam compiles, 1,374 cache hits, 31-33 fps on the intro; at the first level 12-25 s a frame | each draw binds its own fetch data (below) |
-| 16 | The same slow frames; then shaders decoded from data and a lost device in Ryujinx | fence waits no longer give up (below); Ryujinx keeps a shader cache for the NRO |
-| 17-19 | Through the first level's compile burst (1.2 fps and rising), then Ryujinx died of a stack overflow (0xC00000FD in coreclr). Run 19's stderr: `KScheduler.Schedule` asks a guest thread's name, read through the official SDK's TLS layout (libnx has another), the pointer is unmapped, `InvalidAccessHandler` prints the guest stack trace, which asks the name again: endless recursion. Not the renderer | Ryujinx's `KThread.GetThreadName` checks each read is mapped and stops asking a thread whose name it could not read. (Bigger stacks for the translating threads, tried first, stay: harmless) |
-| 20 | **Boots to gameplay.** 8 minutes, no crash: the intro (Rare logo, Lord of Games' Pong TV, the 1998 film-reel flashback with subtitles) and Spiral Mountain with Banjo and the minimap, 26 captures; ~20 fps in Ryujinx (debug deko3d library and guards on); 1,546 DKSH cache hits, 30 variants compiled on the device (now in the SD cache); late fences during Ryujinx's shader burst signalled within 8 s | |
-
-The red and blue exchanged in the Ryujinx captures (Banjo's shorts teal, Kazooie blue, the gold puzzle pieces blue)
-was the captures, not Ryujinx and not the renderer (the console's colours were right, package 29):
-`banjo_renut_capture_raw` (an emulator test key) copied the frame texture's bytes, which are R G B A
-(`R8G8B8A8_UNORM`), and converted them as B G R A. Fixed in `present.cpp` (the channel order follows the frame
-texture's format; only 8-bit RGBA and BGRA are copied raw).
-
-Storage binding 15 covered every buffer (~500 MB: upload rings, static buffers and the image heap's mappings between
-them). Now `draw.cpp` binds each draw's fetch data alone (`Deko3DBindFetchData`: from the address rounded down to 256
-bytes, `vertex_fetch_bytes` long) and writes the offset from there into the address's low word, which is all the
-shaders read of it, so the shaders are unchanged. That is right for the console too (a bounded binding), but it was
-not what made run 15 slow. (`shader_common.h`'s comment on `g_DkAddressWindow` still describes the 4 GB window: to be
-updated with the next shader change, which rebuilds every shader cache.)
-
-The slow frames were Ryujinx itself: our render thread was busy 0.6-0.8 s of each 12-25 s frame, and those frames built
-417 pipelines whose shaders Ryujinx translates and compiles for the host GPU on first sight. Ryujinx keeps no shader
-cache for homebrew (`ProcessLoader.cs` nulls the title id), so every run paid it again; the local Ryujinx build now
-takes `RYUJINX_HOMEBREW_SHADER_CACHE_ID` (16 hex digits; runs use `0500000042414E4A`) as the cache's id.
-Run 16's crash: `waitForCommandFence` gave up after 10 s of a late fence, so the renderer reused command memory (with
-the compute launch descriptors in it) and uploads the GPU had not read yet; Ryujinx then decoded garbage as shaders
-and lost its device. A fence is now waited for until it signals or the queue is in an error state.
-
-Ryujinx only, not the console: its shader translator logs "Failed to find storage buffer for global memory operation
-Load" for 12-23 loads when the first level loads, and those loads read 0. It finds a storage buffer only for an
-address of the form constant buffer + offset (+ constant); uam's code for some of the fetch reads reassociates the
-offset's terms. Ryujinx's GPU thread also stalls (~11 s, "WaitOnSyncpoint ... took more than 1000ms") while it
-translates a burst of new shaders; its own shader cache keeps them for the next run.
-
-## 11. Package 29 on the console, and what followed (2026-10-17 evening)
-
-The user's first console run on deko3d (handheld, CPU 1020 MHz, GPU 460.8 MHz, RAM 2733 MHz): the render thread busy
-13-20 ms a frame in Spiral Mountain (about half of Vulkan's ~38 ms in package 28's logs), shader compiles on the console
-about 0.4 s each (166 that the PC lists did not have; kept in `deko3d_shaders.bin` since), GPU busy 99 %: 23-35 ms a
-frame where the game held 30 fps, 50-135 ms in the heavy windows (the main 1280x720 pass 81 % of it, shadow maps 9 %,
-resolves 8 %). Banjo's colours right (the Ryujinx swap was the raw capture, section 10). Bugs reported: the depth of field
-and the blocky pixels around characters (as on Vulkan), the river water missing, the full-screen colour flash (green
-now, white or teal on Vulkan) and a partial one (the sky band cyan), Banjo's glow on the menu dropping out at 30 fps.
-
-Found with frame-matched recordings (`banjo_video_s` / `banjo_video_frames`, aligned on the subtitle changes) against the
-emulated renderer (`banjo_renderer = "native"` with `masseffect_renderer_native = false`, the reference):
+Found with frame-matched recordings (`banjo_video_s` / `banjo_video_frames`, aligned on the subtitle changes):
 
 - **Depth of field (Renut, any back end):** with `banjo_gpu_blend_skip` on, Kazooie, the radio and Banjo's fur edges are
-  blurred where the reference keeps them sharp. Off, it matches; so does leaving out of it the five big material
-  shaders (`67C8FBF86CF1570B`, `55DCA3ABEFC298FB`, `1EBB301092D0B603`, `AACAD91A37311B7B`, `28CBB618E0AE89FD`,
-  `banjo_renut_diag_blend_skip_exclude`), and so does `banjo_gpu_bool_spec` off. Their pipelines: one 8-bit UNORM target,
-  no depth or stencil write, SRC_ALPHA / INV_SRC_ALPHA colour blending: by the API's rules a pixel of alpha 0 or less
-  leaves the target as it was, yet the pictures differ. The cause is not found; Renut's renderer no longer uses the
-  blend skip (`banjo_renut_blend_skip`, off; the native renderer keeps `banjo_gpu_blend_skip`).
-- **River water (deko3d):** reproduced in Ryujinx (the title screen's flyover, no input). Not the tessellation grid,
-  not `stream_convert_cs` (`banjo_renut_diag_no_stream_convert`); with the blend skip off the water is drawn.
-- **Glow and flashes:** not settled yet; the green flash fits a frame whose composite reads a texture still zero (zero
-  decodes as green through the game's colour encoding, as the early Ryujinx runs' unresolved textures did).
+  blurred where the reference keeps them sharp. Off, it matches; so does leaving out of it the five big material shaders
+  (`67C8FBF86CF1570B`, `55DCA3ABEFC298FB`, `1EBB301092D0B603`, `AACAD91A37311B7B`, `28CBB618E0AE89FD`,
+  `banjo_renut_diag_blend_skip_exclude`), and so does `banjo_gpu_bool_spec` off. Their pipelines: one 8-bit UNORM target, no
+  depth or stencil write, SRC_ALPHA / INV_SRC_ALPHA colour blending: by the API's rules a pixel of alpha 0 or less leaves the
+  target as it was, yet the pictures differ. The cause is not found, so the renderer does not use the blend skip
+  (`banjo_renut_blend_skip`, off).
+- **River water (deko3d):** reproduced in Ryujinx (the title screen's flyover, no input). With the blend skip off the water
+  is drawn.
 
-`tools/deko3d_variant_cache.py` builds the variants without constant 900 now (`--blend-skip` keeps the lists' blend
-skip).
+`tools/deko3d_variant_cache.py` builds the variants without constant 900 (`--blend-skip` keeps the lists' blend skip).
 
 ## 12. The visual bugs found with RenderDoc (2026-10-18)
 
@@ -273,7 +208,7 @@ and fetch copies).
   DKSH cache are rebuilt with it.
 - **Non-square pixels (any back end on NVIDIA): alpha to coverage without samples.** With MSAA off the hardware dithers
   alpha to coverage (grass, fur and foliage edges in a checker pattern). `banjo_renut_alpha_to_mask_test` (on) makes it an
-  alpha test at 0.5, as the native renderer's `banjo_native_alpha_to_mask_test`; the pipeline key keeps the bit (no new
+  alpha test at 0.5; the pipeline key keeps the bit (no new
   shader variants).
 - **Depth of field and the halos around characters (any back end): the half pixel.** Xenos with
   `PA_SU_VTX_CNTL.pix_center` 0 (device word 0x29C0 bit 0, `D3DRS_HALFPIXELOFFSET` false) has its pixel centres on whole
@@ -348,7 +283,7 @@ render-thread bound near the 30 cap.
 
 ## 15. Package 34 CPU work on the render thread (2026-10-19)
 
-From the CPU report (docs/cpu-codegen-proposals-2026-10-19.md, section 0 lists what was taken and why not the rest).
+From the CPU report of 2026-10-19.
 The console profile of 2026-10-19 put a quarter of the render thread in `PmullHash`, under the exact stream checks.
 
 - **Store cards** (`banjo_renut_store_cards`, PC test `banjo_renut_store_cards_verify`). With
@@ -451,7 +386,7 @@ scenes). The items below change no game shader.
 
 ## 17. Package 35: the render-thread report, the Jinjo Bingo fix, input latency (2026-10-19)
 
-**Render thread** (docs/render-thread-proposals-2026-10-19.md; numbers are the report's proposals):
+**Render thread** (numbers are the proposals of the report of 2026-10-19):
 - 1, store cards for texture content checks (`CheckedHash`, render/textures.cpp; `GuestRangeCardsClean`,
   `CardsInterval` in draw.cpp): a check reuses the last hash while no page of the texture's extent was written since
   the interval it was taken in; a dynamic linear texture is not uploaded again while its pages are clean since its last
@@ -499,7 +434,6 @@ of shader_common.h).
   had) less 2 ms (`rex::latency::SetFrameReadDelayFunction`, sdk/src/core/frame_latency.cpp, from futari-nx's probe).
   With the game thread or the frame cap the limit there is no wait and no delay.
 - The `[latency]` line every 10 s: input -> swap -> present, and the mean delay.
-
 
 **Console run of package 35 (2026-10-19 evening)**, the scripted route against package 34: render thread 25 -> 18 ms a
 frame in gameplay (CPU total 177 % -> 160 %), depth resolves 3.2 -> 2.15 ms a frame (the hand-over), but the heavy fur
@@ -621,15 +555,14 @@ colour resolves 1.9 ms, shadow-map draws about 2.5 ms, A5E2 (one full-screen pas
   console's A/B says whether whole warps skip often enough (docs/deko3d-shader-optimisations.md 2.38, 2.39).
 - **The game's gamma ramp is not applied** (found 2026-10-20 from the Peggle 2 port's note): N&B loads a ramp of about
   x^1.17 (10-bit entries [64] = 192, [128] = 459, [255] = 1019; the identity is 257 / 514 / 1023), which the 360's
-  display and banjo-nx's native renderer apply (me_native_system.cpp NoteGammaRampWrite). Renut's hooks store it at
+  display applies. Renut's hooks store it at
   device+0x3A9C (d3d/hooks/device.cpp StoreGamma) and present_ps.hlsl applies only `pow(c, 1)`: the deko3d builds are
   brighter in the midtones than the console. Futari (x^1.14) and Peggle 2 (x^1.17) measured the same in theirs.
   `banjo_renut_game_gamma` (off: it changes the picture, the user decides; configs/banjo_renut_game_gamma_on.toml):
   the Swap hook hands the device's ramp to the renderer (`Video::NoteGameGamma`), which keeps it in a 256 x 1 RGBA32F
   texture (uploaded only when the ramp changes, logged once as "[renut] game gamma ramp applied") and present_ps.hlsl
   looks each channel's 8-bit value up in it (param1 = 1 + its bindless slot; 0 = off, the output as before). Exact as
-  the 360's display: the 10-bit entry for each 8-bit value, then the swapchain's 8 bits. The log's entries match the
-  native renderer's ([64] = 192, [128] = 459, [255] = 1019). Pitfall (emulator run 78, black picture; the SA2 port found
+  the 360's display: the 10-bit entry for each 8-bit value, then the swapchain's 8 bits. The log's entries are the ones above. Pitfall (emulator run 78, black picture; the SA2 port found
   the cause): Ryujinx follows a bindless handle only back to a constant-buffer load, so a slot computed in the shader
   (`uint(param1) - 1`) read zero there; the slot now goes in as raw bits (`asuint(param1)`, 0 = off). The ramp is
   uploaded every frame (4 KB). Run 81: right.
@@ -926,7 +859,6 @@ ms a frame at 460.8 MHz (GPU profile "SMAA"; the matching windows +4-5 ms; the t
 `banjo_renut_diag_smaa_compare_s` now also runs the full-screen passes in its frames: emulator run 139, 23 frames
 (4,587-110,974 pixels changed by SMAA each): 0 pixels differ between the masked and the full-screen results.
 
-
 **36w: only the masked pixels write.** 36v's console run: SMAA 2.47 ms a frame on average (36u 3.77; the composite's own
 0.80 ms the same in all three runs, so the label holds SMAA's own work). The edge pass still wrote edges, a copy and the
 mask for all 921,600 pixels (about 7.4 MB and three render-target writes a pixel). Now:
@@ -966,6 +898,10 @@ pipelines take the target's sample count; 1 makes them single-sampled: resolves 
 the alpha test as on the scene).
 
 ## 27. Internal resolution: the 3D image at 648p / 900p, the HUD at the display's (2026-10-21, package 36z, the user's request)
+
+Since then the 3D image's height is dynamic by default on the Switch, following the GPU's time: handheld 540p-720p, docked
+540p-1080p (`banjo_renut_dynamic_*`, `docs/enhancements-reference.md`, "Total CPU"). The fixed heights below apply when it
+is off (`banjo_renut_render_height_*`).
 
 NOT exact (the user's call: a smart cut). `banjo_renut_render_height_handheld` (648 in the tomls, 720 in code) and
 `banjo_renut_render_height_docked` (900) set the 3D image's height; `banjo_renut_display_height_docked` (1080 in the
@@ -1303,7 +1239,6 @@ Batch 5's first emulator run (guards every 64th call) found two faults, fixed be
   the original). VEC_LR takes the _C forms. The resampler's verify showed 49 of 544,000 calls differing in state words
   +16 and +40, which ProcessBlock does not write (another audio thread changed them between the two runs); the outputs
   matched.
-
 
 ## 35. Batch 6: forty more CPU items, render thread and audio mixer (2026-10-23, the user's request)
 

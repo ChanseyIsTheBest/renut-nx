@@ -2,12 +2,10 @@
 
 > Status 2026-10-28: this guide is older than the current renderer. Start at `docs/porting-start-here.md` (the reading order, what is current, the method rules) and see `docs/porting-guide-renderer.md` section 6b for the items measured slower on the console. Superseded here: "MSAA off and no resolution changes" (Banjo now has internal resolution, then dynamic resolution with steps).
 
-For Futari (futari-nx), SA2 (sa2-nx), Peggle 2 (peggle2-nx) and Sonic & All-Stars Racing Transformed: how banjo-nx got
-from a PM4-emulating renderer on NVK to an API-level renderer on deko3d (no ring, no register file rebuilt from
-packets, no NVK), which of its parts you can take as they are, the order of work that kept the picture checkable at
-every step, and every trap we fell into. Read `docs/rexglue-api-renderer-guide.md` (2026-10-16) first: it explains the
-API model (Unleashed and Marathon replace Direct3D itself) and the census. This kit is the step after it: the Switch
-back end, the shader pipeline and the tuning, with Banjo's console numbers.
+For the other ReXGlue Switch ports: how to run reNut's API-level renderer on deko3d (no ring, no register file rebuilt from
+packets, no Vulkan driver), which of banjo-nx's parts you can take as they are, the order of work that kept the picture
+checkable at every step, and every trap we fell into: the Switch back end, the shader pipeline and the tuning, with Banjo's
+console numbers.
 
 ## 0. What Banjo runs now (package 35, console, stock GPU clock)
 
@@ -20,9 +18,8 @@ back end, the shader pipeline and the tuning, with Banjo's console numbers.
   cache built on the PC from the console's pipeline lists ships next to the NRO; the console compiles nothing in play.
 - **Numbers** (scripted route, package 35 console logs): gameplay at the 30 fps cap with the render thread at 18 ms a
   frame (it was 38.7 ms in package 33 and 25 ms in package 34); GPU 25-30 ms a frame in normal scenes; the heaviest
-  scenes 18-19 fps, GPU-bound. Before deko3d (the NVK packages 24-28) the console ran 15-19 fps at stock with the
-  ring or render thread the limit.
-- **Why deko3d over NVK**: NVK's per-call costs measured on the A57 (pipeline bind about 3 µs, draw 2.4-2.9 µs,
+  scenes 18-19 fps, GPU-bound.
+- **Why deko3d**: a Vulkan driver's per-call costs measured on the A57 (pipeline bind about 3 µs, draw 2.4-2.9 µs,
   descriptor or UBO set 1.3-1.6 µs) are driver work deko3d does not have: it writes the GPU's command words in user
   space, with no validation or descriptor management. On the GPU side, uam with banjo-nx's passes took 25-42 % off
   the heavy scenes' GPU time between package 33 and the next build (`docs/deko3d-shader-optimisations.md`).
@@ -49,7 +46,7 @@ StretchRect); Renut's design comes from Unleashed's, so the concepts map one to 
 
 ## 2. The route (each step keeps a runnable reference)
 
-1. **Census** (`rexglue-api-renderer-guide.md` step 0): every XDK Direct3D function your game calls, by address. The
+1. **Census** (`tools/d3d/d3d_census_report.py`): every XDK Direct3D function your game calls, by address. The
    XDK library is statically linked, so the functions exist in every game, at other addresses and sometimes another
    XDK version (Banjo's is 2008: `DrawIndexedVertices`, predicated tiling, four drawing threads; check the
    `D3DDevice` layout of your XDK against the API layer you take: Unleashed's `GuestDevice` is 0x5E00 bytes).
@@ -92,7 +89,7 @@ StretchRect); Renut's design comes from Unleashed's, so the concepts map one to 
 
 ## 4. The render thread (where Banjo's CPU time went)
 
-From `docs/render-thread-proposals-2026-10-19.md` (all taken but item 19); console: 25 -> 18 ms a frame.
+Console: 25 -> 18 ms a frame.
 - **Pushed constants** (`banjo_deko3d_push_constants`): three fixed uniform buffers updated with
   `dkCmdBufPushConstants` (pipelined constant updates) by the 64-byte groups that changed, instead of a 5.7 KB upload
   per draw. A CPU model of what the GPU holds decides; **run its verify key on the emulator before shipping**. Three
@@ -155,6 +152,4 @@ per-shader timing):
 
 The banjo-nx session can answer specifics (paths, keys, why a choice was made). Its docs, newest first:
 `docs/deko3d-renderer.md` (sections 10-18), `docs/deko3d-shader-optimisations.md`,
-`docs/render-thread-proposals-2026-10-19.md`, `docs/cpu-codegen-proposals-2026-10-19.md`,
-`docs/rexglue-api-renderer-guide.md`, `docs/renut-renderer-port.md`. Source: github.com/ChanseyIsTheBest/renut_nx
-(private; the user grants access).
+`docs/renut-renderer-port.md`. Source: github.com/ChanseyIsTheBest/renut-nx.

@@ -23,7 +23,8 @@ and keep going. Do the work in this main session (no subagents).
 3. `banjo-nx\docs\enhancements-reference.md`: the table at the top, then the keys you port.
 4. `banjo-nx\docs\deko3d-renderer.md`, `record-time-draw-path.md`, `codegen-enhancements.md`, `pgo-lto.md`,
    `four-core-mode.md`, `deko3d-shader-optimisations.md`, `shader.md`, `controls-and-keyboard.md`.
-5. `D:\peggle 2\zumasrevenge-nx\docs\optimising-functions.md` and `hand-natives.md`: the hot-function method.
+5. [katamari-nx's optimising-functions.md](https://github.com/ChanseyIsTheBest/katamari-nx/blob/main/docs/optimising-functions.md) and [zumasrevenge-nx's hand-natives.md](https://github.com/ChanseyIsTheBest/zumasrevenge-nx/blob/main/docs/hand-natives.md): the
+   hot-function method. `banjo-nx\docs\xdk-versions.md`: the XDK builds we have read, to compare your game's with.
 6. `D:\peggle 2\peggle2-nx\docs\porting-a-360-game-prompt.md`: the first ReXGlue port's order of work. It is older:
    where it and banjo-nx's docs differ, banjo-nx's win.
 

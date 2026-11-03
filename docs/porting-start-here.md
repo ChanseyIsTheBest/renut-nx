@@ -14,21 +14,22 @@ and the method rules that each cost Banjo a build or a console run.
 | 3 | `docs/deko3d-renderer.md` | The deko3d back end feature by feature (resolves, depth hand-over, zcull, skin once section 22, recording) | current |
 | 4 | `docs/record-time-draw-path.md` | The record-time draw path: setter marks, the fast path, the A/B tables | current |
 | 5 | `docs/codegen-enhancements.md` | The post-codegen CPU passes (non-volatile locals, FP mode, inline memcalls, store cards ...) | 2026-10-19; the later CPU rounds are in `docs/enhancements.md` ("Bulk localized copies", 2026-10-22) |
-| 6 | `D:\peggle 2\zumasrevenge-nx\docs\optimising-functions.md` and `hand-natives.md` | The hot-function method from console profiles: localized copies, write-backs of changed registers only, inlined callees, direct dispatch, hand-written natives; the cycle and the checks | current (2026-10-27; the newest copy of the bejeweled3-nx guide) |
+| 6 | [katamari-nx's `optimising-functions.md`](https://github.com/ChanseyIsTheBest/katamari-nx/blob/main/docs/optimising-functions.md) and [zumasrevenge-nx's `hand-natives.md`](https://github.com/ChanseyIsTheBest/zumasrevenge-nx/blob/main/docs/hand-natives.md) | The hot-function method from console profiles: localized copies, write-backs of changed registers only, inlined callees, direct dispatch, hand-written natives; the cycle and the checks | current (Katamari's is 2026-11-02, the newest version of the bejeweled3-nx guide) |
 | 7 | `docs/pgo-lto.md` | The PGO + LTO Switch build | current |
 | 8 | `docs/four-core-mode.md` | The fourth core (NetherSX2_nx's layout) through a forwarder NPDM | current |
 | 9 | `docs/deko3d-shader-optimisations.md`, `docs/shader.md` | The uam passes and the shader translator passes, shader sizes | 2026-10-20 / 21 |
 | 10 | `docs/deko3d-port-faq.md`, `docs/deko3d-native-renderer-kit.md` | The kits given to other ports | 2026-10-19 / 20: their "no resolution changes" is superseded (internal resolution, then dynamic resolution with steps, below); MSAA is off (`disable_msaa`) |
-| 11 | `docs/renut-renderer-port.md`, `docs/rexglue-api-renderer-guide.md` | How reNut's renderer was brought in, the API-level design | history; the MSAA notes are old (MSAA off now) |
+| 11 | `docs/renut-renderer-port.md` | How reNut's renderer was brought in | current |
 | 12 | `docs/controls-and-keyboard.md` | sa2-nx's input driver, two players, the software keyboard | current |
 | 13 | `docs/enhancements.md` | The long log of every round, console run and decision | current (read the parts you need) |
+| 14 | `docs/xdk-versions.md` | The XDK build of each game we have read: how far yours is from N&B's | 2026-10-29 |
 
 ## Where Banjo stands (what to aim at)
 
 - City, the heaviest scene, stock clocks (CPU 1020 MHz, GPU 460 MHz handheld), four-core: about 5,000-5,500 draws a
   frame, the render thread about 7.9-8.4 us a draw, GPU about 40 ms at 648 lines, 20-21 fps. At the user's maximum
   overclock 30 fps (the render thread scales linearly with the CPU clock, not with the RAM clock).
-- Dynamic resolution: 540-720 handheld and 720-1080 docked, four steps between (`banjo_renut_dynamic_steps`), by the
+- Dynamic resolution: 540-720 handheld and 540-1080 docked, four steps between (`banjo_renut_dynamic_steps`), by the
   GPU's time against 34.5 ms; the HUD stays at the display's size.
 - Decided defaults (2026-10-28 console checks): host draw packets OFF (neutral), replay look-ahead (29) and texture-slot
   skip (53) OFF (slower), shadow sort (40) OFF (slower), record prefetch (57) OFF (no effect), resident literals (34)
