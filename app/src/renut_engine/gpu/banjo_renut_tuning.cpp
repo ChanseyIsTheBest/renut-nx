@@ -43,6 +43,9 @@
 #include <rex/filesystem.h>
 #include <rex/logging.h>
 
+// renut-nx (2026-11-05, from kameo-nx): the latency test's clock, at the end of this file.
+void BanjoTlbTestTick();
+
 #include "cpu/banjo_enhancements.h"
 
 namespace banjo::hot {
@@ -1026,6 +1029,7 @@ void StatsGameFrame() {
   const double since = std::chrono::duration<double>(now - g_stats.last_report).count();
   if (since < 10.0)
     return;
+  BanjoTlbTestTick();
   // banjo-nx (2026-10-22): the native copies' report (app/src/cpu/banjo_hot_guest.cpp) comes with this one: without
   // a guard (direct dispatch) no hook calls it any more.
   banjo::hot::Report();
@@ -2120,3 +2124,24 @@ void LatchTuning() {
 }
 
 }  // namespace banjo::renut_gpu
+
+// renut-nx (2026-11-05, from kameo-nx): at the end of the file, so that the other functions keep their PGO profile.
+REXCVAR_DEFINE_INT32(banjo_tlb_test_s, 0, "Banjo/Diagnostics",
+                     "Once, this many seconds after the first report: the TLB's cost in game memory and the NRO's code, "
+                     "in the log (a few hundred ms on the render thread). Only the console's numbers mean anything. 0: never");
+
+#if REX_PLATFORM_SWITCH
+extern "C" void RexGmLatencyTest(void (*emit)(const char*));
+#endif
+
+void BanjoTlbTestTick() {
+#if REX_PLATFORM_SWITCH
+  const int32_t seconds = REXCVAR_GET(banjo_tlb_test_s);
+  if (seconds <= 0) return;
+  static const auto first = std::chrono::steady_clock::now();
+  static bool done = false;
+  if (done || std::chrono::steady_clock::now() - first < std::chrono::seconds(seconds)) return;
+  done = true;
+  RexGmLatencyTest([](const char* line) { REXLOG_INFO("{}", line); });
+#endif
+}

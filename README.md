@@ -1,6 +1,6 @@
 # renut-nx
 
-**Banjo-Kazooie: Nuts & Bolts on the Nintendo Switch** (homebrew), version 1.0.1, by ChanseyIsTheBest. Formerly
+**Banjo-Kazooie: Nuts & Bolts on the Nintendo Switch** (homebrew), version 1.0.2, by ChanseyIsTheBest. Formerly
 banjo-nx.
 
 renut-nx is a Switch port of [reNut](https://github.com/masterspike52/reNut), masterspike52's static recompilation of
@@ -52,7 +52,8 @@ makes at run time; the web installer makes the rest.
 - [plume](https://github.com/renderbag/plume) (rendering abstraction), with a deko3d back end written for this port.
 - deko3d and uam by fincs and the devkitPro team; libnx; Mesa's GLSL compiler inside uam.
 - XenosRecomp (hedge-dev) in reNut's version.
-- Work shared between sister ports: sa2-nx, futari-nx, sasrt-nx, katamari-nx, UnleashedRecomp-NX, NetherSX2_nx's
+- Work shared between sister ports: sa2-nx, futari-nx, sasrt-nx, katamari-nx, kameo-nx and the Torchlight port's findings (2 MB
+  blocks), UnleashedRecomp-NX, NetherSX2_nx's
   four-core layout, nfsmw-nx (StevensND), battd_nx; keflings-nx-installer's Xbox 360 package reader in the web
   installer. Details in `docs/` and in each file's comments.
 - Banjo-Kazooie: Nuts & Bolts is © Microsoft and Rare. This project is not affiliated with them.

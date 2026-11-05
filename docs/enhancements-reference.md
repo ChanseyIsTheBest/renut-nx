@@ -471,6 +471,8 @@ the ones the A/B list switches have their target in brackets.
 
 ### Four-core mode and mesh objects (2026-10-27 afternoon)
 
+- `banjo_window_blocks` and `banjo_code_blocks` (Banjo/Switch, `true`), `banjo_tlb_test_s` (Banjo/Diagnostics, `0`): game memory
+  and the NRO's code on 2 MB blocks, and a test of what the TLB costs. See deko3d-renderer.md, section 43.
 - `banjo_system_core` (Banjo/Threads, `1`) and `banjo_system_core_compiles` (`true`): NetherSX2_nx's 4-core mode (MIT,
   NaGaa95). With all four cores granted (a forwarder whose NPDM allows CPU 0-3) the audio output thread, the Audio
   Worker, the XMA Decoder, XAudio's mixer threads and the shader compiles run on core 3 alone; every other thread stays on

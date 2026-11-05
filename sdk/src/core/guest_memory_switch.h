@@ -71,6 +71,12 @@ typedef enum {
 /* Reserves the window. size is usually 0x120000000. Returns the base or NULL. */
 uint8_t* RexGmInit(size_t size);
 
+/* kameo-nx (2026-11-05): false, before RexGmInit: the window anywhere, on 4 KB pages (banjo_window_blocks). */
+void RexGmSetWindowBlocks(bool on);
+
+/* kameo-nx (2026-11-05): the TLB's cost in game memory and the NRO's code, a line of text at a time (banjo_tlb_test_s). */
+void RexGmLatencyTest(void (*emit)(const char*));
+
 /* * Releases everything. */
 void RexGmShutdown(void);
 

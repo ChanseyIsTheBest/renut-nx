@@ -1643,3 +1643,25 @@ code memory, which could fail on such pages.
 
 The `language` key, by default the Switch's system language: docs/title-update-3.md, "The language key". The renderer and
 the shaders did not change: the 1.0.0 shader packages stay valid, and the installer's reference hashes are the same.
+
+## 43. renut-nx 1.0.2 (2026-11-05)
+
+Two fixes from kameo-nx 1.0.1, which come from the Torchlight port's findings. Its docs/kameo-notes.md, "2 MB blocks", has the
+method and its console figures. The renderer and the shaders did not change.
+
+- **Game memory** (`banjo_window_blocks`): the second argument of `virtmemFindAslr` is a guard, not an alignment, so the guest
+  window was never on a 2 MB boundary and the kernel used 4 KB pages for all of it. `RexGmInit` now asks for 2 MB more and rounds
+  the base up.
+- **The NRO's code** (`banjo_code_blocks`, sdk/src/ui/switch_code_blocks.cpp): text and read-only data are copied to heap that
+  lines up with their addresses modulo 2 MB, and swapped in by the first constructor (priority 101; the first thread of ours starts
+  at 102). The loader's copy can't be given back, so this costs their size again: 72 MB of segments, about 74 MB of heap with the
+  alignment. That key is read from renut.toml by the file itself, because it runs before the cvars.
+- `banjo_tlb_test_s` logs what the TLB costs, once. Only a console's numbers mean anything.
+- sdk/cmake/rex_version.cmake no longer reads this repository's `v*` tags, which are the game's releases: they stopped the
+  configure in any clone that had fetched them.
+
+SDK objects have no profile, so the PGO profile still applies. In the app only one function changes (the 10 s report's call to
+the test's clock), and the new function is at the end of its file.
+
+Ryujinx starts an NRO without a loader, so the move does not run there: only a self-test of the swap does. On a console the log
+says `[code blocks] text ... now on a copy`; `left where it is` means it skipped itself.
