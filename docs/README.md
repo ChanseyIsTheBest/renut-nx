@@ -65,7 +65,7 @@ lists the method rules.
 | [deko3d-native-renderer-kit.md](deko3d-native-renderer-kit.md) | The deko3d kit given to other ports: which parts to reuse, the route, and the traps. Older than the current renderer |
 | [deko3d-port-faq.md](deko3d-port-faq.md) | Answers to the questions other ports asked while following the kit. Older than the current renderer |
 | [porting-a-360-game-prompt.md](porting-a-360-game-prompt.md) | A generic fill-in prompt to paste into a new coding-agent session to start a port from katamari-nx |
-| [xdk-versions.md](xdk-versions.md) | The XDK build, title ID and kernel version of 19 of our Xbox 360 ports' games, and how they were read |
+| [xdk-versions.md](xdk-versions.md) | The XDK build, title ID and kernel version of 27 of our Xbox 360 ports' games, and how they were read |
 
 ## Words used in these pages
 

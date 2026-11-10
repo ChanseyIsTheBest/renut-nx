@@ -22,7 +22,7 @@ and the method rules that each cost Banjo a build or a console run.
 | 11 | `docs/renut-renderer-port.md` | How reNut's renderer was brought in | current |
 | 12 | `docs/controls-and-keyboard.md` | sa2-nx's input driver, two players, the software keyboard | current |
 | 13 | `docs/enhancements.md` | The long log of every round, console run and decision | current (read the parts you need) |
-| 14 | `docs/xdk-versions.md` | The XDK build of each game we have read: how far yours is from N&B's | 2026-10-29 |
+| 14 | `docs/xdk-versions.md` | The XDK build of each game we have read: how far yours is from N&B's | 2026-11-04 |
 
 ## Where Banjo stands (what to aim at)
 
