@@ -86,6 +86,15 @@ The work, in order
    (tools/codegen.ps1, then python tools/post_codegen.py in full), and get it booting to gameplay on the PC with Renut's
    renderer (the Vulkan back end). Fix what stops it (imports, kernel calls, file system, input). Record every
    game-specific fix in docs/<SHORT>-notes.md.
+   Then CG-13's census, as soon as the PC build reaches gameplay: the Switch build runs all of the game's float code in
+   the host's flush mode (BLUR_FPCR_ONE_MODE, on by default there: no `msr fpcr` between its VMX and scalar code, a
+   large CPU saving), which turns a scalar denormal into zero where the Xenon keeps it. Run
+   `tools/cg13_census.ps1 -Seconds 300` with this game's input script, in gameplay and in its most physics- and
+   audio-heavy scenes (the PC build keeps the option off so the census can count; building.md section 6). 0 in every
+   window: keep it on. Any window with a count: the script lists the sites; look at what each computes (a value
+   decaying to zero is harmless; a division or normalisation of it, a guard against zero, an input-based replay's
+   simulation is not), write them down in the notes, and if one matters tell me before building the Switch folder with
+   -DBLUR_FPCR_ONE_MODE=OFF. Run it again after a large change to the code generation.
 2. Check the calling convention before trusting the machine copies' liveness: run tools/cc_entry_census.py and
    tools/cc_exit_census.py on the generated tree. The entry census must say none; every read the exit census lists must be
    value-independent (look at each). If not, generate with SASRT_REG_LIVENESS_EXIT_ABI=0 (and HOOKS_ABI=0 for a vector
@@ -113,6 +122,13 @@ The work, in order
    those off-by-default.md lists; each still gets checked on this game (its key and in-run A/B target, in the emulator
    with the verify keys: 0 differences). The section 4 trials (vivapinata_shader_noearly's A/B 151 and the like) are per
    game: measure them on the console before turning one on. The ones that change the picture become configs for me.
+   Audio (blur-nx's stereo check, port 135): race on the PC with audio_channel_census = true; the 10 s "[audio]
+   channels with sound" line shows which of the six channels the game fills. Again with audio_speaker_config = 1
+   (analog stereo): if the centre, LFE and rear channels drop to 0, the game mixes stereo itself when told, which
+   saves its mixer work (blur-nx: ~+8 % fps from its mixer doing 2 channels, not 6); measure it on the console and
+   match the old loudness with audio_stereo_frame_gain (compare audio_dump_s dumps, folded). A game that ignores it
+   needs patching per game (blur-nx's tools/stereo_mix.py), worth it only when audio is near the top of the CPU
+   table. audio_switch_pump_pairs (off) trades +5.3 ms of latency for CPU: my choice.
 6. Hot functions, by the base's optimising-functions.md. Its two tracks replace any fixed top-5 or top-100 target.
    - Machine-optimise as many functions as possible, at every opportunity: every function any session samples (Ryujinx
      and the PC's profiler now, the console when I send a log), with tools/localize_native.py and
@@ -126,6 +142,7 @@ The work, in order
 7. PGO + LTO for the Switch build only when I say, in the guide's order: the last batch of machine copies, any
    hand-written natives, the instrumented build, my console session, then the optimised build (building.md). Nothing in
    the tree changes between the training race and the final build; a fix found after training means a new training run.
+   That includes BLUR_FPCR_ONE_MODE: the profile is trained with the setting the build ships with.
 8. A package for my console by <STOP_TIME>:
    - the NRO
    - renut.toml with the shipped settings
