@@ -22,8 +22,7 @@ if ((Test-Path $cache) -and (Select-String -Path $cache -Pattern '^SASRT_HOT_IN_
                   "then tools\build_pc.bat")
     exit 2
 }
-$extra = "--banjo_cpu_verify=true --banjo_hot_guard_calls=4000 --banjo_hot_guard_period=1 " +
-         "--katamari_hand_transform_chain_verify=true --katamari_hand_sphere_box=true"
+$extra = "--banjo_cpu_verify=true --banjo_hot_guard_calls=4000 --banjo_hot_guard_period=1"  # banjo-nx: no Katamari natives
 # renut-ultimate (port 70, 2026-11-10): an empty --input_script= stopped the run at the command line ("1 required TEXT
 # missing"), so the documented command without -Script never started.
 if ($Script) { $extra += " --input_script=$Script" }

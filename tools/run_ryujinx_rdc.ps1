@@ -10,15 +10,17 @@ $root = Split-Path -Parent $PSScriptRoot
 # renut-ultimate (2026-11-13): the RenderDoc folder from RENDERDOC_DIR, else banjo-nx's copy.
 $rdcDir = if ($env:RENDERDOC_DIR) { $env:RENDERDOC_DIR } else { "D:\Banjo kazooie port\tools\RenderDoc_1.46_64" }
 $ryu = "D:\New folder\Ryubing-src\ryubing\build\Ryujinx.exe"
-$data = "D:\New folder\ryu-data\katamari"
-$sd = Join-Path $data "sdcard\switch\katamari-nx"
-$nro = Join-Path $sd "katamari-nx.nro"
+# banjo-nx (2026-11-19, the rebase): banjo-nx's data folder (ryu-data\banjo-ult, made from banjo2), its SD folder
+# switch\renut-nx with renut-nx.nro and renut.toml, as renut-nx 1.0.2 installs them.
+$data = "D:\New folder\ryu-data\banjo-ult"
+$sd = Join-Path $data "sdcard\switch\renut-nx"
+$nro = Join-Path $sd "renut-nx.nro"
 $out = Join-Path $root "out\emu_runs\$Name"
 if (Get-Process -Name Ryujinx -ErrorAction SilentlyContinue) { Write-Output "a Ryujinx is running (another port's?): not starting"; exit 2 }
 $os = Get-CimInstance Win32_OperatingSystem
 $freeCommit = $os.FreeVirtualMemory / 1MB
 if ($freeCommit -lt $MinCommitGB) { Write-Output ("free commit memory {0:N1} GB < {1} GB: not starting" -f $freeCommit, $MinCommitGB); exit 3 }
-if ($Toml) { Copy-Item $Toml (Join-Path $sd "katamari.toml") -Force }
+if ($Toml) { Copy-Item $Toml (Join-Path $sd "renut.toml") -Force }
 New-Item -ItemType Directory -Force $out | Out-Null
 $logs = Join-Path $sd "logs"
 if (Test-Path $logs) { Remove-Item -Recurse -Force $logs }

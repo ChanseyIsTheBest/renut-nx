@@ -7,7 +7,7 @@
 # -Game (blur-nx, 2026-11-18): another game folder (a web installer's game_root, with its .lz4b files, for example) in
 # place of Katamari's (passing --game_data_root in -Extra too would give the key twice).
 param([int]$Seconds = 90, [string]$Name = "run", [int]$Every = 15, [string]$Extra = "", [switch]$Visible,
-      [string]$Game = "D:/beautifulkatamari/game")
+      [string]$Game = "D:/Banjo kazooie port/game")  # banjo-nx (2026-11-19): N&B's
 $root = Split-Path -Parent $PSScriptRoot
 $dir = Join-Path $root "app\out\pc"
 $exe = Join-Path $dir "renut.exe"

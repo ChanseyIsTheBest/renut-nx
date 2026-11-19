@@ -7,10 +7,12 @@
 param([int]$Seconds = 240, [string]$Name = "emu", [string]$Toml = "", [double]$MinCommitGB = 12, [string]$Build = "switch")
 $root = Split-Path -Parent $PSScriptRoot
 $ryu = "D:\New folder\Ryubing-src\ryubing\build\Ryujinx.exe"
-$data = "D:\New folder\ryu-data\renut-ultimate"
+# banjo-nx (2026-11-19, the rebase): banjo-nx's data folder (ryu-data\banjo-ult, made from banjo2), its SD folder
+# switch\renut-nx with renut-nx.nro and renut.toml, as renut-nx 1.0.2 installs them.
+$data = "D:\New folder\ryu-data\banjo-ult"
 # Ryujinx starts an NRO without argv: the app then takes REX_SWITCH_FALLBACK_EXE (app/CMakeLists.txt) as its own path.
-$sd = Join-Path $data "sdcard\switch\katamari-nx"
-$nro = Join-Path $sd "katamari-nx.nro"
+$sd = Join-Path $data "sdcard\switch\renut-nx"
+$nro = Join-Path $sd "renut-nx.nro"
 $out = Join-Path $root "out\emu_runs\$Name"
 if (Get-Process -Name Ryujinx -ErrorAction SilentlyContinue) { Write-Output "a Ryujinx is running (another port's?): not starting"; exit 2 }
 $os = Get-CimInstance Win32_OperatingSystem
@@ -19,7 +21,7 @@ if ($freeCommit -lt $MinCommitGB) { Write-Output ("free commit memory {0:N1} GB 
 $built = Join-Path $root "app\out\$Build\renut.nro"
 if (-not (Test-Path $built)) { Write-Output "no NRO at $built"; exit 4 }
 Copy-Item $built $nro -Force
-if ($Toml) { Copy-Item $Toml (Join-Path $sd "katamari.toml") -Force }
+if ($Toml) { Copy-Item $Toml (Join-Path $sd "renut.toml") -Force }
 # renut-ultimate (2026-11-11, port 78; sasrt-nx's idea 27): an NRO without the copies' guard forms (the everyday and
 # release builds) calls every native copy directly whatever the toml's guard keys say: say so before the run.
 $cache = Join-Path $root "app\out\$Build\CMakeCache.txt"
