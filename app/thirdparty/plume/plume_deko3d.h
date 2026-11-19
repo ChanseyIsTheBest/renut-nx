@@ -795,6 +795,10 @@ namespace plume {
             std::string ownLog;
         };
         std::vector<CompileJob *> compileQueue;
+        // banjo-nx (2026-11-20, the user: the shader compiler at most backgroundCompileShare % of its core): the time
+        // until which the uam thread rests; every compile adds its time x (100 - share) / share, and only a compile a
+        // drawing thread waits for (or a cache read) starts before it.
+        uint64_t compileRestUntilNs = 0;
         // banjo-nx (2026-10-18): the uam thread's handle, the priorities of the threads waiting for a compile, and the
         // priority last set (applyCompilePriority).
         uint32_t compileThreadHandle = 0;

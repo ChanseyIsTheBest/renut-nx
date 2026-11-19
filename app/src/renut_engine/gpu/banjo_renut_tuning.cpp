@@ -525,7 +525,10 @@ REXCVAR_DEFINE_INT32(banjo_deko3d_background_compile_share, 10, "Banjo/Enhanceme
                      "background compile it now rests in proportion (at most 30 s). A compile a draw waits for ends the "
                      "rest and is never held back. 100: no rests. Same pixels (the generic variant draws meanwhile). "
                      "2026-10-28: 10 (was 25): the c4 console runs compiled run-time variants without end (50 and 135 "
-                     "a run, about 2.1 s each), a quarter of core 2 taken from saturated game cores");
+                     "a run, about 2.1 s each), a quarter of core 2 taken from saturated game cores. 2026-11-20 (the "
+                     "user: the compiler at most 10 % of core 3): every compile counts, those the pipeline prebuild "
+                     "waits for too (they ended the rest before: 26 % of core 3 on the console); only a compile a "
+                     "drawing thread waits for starts during a rest, and its time is paid back in the rests after it");
 REXCVAR_DEFINE_BOOL(banjo_deko3d_async_cache_reads, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-23, the console's stutters on entering an area: hundreds of new pipelines, "
                     "each variant read from deko3d_shaders.bin on the card by the render thread): a variant the cache "
