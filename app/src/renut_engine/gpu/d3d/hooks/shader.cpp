@@ -970,9 +970,9 @@ void D3DVertexShader_Bind_hook(u32 shader_va, u32 declaration_va, mapped_u32 str
 
 } // namespace
 
-BANJO_RENUT_HOOK(sub_824D6120, D3DDevice_CreateVertexShader_hook);  // D3DDevice_CreateVertexShader  // katamari-nx: N&B sub_826377C0, signature 0.85 (next 0.55)
-BANJO_RENUT_HOOK(sub_824D6010, D3DDevice_CreatePixelShader_hook);  // D3DDevice_CreatePixelShader  // katamari-nx: N&B sub_826375D8, D3DDevice_CreatePixelShader: CreateVertexShader takes sub_824D6120 (0.85); this one's next best, 0.66
-BANJO_RENUT_HOOK(sub_824D4C50, D3DDevice_CreateVertexDeclaration_hook);  // D3DDevice_CreateVertexDeclaration  // katamari-nx: N&B sub_826379A0, signature 0.77 (next 0.47)
-BANJO_RENUT_UNHOOKED_HOOK(sub_8263FBD0, D3DVertexShader_Bind_hook);  // D3DVertexShader_Bind  // katamari-nx: not hooked (D3DVertexShader_Bind: no clear counterpart (sig 0.35/0.28))
-BANJO_RENUT_HOOK(sub_824D4838, XGRegisterVertexShader_hook);  // XGRegisterVertexShader  // katamari-nx: N&B sub_826376C8, signature 0.91 (next 0.32)
-BANJO_RENUT_UNHOOKED_HOOK(sub_826375A0, XGRegisterPixelShader_hook);  // XGRegisterPixelShader  // katamari-nx: not hooked (XGRegisterPixelShader: no counterpart (sig 0.26))
+BANJO_RENUT_HOOK(sub_826377C0, D3DDevice_CreateVertexShader_hook);  // D3DDevice_CreateVertexShader
+BANJO_RENUT_HOOK(sub_826375D8, D3DDevice_CreatePixelShader_hook);  // D3DDevice_CreatePixelShader
+BANJO_RENUT_HOOK(sub_826379A0, D3DDevice_CreateVertexDeclaration_hook);  // D3DDevice_CreateVertexDeclaration
+BANJO_RENUT_HOOK(sub_8263FBD0, D3DVertexShader_Bind_hook);  // D3DVertexShader_Bind
+BANJO_RENUT_HOOK(sub_826376C8, XGRegisterVertexShader_hook);  // XGRegisterVertexShader
+BANJO_RENUT_HOOK(sub_826375A0, XGRegisterPixelShader_hook);  // XGRegisterPixelShader
