@@ -84,7 +84,8 @@ REXCVAR_DEFINE_BOOL(banjo_switch_close_shutdown, false, "GPU",
                     "Switch: closing from HOME runs the app's shutdown (at most 3 s: GPU work finished, caches "
                     "saved) before the process ends")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
+#include <rex/banjo_switch_default.h>  // banjo-nx (2026-11-01): the shipped Switch defaults
+REXCVAR_DEFINE_STRING(gpu_plugin, BANJO_SWITCH_DEFAULT("xenos", ""), "GPU",
                       "GPU emulation plugin to load at startup (e.g. 'xenos'); empty disables "
                       "GPU emulation")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);

@@ -1,12 +1,13 @@
 // banjo-nx: the boot-time choice between banjo-nx's native renderer and Renut's (banjo_renut_select.h).
 #include "renut_engine/gpu/banjo_renut_select.h"
+#include "banjo_switch_default.h"  // banjo-nx (2026-11-01): the shipped Switch defaults
 
 #include <string>
 
 #include <rex/cvar.h>
 #include <rex/logging/macros.h>
 
-REXCVAR_DEFINE_STRING(banjo_renderer, "native", "Banjo",
+REXCVAR_DEFINE_STRING(banjo_renderer, BANJO_SWITCH_DEFAULT("renut", "native"), "Banjo",
                       "Renderer, chosen at boot. native = banjo-nx's own native renderer (the default; the exact "
                       "reference, with every banjo_* GPU and ring key). renut = Renut's Direct3D-level renderer "
                       "(github.com/masterspike52/reNut): N&B's Direct3D runs natively through plume, with no PM4 and no "

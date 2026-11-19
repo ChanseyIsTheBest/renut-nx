@@ -473,7 +473,8 @@ REXCVAR_DEFINE_INT32(masseffect_native_textures_binding_thread_priority, 0x2D, "
  * no decision of the ring: it only counts, and reports every 10 s in the "C3 reuse by content"
  * line.
  */
-REXCVAR_DEFINE_BOOL(masseffect_native_diag_reuse, true, "MASSEFFECT",
+#include <rex/banjo_switch_default.h>  // banjo-nx (2026-11-01): the shipped Switch defaults
+REXCVAR_DEFINE_BOOL(masseffect_native_diag_reuse, BANJO_SWITCH_DEFAULT(false, true), "MASSEFFECT",
                     "Native renderer (measurement only): counts how many new textures have the "
                     "same content and shape as another live one in the cache (the game reloads packs at another address) "
                     "and how many of those other ones have gone unused for more than 120 frames. Changes nothing. false = no "
@@ -994,7 +995,7 @@ REXCVAR_DEFINE_BOOL(masseffect_native_vs_pruned_outputs, true, "Mass Effect",
                     "group (banjo_noncpu_enhancements = false turns it off). Exact: the pixel shader never reads the "
                     "outputs it removes. A pipeline without a pixel shader keeps only the position");
 // NVK patch: read as NVK_SWITCH_STAGE_CACHE before the device is created.
-REXCVAR_DEFINE_BOOL(masseffect_nvk_cache_per_stage, false, "Mass Effect",
+REXCVAR_DEFINE_BOOL(masseffect_nvk_cache_per_stage, BANJO_SWITCH_DEFAULT(true, false), "Mass Effect",
                     "NVK: per-stage shader cache keys (runtime disable_lto), so a VS or PS already compiled for "
                     "another pipeline is not compiled again; needs the patched driver");
 REXCVAR_DEFINE_STRING(masseffect_diag_trace_tile, "", "Mass Effect",
@@ -1212,19 +1213,19 @@ REXCVAR_DEFINE_STRING(banjo_diag_shader_asm, "", "Banjo",
  *
  * If geometry ever looks stuck or stretched, this is the first thing to disable.
  */
-REXCVAR_DEFINE_BOOL(masseffect_native_indices_cache, false, "Mass Effect",
+REXCVAR_DEFINE_BOOL(masseffect_native_indices_cache, BANJO_SWITCH_DEFAULT(true, false), "Mass Effect",
                     "Same-frame index buffer cache (16-bit fast path): a draw that repeats the guest index range "
                     "(address, count, byte order) of an earlier draw in this upload buffer reuses its uploaded copy "
                     "and its min/max instead of converting and copying again (the x5 per-light re-draws). Ranges of "
                     "up to 16 KB are also fingerprinted (transient UI buffers)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(masseffect_native_dedupe_max_fingerprint, 0, "Mass Effect",
+REXCVAR_DEFINE_INT32(masseffect_native_dedupe_max_fingerprint, BANJO_SWITCH_DEFAULT(16384, 0), "Mass Effect",
                      "Same-frame vertex dedupe: ranges larger than this many bytes are matched by address, size and "
                      "byte order only, without the content fingerprint (static meshes; the transient UI/movie buffers "
                      "that need the check are small). 0 = fingerprint every range")
     .range(0, 1 << 24)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(masseffect_native_compare_fast, false, "Mass Effect",
+REXCVAR_DEFINE_BOOL(masseffect_native_compare_fast, BANJO_SWITCH_DEFAULT(true, false), "Mass Effect",
                     "Per-draw state caches (sampler/fetch constants, pass key, shared block, push constants, viewport, "
                     "pipeline keys) compare their 8-130 byte keys with an inline NEON/word loop instead of a libc memcmp "
                     "call (~15 per draw); the EDRAM trace-tile query returns at once when no tile is traced. Same answers")
@@ -1232,7 +1233,7 @@ REXCVAR_DEFINE_BOOL(masseffect_native_compare_fast, false, "Mass Effect",
 namespace masseffect::native {
 bool CompareActiveFast() { return REXCVAR_GET(masseffect_native_compare_fast); }  // for masseffect_native_targets.cpp
 }  // namespace masseffect::native
-REXCVAR_DEFINE_BOOL(masseffect_native_fast_copy, false, "Mass Effect",
+REXCVAR_DEFINE_BOOL(masseffect_native_fast_copy, BANJO_SWITCH_DEFAULT(true, false), "Mass Effect",
                     "Vertex copy into the upload buffer: 64 bytes per iteration with the guest source prefetched ahead "
                     "(the guest data is cold: written frames ago by another core). Same bytes; checked against the plain "
                     "loop for the first masseffect_native_fast_copy_verify copies")
@@ -1241,7 +1242,7 @@ REXCVAR_DEFINE_INT32(masseffect_native_fast_copy_verify, 256, "Mass Effect",
                      "Self-check of masseffect_native_fast_copy: copies compared with the plain loop (0 = none)")
     .range(0, 2147483647)  // banjo-nx: banjo_cpu_verify checks every copy
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(masseffect_native_fingerprint_mode, 0, "Mass Effect",
+REXCVAR_DEFINE_INT32(masseffect_native_fingerprint_mode, BANJO_SWITCH_DEFAULT(2, 0), "Mass Effect",
                      "Content fingerprint of the sampled vertex/index/texture blocks (SampleFingerprint, index cache): "
                      "0 = XXH3 seeded per block (every seeded call over 240 bytes first regenerates XXH3's 192-byte "
                      "secret), 1 = unseeded XXH3 per block chained with a bijective mix (same 64-bit strength, no secret "
@@ -1439,7 +1440,7 @@ constexpr uint64_t kMeFingerprintTonemap = 0x44EC14CFD16EF8F8ull;
 // A review of other Switch projects found that in NVK for Tegra the memory type the SDK picks for uploads
 // (without HOST_CACHED) is an NvMap without CPU caching, and wine-nx measured on the console that writing
 // there is slow. All vertex copies go to this buffer, so it can be chosen for an A/B test.
-REXCVAR_DEFINE_INT32(masseffect_native_upload_memory, 0, "MASSEFFECT",
+REXCVAR_DEFINE_INT32(masseffect_native_upload_memory, BANJO_SWITCH_DEFAULT(1, 0), "MASSEFFECT",
                      "Native renderer: upload buffer memory. 0 = the one the SDK picks (on the Switch, without "
                      "CPU cache), 1 = with CPU cache (published with vkFlushMappedMemoryRanges before "
                      "submitting), 2 = without CPU cache")

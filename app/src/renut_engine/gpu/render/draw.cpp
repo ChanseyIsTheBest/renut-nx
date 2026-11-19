@@ -4,6 +4,7 @@
 #include "renut_engine/gpu/render/draw.h"
 #include "renut_engine/gpu/stage_census.h"  // blur-nx (2026-11-17, the Renut audit's census)
 #include "renut_engine/gpu/host_batch.h"  // blur-nx (2026-11-18, the Renut host batch)
+#include "banjo_switch_default.h"  // banjo-nx (2026-11-01): the shipped Switch defaults
 #include "renut_engine/gpu/render/smaa.h"
 #include "renut_engine/gpu/render/ui_scale.h"  // banjo-nx (2026-10-21, internal resolution)  // banjo-nx (2026-10-21): banjo_renut_smaa
 
@@ -9429,7 +9430,9 @@ VertexDeclarationRecord &NoDeclaration() {
 // Its D3DVERTEXELEMENT9s (12 bytes each, ended by D3DDECL_END) are at +52 of the declaration, inside the device
 // snapshot, so a draw reads them from its own snapshot; at most 15 before the device's next field (+0x3088). One record
 // per distinct element list; each new list is logged once with its elements, to check the layout.
-constexpr u32 kDeviceDeclarationOffset = 0x2F98;
+// banjo-nx (2026-11-19, the rebase): N&B's title update, +0x2FA8 (hooks/device.cpp's CreateDevice points the device's
+// declaration there); the base's Katamari 0x2F98. A per-XDK value in a shared file: a handoff for the base (d3d.h).
+constexpr u32 kDeviceDeclarationOffset = 0x2FA8;
 constexpr u32 kDeclarationElementsOffset = 52;
 constexpr u32 kDeviceDeclarationMaxElements = 15;
 

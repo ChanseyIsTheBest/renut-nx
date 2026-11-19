@@ -59,12 +59,13 @@ REXCVAR_DEFINE_BOOL(readback_resolve_half_pixel_offset, false, "GPU",
                     "scaled block during resolve readback downscale")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_BOOL(readback_memexport, true, "GPU",
+#include <rex/banjo_switch_default.h>  // banjo-nx (2026-11-01): the shipped Switch defaults
+REXCVAR_DEFINE_BOOL(readback_memexport, BANJO_SWITCH_DEFAULT(false, true), "GPU",
                     "Enable CPU readback of shader memexport writes for guest memory "
                     "coherency (can reduce correctness issues, but may add GPU/CPU sync cost)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_BOOL(readback_memexport_fast, true, "GPU",
+REXCVAR_DEFINE_BOOL(readback_memexport_fast, BANJO_SWITCH_DEFAULT(false, true), "GPU",
                     "Use fast double-buffered memexport readback when possible, with "
                     "automatic fallback to full synchronous readback")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);

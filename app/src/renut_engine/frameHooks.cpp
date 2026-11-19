@@ -9,6 +9,7 @@
 #include "renut_engine/display_sync.h"  // banjo-nx (2026-10-19, latency batch 3)
 #include "banjo_switch_default.h"  // banjo-nx (2026-11-01): the shipped Switch defaults
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <string>
@@ -112,10 +113,18 @@ static HANDLE renutFrameTimer()
 }
 #endif
 
+// blur-nx (2026-11-18, the game menu; the base's port 178, in its katamari_keys.cpp there): the cap chosen in the
+// menu, from the next frame (-1: frame_cap's). The key itself stays as read (a string another thread would be
+// writing); the menu writes the player's file. banjo-nx (2026-11-19, the rebase): here, beside N&B's limiter.
+static std::atomic<int> g_frame_cap_live{-1};
+void BlurSetFrameCapLive(int fps) { g_frame_cap_live.store(fps < 0 ? 0 : fps, std::memory_order_relaxed); }
+
 // Resolve the cvar to a target FPS: 0 = uncapped, "Display" = monitor refresh
 // (queried once), otherwise the literal number.
 static int renutFrameCapFps()
 {
+	const int live = g_frame_cap_live.load(std::memory_order_relaxed);
+	if (live >= 0) return live;
 	const std::string& v = REXCVAR_GET(frame_cap);
 	if (v.empty() || v == "Off") return 0;
 	if (v == "Display") {
@@ -134,6 +143,7 @@ static int renutFrameCapFps()
 	}
 	return std::atoi(v.c_str());
 }
+int BlurFrameCapNow() { return renutFrameCapFps(); }  // the game menu's current cap (port 178)
 
 void renutFrameLimit()
 {
@@ -145,9 +155,19 @@ void renutFrameLimit()
 	const int fps = renutFrameCapFps();
 	if (fps <= 0) {
 		next = clock::now();  // uncapped: keep the baseline current for a clean re-enable
+		// pacman-nx (2026-11-03, pacman_vblank_display_sync, futari-nx's; the base's port 97, off by default): with no
+		// frame cap the display's refresh starts the game's next frame (display_sync.h).
+		static const bool pacing = banjo::display_sync::FramePacingOn();
+		if (pacing)
+			banjo::display_sync::WaitForFrameStart();  // counts itself as a game-thread wait (port 53)
 		banjo::profiler::RecordLimiterWait(0.0);
 		return;
 	}
+	// sa2-nx (2026-10-28, sa2_renut_queue_drain; in the base's limiter): this release a refresh later, once, when the
+	// display thread asks.
+	static const bool drain = banjo::display_sync::QueueDrainOn();
+	const bool hold = drain && banjo::display_sync::TakeHold();
+	constexpr uint64_t kRefreshNs = 16'666'667ull;
 	const clock::time_point waitStart = clock::now();
 	struct WaitRecorder {
 		clock::time_point start;
@@ -169,9 +189,11 @@ void renutFrameLimit()
 			return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count());
 		};
 		bool anchored = false;
-		const uint64_t release = banjo::display_sync::NextRelease(
+		uint64_t release = banjo::display_sync::NextRelease(
 			toNs(now), previousRelease,
 			uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(frameDur).count()), &anchored);
+		if (release && hold)
+			release += kRefreshNs;
 		if (release) {
 			previousRelease = release;
 			next = clock::time_point(std::chrono::duration_cast<clock::duration>(std::chrono::nanoseconds(release)));

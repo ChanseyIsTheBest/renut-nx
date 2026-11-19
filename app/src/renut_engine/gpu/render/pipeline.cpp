@@ -8,6 +8,7 @@
 #include <atomic>
 #include <bit>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -85,6 +86,11 @@ extern "C" char *fake_heap_end;  // banjo-nx (2026-10-28): libnx: the end of the
 #endif
 #endif
 
+// banjo-nx (2026-10-31, diagnostic): the pipelines of one pixel shader write no colour, so its draws vanish from the
+// picture (which draws a shader makes, on the PC where there is no GPU profile by shader).
+REXCVAR_DEFINE_STRING(banjo_renut_diag_skip_ps, "", "Banjo/Diagnostics",
+                      "Diagnostic: a pixel shader hash (16 hex digits); its pipelines write no colour")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_STRING(renut_pipeline_list, "pipeline_list.bin", "Nuts&Bolts/Graphics",
                       "The pipelines the renderer has built, which it builds ahead of use at the "
                       "next start (delete it to start over)");
@@ -404,6 +410,11 @@ std::unique_ptr<plume::RenderPipeline> Build(const PipelineKey &key, const Pipel
   for (uint32_t i = 0; i < key.color_count; ++i) {
     desc.renderTargetFormat[i] = key.color_formats[i];
     desc.renderTargetBlend[i] = BlendDesc(key.blend_control[i], key.color_mask >> (i * 4));
+  }
+  static const uint64_t skip_ps = std::strtoull(REXCVAR_GET(banjo_renut_diag_skip_ps).c_str(), nullptr, 16);
+  if (skip_ps && key.pixel_shader && static_cast<const ShaderCacheEntry *>(key.pixel_shader)->hash == skip_ps) {
+    for (uint32_t i = 0; i < key.color_count; ++i)
+      desc.renderTargetBlend[i].renderTargetWriteMask = 0;
   }
   desc.multisampling = plume::RenderMultisampling(plume::RenderSampleCounts(key.samples));
   // banjo-nx (banjo_renut_alpha_to_mask_test, 2026-10-18): not on a single-sample target, where the draw's shared
@@ -774,7 +785,21 @@ struct Job {
   bool released = false;
   // Its shaders the game has not made yet (PipelineShaderLoaded); queued at 0.
   u32 shaders_missing = 0;
+  // banjo-nx (2026-10-31): a draw asked for it (SpecialisedPipeline; it draws with the generic pipeline meanwhile):
+  // queued ahead of the list's jobs, and its variants are queued as a draw's (plume::Deko3DSetDrawVariants).
+  bool for_draw = false;
 };
+
+// banjo-nx (2026-11-01): a key with the draw's own vertex fetch words or patch kind (banjo_gpu_fetch_spec).
+bool FetchSpecialised(const PipelineKey &key) {
+  if (key.tess_kind)
+    return true;
+  for (const uint32_t w : key.fetch_types) {
+    if (w)
+      return true;
+  }
+  return false;
+}
 
 // banjo-nx (2026-10-28, the heap): the shared block for a layout, by its fields as the record has them.
 std::shared_ptr<const JobLayout> JobLayoutFor(const std::string &bytes, std::unique_ptr<JobLayout> fresh) {
@@ -1129,27 +1154,33 @@ void PrebuildWorker() {
     inputs.pixel_shader = PrebuildShader(static_cast<const ShaderCacheEntry *>(job.key.pixel_shader));
     inputs.layout = &job.layout->layout;
     const bool shaders = inputs.vertex_shader && (!job.key.pixel_shader || inputs.pixel_shader);
-    // banjo-nx (2026-11-01): a pipeline with the draw's own vertex fetch or patch kind (banjo_gpu_fetch_spec: here the terrain) is
-    // built with its own variants, compiled now on this thread (plume::Deko3DSetUrgentVariants); the draws use the generic
-    // pipeline meanwhile. Queued in the background, a console run might never get to it (banjo-nx: one variant every 30-40 s).
+    const bool for_draw = job.for_draw;
+    // banjo-nx (2026-11-01): a pipeline with the draw's own vertex fetch (banjo_gpu_fetch_spec: the water) is built with
+    // its own variants, compiled now on this thread (plume::Deko3DSetUrgentVariants); the draws use the generic pipeline
+    // meanwhile. Queued in the background, the console's first run never got to it: the uam thread compiles one
+    // variant every 30-40 s there (its rests), behind a backlog, and Nutty Acres' sea stayed at 18-19 ms.
     const bool urgent = FetchSpecialised(job.key);
     const auto build_start = std::chrono::steady_clock::now();
     lock.unlock();
 #if defined(PLUME_DEKO3D)
+    plume::Deko3DSetDrawVariants(for_draw);
     plume::Deko3DSetUrgentVariants(urgent);
 #endif
     std::unique_ptr<plume::RenderPipeline> pipeline = shaders ? Build(job.key, inputs) : nullptr;
 #if defined(PLUME_DEKO3D)
+    plume::Deko3DSetDrawVariants(false);
     plume::Deko3DSetUrgentVariants(false);
 #endif
     if (urgent) {
       const auto *vs_entry = static_cast<const ShaderCacheEntry *>(job.key.vertex_shader);
       const auto &t = job.key.fetch_types;
       RGPU_INFO("fetch spec (banjo_gpu_fetch_spec): VS {:016X}'s pipeline with patch kind {} and fetch types "
-                "{:X} {:X} {:X} {:X} (+1) {} in {} ms",
+                "{:X} {:X} {:X} {:X} (+1) {} in {} ms{}",
                 vs_entry ? vs_entry->hash : 0, job.key.tess_kind, t[0], t[1], t[2], t[3],
                 pipeline ? "built" : "FAILED",
-                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - build_start).count());
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - build_start)
+                    .count(),
+                for_draw ? ", for a draw" : ", from the list");
     }
     lock.lock();
     job.pipeline = std::move(pipeline);
@@ -1177,8 +1208,12 @@ void QueueOrWait(Job &job) {
       g_prebuild.waiting[entry].push_back(&job);
     }
   }
-  if (job.shaders_missing == 0)
-    g_prebuild.queue.push_back(&job);
+  if (job.shaders_missing == 0) {
+    if (job.for_draw)
+      g_prebuild.queue.push_front(&job);
+    else
+      g_prebuild.queue.push_back(&job);
+  }
 }
 
 // banjo-nx: the prebuild workers, started once (by the list at the start, or by the first specialised pipeline).
@@ -1210,10 +1245,19 @@ SpecState SpecialisedPipeline(const PipelineKey &key, uint64_t hash, const HostV
     if (std::memcmp(&j->key, &key, sizeof(key)) != 0)
       continue;
     if (j->stage != Job::Stage::Done) {
+      // banjo-nx (2026-10-31): a draw waits for it: ahead of the list's jobs (a listed one still queued moves to the
+      // front, once), its variants queued as a draw's. The emulator's first water run: the water's specialised vertex
+      // shader queued behind the list's background compiles and their rests, 6 minutes on the generic one.
+      const bool first_ask = !j->for_draw;
+      j->for_draw = true;
       if (j->released) {  // banjo-nx (2026-10-28): given back unused before; built again (generic meanwhile)
         j->released = false;
-        g_prebuild.queue.push_back(j);
+        g_prebuild.queue.push_front(j);
         StartWorkersLocked();
+        g_prebuild.work.notify_one();
+      } else if (first_ask && j->stage == Job::Stage::Pending && j->shaders_missing == 0) {
+        std::erase(g_prebuild.queue, j);
+        g_prebuild.queue.push_front(j);
         g_prebuild.work.notify_one();
       }
       return SpecState::Pending;
@@ -1236,6 +1280,7 @@ SpecState SpecialisedPipeline(const PipelineKey &key, uint64_t hash, const HostV
   job->key = key;
   job->hash = hash;
   Job *j = job.get();
+  j->for_draw = true;
   g_prebuild.jobs.push_back(std::move(job));
   jobs.push_back(j);
   QueueOrWait(*j);
@@ -1562,7 +1607,10 @@ void PipelineShaderLoaded(const ShaderCacheEntry *entry) {
   for (Job *job : it->second) {
     // A job the render thread claimed meanwhile is done with.
     if (--job->shaders_missing == 0 && job->stage == Job::Stage::Pending) {
-      g_prebuild.queue.push_back(job);
+      if (job->for_draw)
+        g_prebuild.queue.push_front(job);
+      else
+        g_prebuild.queue.push_back(job);
       queued = true;
     }
   }

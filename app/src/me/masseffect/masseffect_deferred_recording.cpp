@@ -29,7 +29,8 @@
 
 #include "../me_platform_compat.h"  // banjo-nx: banjo_deferred_core (RexSwitchPinCurrentThreadToCore)
 
-REXCVAR_DEFINE_BOOL(masseffect_native_deferred_recording, false, "Mass Effect",
+#include <rex/banjo_switch_default.h>  // banjo-nx (2026-11-01): the shipped Switch defaults
+REXCVAR_DEFINE_BOOL(masseffect_native_deferred_recording, BANJO_SWITCH_DEFAULT(true, false), "Mass Effect",
                     "Ring thread queues every vkCmd* call and a worker thread records them into the same command "
                     "buffers in the same order (moves NVK recording off the ring thread; same commands, same image)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -58,12 +59,12 @@ REXCVAR_DEFINE_BOOL(banjo_deferred_packets, true, "Banjo",
 // threadCreate with -2), core 0, where the main (UI) thread is pinned: the console test of 2026-10-14 ("slightly
 // worse") had the worker and the UI thread sharing one core while the ring floated. With banjo_ring_core on core 1,
 // the worker is pinned to its own core here.
-REXCVAR_DEFINE_INT32(banjo_deferred_core, 2, "Banjo",
+REXCVAR_DEFINE_INT32(banjo_deferred_core, BANJO_SWITCH_DEFAULT(0, 2), "Banjo",
                      "masseffect_native_deferred_recording: the worker thread is pinned to this core (-1 = left "
                      "where it was created)")
     .range(-1, 2)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(masseffect_deferred_native_fast, false, "Mass Effect",
+REXCVAR_DEFINE_BOOL(masseffect_deferred_native_fast, BANJO_SWITCH_DEFAULT(true, false), "Mass Effect",
                     "Queue: the producer publishes commands in batches (masseffect_deferred_native_batch) instead "
                     "of one seq_cst store + wake check per command, keeps its own copy of the worker's read index "
                     "and the worker stores it every 16 commands (less cache line ping-pong between the cores). "
@@ -81,7 +82,7 @@ REXCVAR_DEFINE_BOOL(banjo_diag_vk_calls, false, "Banjo",
                     "masks include MEMORY_READ / MEMORY_WRITE: on NVK a full cache flush, ALL_COMMANDS stages) and "
                     "render passes by their depth and colour load and store operations. Changes no command")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(masseffect_deferred_native_update, false, "Mass Effect",
+REXCVAR_DEFINE_BOOL(masseffect_deferred_native_update, BANJO_SWITCH_DEFAULT(true, false), "Mass Effect",
                     "vkUpdateDescriptorSets is queued too (its write arrays deep-copied into the arena) instead of "
                     "draining the worker (~70 drains per frame, each a spin-yield of the ring thread). The update runs "
                     "on the worker at the same position of the command stream; every submit, destroy and reset still "

@@ -129,7 +129,8 @@ REXCVAR_DEFINE_BOOL(banjo_gpu_zcull_greater, false, "Banjo/Enhancements",
                     "(NVK_ZCULL=greater), the one Banjo's reversed-depth scene can use. Culling is conservative, so "
                     "the picture should be the same; false = the driver's default direction (less)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_STRING(banjo_shader_misses, "", "Nuts&Bolts/Graphics",
+#include <rex/banjo_switch_default.h>  // banjo-nx (2026-11-01): the shipped Switch defaults
+REXCVAR_DEFINE_STRING(banjo_shader_misses, BANJO_SWITCH_DEFAULT("sdmc:/switch/banjo-nx/shader_misses", ""), "Nuts&Bolts/Graphics",
                       "Folder where the native renderer writes each shader it cannot identify (raw microcode, once), "
                       "to add them to banjo_shaders.mesp later; empty = off (MASSEFFECT_SHADER_DISCOVERY overrides)");
 REXCVAR_DEFINE_INT32(banjo_renderdoc_capture_s, 0, "Nuts&Bolts/Graphics",
@@ -214,7 +215,7 @@ REXCVAR_DEFINE_BOOL(masseffect_native_edram4_several_rect, true, "Mass Effect",
                     "Native renderer: auto-index rect lists of 2..8 rectangles (D3D Clear of several regions) are "
                     "proven per rectangle, so mode 4 skips the transfers they overwrite. false = only single rects")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(masseffect_renderer_native, false,  /* banjo-nx: off until it draws Banjo correctly */ "Mass Effect",
+REXCVAR_DEFINE_BOOL(masseffect_renderer_native, BANJO_SWITCH_DEFAULT(true, false),  /* banjo-nx: off until it draws Banjo correctly */ "Mass Effect",
                     "Switch: use the native renderer (true) or ReXGlue's Xenos emulation (false, needs "
                     "gpu_plugin = \"xenos\")")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -255,22 +256,22 @@ REXCVAR_DEFINE_BOOL(masseffect_native_edram4_overwrite, true, "Mass Effect",
                     "overwrites completely (depth ALWAYS without stencil, or opaque full-mask color)");
 // Ring-thread CPU switches: every one keeps the old path and checks itself against it for the first
 // masseffect_native_verify_n uses (a DIFFERENCE line in the log and the old path for the rest of the session).
-REXCVAR_DEFINE_BOOL(masseffect_native_flat_identity, false, "Mass Effect",
+REXCVAR_DEFINE_BOOL(masseffect_native_flat_identity, BANJO_SWITCH_DEFAULT(true, false), "Mass Effect",
                     "Ring: shader identity checks (VS fetch-patch match, PS microcode match) memoized in small "
                     "direct-mapped tables keyed by (library entry, load generation) instead of an unordered_map and a "
                     "word-by-word compare per use; exact (pure function of the loaded microcode and the entry)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(masseffect_native_fast_pair, false, "Mass Effect",
+REXCVAR_DEFINE_BOOL(masseffect_native_fast_pair, BANJO_SWITCH_DEFAULT(true, false), "Mass Effect",
                     "Ring: draw/record pairing without the cold cache lines and locks: record start addresses in a "
                     "compact array (the best record of a packet is found in two 32-byte rows), object -> library entry "
                     "through a lock-free table, no draw-queue mutex per unpaired draw, prefetch while draining")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(masseffect_native_raw_microcode, false, "Mass Effect",
+REXCVAR_DEFINE_BOOL(masseffect_native_raw_microcode, BANJO_SWITCH_DEFAULT(true, false), "Mass Effect",
                     "Ring: IM_LOAD of the same address and size as the last load of that stage compares the guest "
                     "words against a raw copy of the last load (one memcmp) instead of byte-swapping them first; "
                     "exact (the swap is a bijection)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(masseffect_native_pm4_fast, false, "Mass Effect",
+REXCVAR_DEFINE_BOOL(masseffect_native_pm4_fast, BANJO_SWITCH_DEFAULT(true, false), "Mass Effect",
                     "Ring: runs of constant/fetch register writes (type 0, SET_CONSTANT2/SET_SHADER_CONSTANTS, "
                     "LOAD_ALU_CONSTANT) are byte-swapped, compared and stored four words at a time with NEON "
                     "straight from the guest words; same register contents and generation bumps")

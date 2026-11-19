@@ -337,10 +337,10 @@ bool UnmapFileView(FileMappingHandle handle, void* base_address, size_t length) 
 // kameo-nx (2026-11-05): at the end of the file, so that the other functions keep their PGO profile.
 REXCVAR_DEFINE_BOOL(banjo_window_blocks, true, "Banjo/Switch",
                     "The guest window on a 2 MB boundary, so that the kernel can use 2 MB blocks for the game's memory. "
-                    "false: anywhere, on 4 KB pages, as in version 1.0.0");
+                    "false: anywhere, on 4 KB pages, as in version 1.0.1");
 REXCVAR_DEFINE_BOOL(banjo_code_blocks, true, "Banjo/Switch",
                     "The NRO's code and read-only data on 2 MB blocks (ui/switch_code_blocks.cpp, which reads this key "
-                    "from katamari.toml itself, because it runs before the cvars). false: on 4 KB pages, as in version 1.0.0");
+                    "from renut.toml itself, because it runs before the cvars). false: on 4 KB pages, as in version 1.0.1");
 
 bool RexWindowBlocksOn() { return REXCVAR_GET(banjo_window_blocks); }
 

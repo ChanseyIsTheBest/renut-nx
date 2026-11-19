@@ -453,6 +453,38 @@ def pass_tess(text):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
+# pass: fetchspec — the generic fetch's bound element types as specialization constants 920-923
+
+FETCH_WORDS = ['g_UboShared.v[%du].w' % (66 + k) for k in range(4)]
+
+
+def pass_fetchspec(text):
+    """banjo-nx (banjo_gpu_fetch_spec, 2026-10-31): the type words of the first four bound fetches
+    (SharedConstants.bound_fetch[k][3], rows 66-69: the format in bits 0-5, signed in bit 8, integer in bit 9) as
+    specialization constants 920-923, each the word + 1 (0: read at run time). render/pipeline.cpp gives them to a
+    tessellated draw's pipeline from its key (render/draw.cpp FetchSpecWords, the draw's own words): the generic fetch's
+    switch over fifteen formats becomes one format's decode. The water's vertex shader (vs_F09B139EE9188255) with 904:
+    2,494 -> 411 instructions. Only the eight vertex shaders with the generic fetch read these rows."""
+    if FETCH_WORDS[0] not in text or 'g_DkAddressWindow' not in text:
+        return text
+    span = main_span(text)
+    if not span:
+        return text
+    a, b = span
+    body = text[a:b]
+    decl = ''
+    for k, word in enumerate(FETCH_WORDS):
+        if word not in body:
+            continue
+        body = body.replace(word, 'DK_FETCH_TYPE%d' % k)
+        c = 920 + k
+        decl += (f'#ifndef SPIRV_CROSS_CONSTANT_ID_{c}\n#define SPIRV_CROSS_CONSTANT_ID_{c} 0u\n#endif\n'
+                 f'const uint g_banjoFetchType{k} = SPIRV_CROSS_CONSTANT_ID_{c};\n'
+                 f'#define DK_FETCH_TYPE{k} ((g_banjoFetchType{k} != 0u) ? (g_banjoFetchType{k} - 1u) : {word})\n')
+    return insert_before_main(text[:a] + body + text[b:], decl)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 # pass: vsout — the vertex shader's outputs the pixel shader reads, as specialization constant 905
 
 VSOUT_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_905\n#define SPIRV_CROSS_CONSTANT_ID_905 4294967295u\n#endif\n'
@@ -2668,32 +2700,8 @@ def pass_skinonce(text, name=None):
     return insert_before_main(text, SKIN_DECL)
 
 
-FETCH_WORDS = ['g_UboShared.v[%du].w' % (66 + k) for k in range(4)]
-
-
-def pass_fetchspec(text):
-    """banjo-nx (banjo_gpu_fetch_spec, 2026-10-31; vivapinata-nx 2026-11-03): the type words of the first four bound fetches
-    (SharedConstants.bound_fetch[k][3], rows 66-69: the format in bits 0-5, signed in bit 8, integer in bit 9) as
-    specialization constants 920-923, each the word + 1 (0: read at run time). render/pipeline.cpp gives them to a
-    tessellated draw's pipeline from its key (render/draw.cpp FetchSpecWords, the draw's own words): the generic fetch's
-    switch over fifteen formats becomes one format's decode."""
-    if FETCH_WORDS[0] not in text or 'g_DkAddressWindow' not in text:
-        return text
-    span = main_span(text)
-    if not span:
-        return text
-    a, b = span
-    body = text[a:b]
-    decl = ''
-    for k, word in enumerate(FETCH_WORDS):
-        if word not in body:
-            continue
-        body = body.replace(word, 'DK_FETCH_TYPE%d' % k)
-        c = 920 + k
-        decl += (f'#ifndef SPIRV_CROSS_CONSTANT_ID_{c}\n#define SPIRV_CROSS_CONSTANT_ID_{c} 0u\n#endif\n'
-                 f'const uint g_banjoFetchType{k} = SPIRV_CROSS_CONSTANT_ID_{c};\n'
-                 f'#define DK_FETCH_TYPE{k} ((g_banjoFetchType{k} != 0u) ? (g_banjoFetchType{k} - 1u) : {word})\n')
-    return insert_before_main(text[:a] + body + text[b:], decl)
+# banjo-nx (2026-11-19, the rebase): the base's pass_fetchspec (vivapinata-nx's copy of banjo-nx's) was here; the
+# same code as banjo-nx's above.
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -3225,7 +3233,7 @@ DEFAULT = ','.join(name for name, _ in PASSES if name not in ('scale1', 'fragsca
 # vivapinata-nx (2026-11-12): samplerk, plainfetch, fetchconv, onex and onexsize act on both stages (vertex shaders'
 # fetches through constant 975, render/draw.cpp SasrtPlainFetchMask's vs_entry).
 STAGE_OF = {'earlykill': 'frag', 'noearly': 'frag', 'facesign': 'frag', 'clipspec': 'vert', 'nofxaa': 'frag',
-            'vsepi': 'vert', 'expwin': 'vert', 'expparts': 'vert', 'stack3d': 'frag', 'fetchendian': 'vert', 'expfmt': 'vert', 'skinonce': 'vert', 'bonesel': 'vert', 'aw4': 'vert', 'lightbranch': 'frag', 'nullps': 'frag', 'gpr32': 'frag', 'earlyz': 'frag', 'txq': 'frag', 'alpha': 'frag', 'alphamask': 'frag', 'earlyhoist': 'frag', 'tess': 'vert', 'vsout': 'vert', 'vszero': 'vert', 'pszero': 'frag'}
+            'vsepi': 'vert', 'expwin': 'vert', 'expparts': 'vert', 'stack3d': 'frag', 'fetchendian': 'vert', 'expfmt': 'vert', 'skinonce': 'vert', 'bonesel': 'vert', 'aw4': 'vert', 'lightbranch': 'frag', 'nullps': 'frag', 'gpr32': 'frag', 'earlyz': 'frag', 'txq': 'frag', 'alpha': 'frag', 'alphamask': 'frag', 'earlyhoist': 'frag', 'tess': 'vert', 'fetchspec': 'vert', 'vsout': 'vert', 'vszero': 'vert', 'pszero': 'frag'}
 STAGE_OF['invariant'] = 'vert'  # dishonored-nx (port 100)
 STAGE_OF['clamp7e3'] = 'frag'  # dishonored-nx (port 106)
 
