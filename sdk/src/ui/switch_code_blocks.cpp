@@ -1,6 +1,5 @@
 /*
- * kameo-nx (2026-11-05): the NRO's code and read-only data on 2 MB blocks. renut-nx 1.0.2 (2026-11-05): from kameo-nx 1.0.1,
- * with this port's settings file.
+ * kameo-nx (2026-11-05): the NRO's code and read-only data on 2 MB blocks.
  *
  * The idea and its measurements come from the Torchlight port (src/torchlight_code_blocs.cpp there, which was not
  * available here: this is written from its description). There, instruction fetches away from the TLB cost +115 ns
@@ -23,12 +22,12 @@
  *    exit is __nx_applet_exit_mode 1 and __libnx_exit (windowed_app_main_switch.cpp, rex_app.cpp).
  *
  * The cost: the loader's copy can't be given back (it's in the middle of the heap, with .data after it), so the text and
- * read-only data take their size again in memory, about 74 MB in renut-nx.
+ * read-only data take their size again in memory, about 60 MB.
  *
  * An emulator runs NROs without a loader, as CodeStatic memory, which can't be unmapped. There the code stays where it is
  * and the swap is tested on pages of its own instead.
  *
- * banjo_code_blocks = false in renut.toml turns it off. The cvars aren't read yet, so this looks at the file itself; the
+ * banjo_code_blocks = false in katamari.toml turns it off. The cvars aren't read yet, so this looks at the file itself; the
  * cvar is in guest_memory_switch.cpp, so the key is known. The built-in defaults can't turn it off.
  */
 #if defined(__SWITCH__)
@@ -192,7 +191,7 @@ bool TurnedOffInToml() {
   const char* bar = strrchr(nro, '/');
   if (!bar) return false;
   char path[FS_MAX_PATH];
-  const int n = snprintf(path, sizeof(path), "%s%.*srenut.toml", strchr(nro, ':') ? "" : "sdmc:",
+  const int n = snprintf(path, sizeof(path), "%s%.*skatamari.toml", strchr(nro, ':') ? "" : "sdmc:",
                          static_cast<int>(bar - nro + 1), nro);
   if (n <= 0 || static_cast<size_t>(n) >= sizeof(path)) return false;
   FILE* f = fopen(path, "r");

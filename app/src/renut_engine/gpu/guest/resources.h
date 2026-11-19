@@ -13,6 +13,7 @@
 
 #include "renut_engine/gpu/d3d/d3d.h"
 #include "renut_engine/gpu/guest/guest_records.h"
+#include "renut_engine/gpu/render/fetch_filters.h"  // port 145
 #include "renut_engine/gpu/render/vertex_format.h"
 #include "shader_cache.h"
 
@@ -47,6 +48,7 @@ struct ShaderRecord {
 
   uint64_t hash = 0;
   const ShaderCacheEntry *entry = nullptr;  // nullptr: not in the cache (captured)
+  u32 fetch_3d_mask = 0;  // kameo-nx (2026-11-03): the slots its microcode reads through tfetch3D (Fetch3DMask, d3d/hooks/shader.cpp)
   // banjo-nx (2026-10-23, render-thread round): what every draw reads, together in the record's first lines (the host
   // shader, the summary and the specialised bools were in its fourth to sixth lines, past the stride arrays). The
   // host shader is built on first use by a pipeline, under host_mutex (below).
@@ -62,9 +64,12 @@ struct ShaderRecord {
   // banjo-nx (2026-10-28, ARM audit): both pointers on the record's first two lines (they were on its fourth, past the
   // summary and the bool masks, which no prefetch took: a miss at most shader changes, 1 % of the render thread in the
   // c4 console run; N&B makes a shader object per mesh). Their strides stay below.
-  std::unique_ptr<VertexDeclarationRecord> bound_declaration;
+  std::shared_ptr<VertexDeclarationRecord> bound_declaration;  // halo3-nx: shared with its binding (ApplyBindingLocked)
   std::unique_ptr<VertexDeclarationRecord> fetch_declaration;
   bool fetch_declaration_built = false;  // (2026-10-28, cache-miss audit 2: beside its pointer, from the sixth line)
+  // vivapinata-nx (2026-11-03, the white bird): the vertex shader's export mode is multipass (its header's program control word,
+  // 7 in bits 24-26): its outputs are ignored and every primitive killed, so its draw only exports to memory.
+  bool export_only = false;
   // banjo-nx (2026-10-23, render-thread round): what every draw used to look up in memos keyed by the cache entry
   // (render/draw.cpp DrawSummaryOf): the float constant groups the shader reads (GroupSummary), whether it exports
   // (GatherMemExportStreams), whether an input is fetched by another index (DescribeBoundFetches). Made at the shader's
@@ -99,9 +104,15 @@ struct ShaderRecord {
   // The bound declaration's per-stream strides in bytes, used where SetStreamSource was given a zero stride (keep the
   // bound one); the fetch declaration's.
   u32 bound_strides[d3d::kMaxStreams] = {};
+  u32 applied_binding = 0;  // halo3-nx (2026-11-03): the binding these are (ApplyBindingLocked)
   u32 fetch_strides[d3d::kMaxStreams] = {};
 
   std::mutex host_mutex;  // building host
+
+  // renut-ultimate (2026-11-16, port 145; tw2de_nx's): its texture fetches' own filters (render/fetch_filters.h),
+  // read from the microcode when made; used with banjo_renut_fetch_filters (off by default). At the end: the fields
+  // every draw reads stay in the record's first lines.
+  FetchFilterOverrides fetch_filters;
 
   bool pixel() const { return kind == RecordKind::PixelShader; }
 };
@@ -126,6 +137,16 @@ void PrefetchShaderBehind(u32 shader_va);
 // Drops the host side of an in-place guest shader object, if it has one.
 // Requires State().mutex.
 void ReleaseGuestShaderLocked(u32 shader_va);
+
+// blur-nx (2026-11-13, #13's fix, banjo_renut_deferred_narrow): the cache entry of the in-place shader of 'kind' last
+// registered at 'shader_va' (XGRegisterVertexShader/PixelShader), for a capture made on a game thread (the render
+// thread's own map, FindShaderLocked's, is not read there). False when no such shader is registered there; '*entry' is
+// null when the shader cache lacks it. ForgetInPlaceShader: the object's D3DResource_Destroy. Either is called after
+// the render-thread item that makes the same change to the render thread's map is queued, so a capture that sees the
+// change is queued after that item.
+bool InPlaceShaderEntry(u32 shader_va, RecordKind kind, const ShaderCacheEntry **entry);
+void ForgetInPlaceShader(u32 shader_va);
+void NoteInPlaceShader(u32 shader_va, RecordKind kind, const ShaderCacheEntry *entry);  // RegisterGuestShader's
 
 // Fills a declaration's host input layout and layout hash from its elements.
 void BuildDeclarationLayout(VertexDeclarationRecord &declaration);

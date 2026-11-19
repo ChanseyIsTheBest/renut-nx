@@ -119,6 +119,10 @@ bool RexGmCommit(size_t offset, size_t length, RexGmAccess access);
 /* The reverse. Frees the backing. */
 bool RexGmDecommit(size_t offset, size_t length);
 
+/* Zero a range through the committed chunks' RW aliases, leaving view protections alone (peggle2-nx: decommit and
+ * release semantics, see memory_switch.cpp). */
+bool RexGmZero(size_t offset, size_t length);
+
 /*
  * Maps into the window the chunk that covers window_address, and only in the
  * view that address belongs to. Chunks are not mapped when they are committed:
@@ -163,6 +167,9 @@ void* RexGmShadowFor(uint64_t window_address);
 
 /* Bytes of backing committed right now. For diagnostics. */
 size_t RexGmCommittedBytes(void);
+/* sasrt-nx (2026-11-09 night; port 58): the backing committed and its chunks, and the bytes decommits asked for
+ * against those they freed (a chunk goes only when a decommit covers all of it). For the memory report. */
+void RexGmDecommitFigures(size_t* committed, size_t* chunks, size_t* asked, size_t* freed);
 
 /* Number of committed chunks (each is a code alias and up to one mapping per view). */
 size_t RexGmChunkCount(void);
@@ -194,6 +201,12 @@ int RexGmProtectionMode(void);
  * it stopped.
  */
 uint32_t RexGmLastResult(void);
+
+/* port 56 (mk9-nx's boot-hang fallbacks): the waits of 100 ms for the kernel's memory blocks (RexGmCommit), the
+ * chunks FaultIn mapped page by page, the unmaps done page by page and their failed pages, and the result of the first
+ * chunk map that failed (1 when it was none recorded). memory_switch.cpp logs them when they change. */
+void RexGmFallbacks(uint64_t* block_retries, uint64_t* pagewise_maps, uint64_t* unmap_fallbacks,
+                    uint64_t* unmap_page_failures, uint32_t* first_map_failure);
 
 #define REX_GM_ERR_NOMEM    0xFFFF0001u  /* memalign of the backing store failed */
 #define REX_GM_ERR_NOCODEVA 0xFFFF0002u  /* no free space left in the code region */

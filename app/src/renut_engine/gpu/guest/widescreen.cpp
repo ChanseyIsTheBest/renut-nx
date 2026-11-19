@@ -220,6 +220,10 @@ thread_local bool t_placing_marker = false;
 } // namespace
 
 uint32_t GuestScreenWidth() {
+#if !KATAMARI_BANJO_ADDRESS_HOOKS
+  // katamari-nx: N&B's widescreen hooks (below) are not built for Beautiful Katamari: its screen stays 1280 wide.
+  return kNativeWidth;
+#endif
   uint32_t width = g_screen_width.load(std::memory_order_acquire);
   if (width)
     return width;
@@ -238,6 +242,9 @@ uint32_t GuestScreenWidth() {
 
 using namespace renut::gpu;
 
+// katamari-nx (2026-10-30): the hooks below are N&B's game functions (its screen size, pools, cameras, XUI): their
+// addresses are other code in Beautiful Katamari. Not built (KATAMARI_BANJO_ADDRESS_HOOKS 0).
+#if KATAMARI_BANJO_ADDRESS_HOOKS
 // void sub_823BB7C0(int query, int *mode, DWORD *width, DWORD *height,
 //                   BOOL *hidef): the screen size for the video mode, 1280x720
 // for every HD mode. Widened here.
@@ -341,3 +348,4 @@ BANJO_RENUT_HOOK_RAW(sub_82235C88) {
   }
   __imp__sub_82235C88(ctx, base);
 }
+#endif  // KATAMARI_BANJO_ADDRESS_HOOKS

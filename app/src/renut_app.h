@@ -15,10 +15,12 @@
 #include "renut_engine/Timer.h"
 #include "renut_engine/Fps.h"
 #include "renut_engine/hooks.h"
-#include "renut_engine/title_update.h"  // banjo-nx (2026-10-29): title update 3
-#include "renut_engine/dlc_install.h"   // banjo-nx (2026-10-29): reNut upstream's DLC installer
+// katamari-nx: N&B's title update is not part of this port (Beautiful Katamari has no title update in the user's
+// files). The DLC installer is (2026-10-31, the user's 16 DLC packages): reNut upstream's, game-agnostic.
+#include "renut_engine/dlc_install.h"
 #include "profiler/profiler.h"
 #include "profiler/profiler_overlay.h"
+#include "game_menu.h"  // blur-nx (2026-11-18): the game menu (A+B+X+Y+L+R, F8)
 #include "me/me_native_system.h"
 // banjo-nx (2026-10-16): Renut's Direct3D-level renderer, the boot choice banjo_renderer = "renut"
 // (app/src/renut_engine/gpu, tools/renut_gpu_import.py, docs/renut-renderer-port.md).
@@ -28,6 +30,15 @@
 #include "renut_engine/gpu/banjo_renut_capture.h"
 #endif
 #include "cpu/banjo_enhancements.h"
+#if defined(KATAMARI_BUILTIN_CONFIG)
+#include "katamari_builtin_config.h"  // generated from app/katamari_switch_defaults.toml and katamari_switch.toml (CMake)
+#endif
+namespace katamari::stage_diag {
+void Start();  // src/cpu/katamari_stage_diag.cpp
+}
+namespace blur::small_alloc {
+void Enable();  // blur-nx (2026-11-17, #220; renut-ultimate port 151): src/blur_small_alloc.cpp, after setup
+}
 #include "native/nfsmw_nativo_captura.h"
 #if !REX_PLATFORM_SWITCH
 #include "profiler/nfsmw_perfil_pc.h"
@@ -62,7 +73,26 @@ public:
 
     static std::unique_ptr<rex::ui::WindowedApp> Create(
         rex::ui::WindowedAppContext& ctx) {
+        // katamari-nx: banjo-nx's name, so its config is renut.toml (the built-in config's build: OnConfigurePaths).
         return std::unique_ptr<RenutApp>(new RenutApp(ctx, "renut", PPCImageConfig));
+    }
+
+    // katamari-nx (2026-11-02, sa2-nx's design): the Switch build's fixed settings, compiled in and applied before
+    // katamari.toml, which holds only the player's options (a key added there still overrides these: test runs).
+    std::string_view BuiltInConfig() const override {
+#if defined(KATAMARI_BUILTIN_CONFIG)
+        return kKatamariBuiltInConfig;
+#else
+        return {};
+#endif
+    }
+    // Without a katamari.toml next to the NRO, the player's default one is written there.
+    std::string_view DefaultConfigFile() const override {
+#if defined(KATAMARI_BUILTIN_CONFIG)
+        return kKatamariPlayerConfig;
+#else
+        return {};
+#endif
     }
 
 
@@ -80,7 +110,16 @@ public:
     //     rex::cvar::LoadConfig("renut.toml");
     // }
 
+    // blur-nx (2026-11-18): the game menu's fonts (the console's own shared font) in the SDK drawer's atlas.
+    void OnConfigureFonts(ImFontAtlas* atlas) override { blur::AddGameMenuFonts(atlas); }
+
     void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
+#if BANJO_RENUT_RENDERER
+        // katamari-nx (2026-11-01): the app's dialogs draw with the ImGui inside this executable, whose context only
+        // Renut's overlay drawer creates; under the SDK's presenter (banjo_renderer = "emulated") they would draw into
+        // no context at all. The emulated GPU is a reference image: no overlays.
+        if (!banjo::renut_gpu::Active()) return;
+#endif
         //drawer->AddDialog(new FpsOverlayDialog(drawer));
         fps_dialog_ = std::make_unique<FpsOverlayDialog>(drawer);
         fps_dialog_->fpsManager = &fpsManager;
@@ -90,6 +129,10 @@ public:
         // CPU/GPU profiler window ported from UnleashedRecomp (F5 / banjo_show_profiler).
         profiler_dialog_ = std::make_unique<ProfilerOverlayDialog>(drawer);
         drawer->AddDialog(profiler_dialog_.get());
+        // blur-nx (2026-11-18, the user's request): the game menu. Attached for good (its constructor adds it), it
+        // asks for no ImGui frame while closed (WantsFrame), so the drawer builds none for it then.
+        game_menu_ = std::make_unique<blur::GameMenuDialog>(drawer, config_path(), [this] { return runtime(); },
+                                                            [this] { return immediate_drawer(); });
 #if !REX_PLATFORM_SWITCH
         path_wizard_ = new PathSetupWizard(drawer);
         drawer->AddDialog(path_wizard_);
@@ -178,15 +221,16 @@ public:
 #endif
 
     void OnPostSetup() override {
-        // banjo-nx (2026-10-29): DLC packages in the "dlc" folder next to banjo-nx installed before the game starts
-        // (reNut upstream's installer, renut_engine/dlc_install.cpp).
+        // blur-nx (2026-11-17, #220; renut-ultimate port 151): the small-block arena, blur_small_alloc_mb (32 MB by
+        // default, Blur's size; 0 in a game's toml turns it off). Before the DLC install, as Blur has it.
+        blur::small_alloc::Enable();
+        // katamari-nx (2026-10-31): DLC packages in the "dlc" folder next to the NRO / exe installed before the game
+        // starts (reNut upstream's installer, renut_engine/dlc_install.cpp, as banjo-nx does).
         renut::dlc::InstallPackages(runtime());
-        // renut-nx (2026-11-02): the language key (renut_engine/title_update.h).
-        banjo::title_update::ApplyLanguage();
-        // banjo-nx (2026-10-30): 1.0.0's font and dialogue boxes, when asked for (renut_engine/title_update.h).
-        banjo::title_update::ApplyStyleOptions();
         // One log line with every enhancement and whether it is active (src/cpu/banjo_enhancements.h).
         banjo::LogEnhancements();
+        // katamari-nx (2026-11-01): katamari_diag_game_state (off): the stage fields of the game state, as they change.
+        katamari::stage_diag::Start();
         // PC: function-level CPU profile (banjo_pc_profile_s = N seconds per report; 0 = off; from futari-nx).
         banjo::pc_profiler::Start();
         // Switch: per-thread CPU accounting, the optional sampler and the stall watchdog.
@@ -232,10 +276,13 @@ public:
     }
 
     // A game_root folder next to the executable is used when no path was given.
-    // On the Switch that is sdmc:/switch/banjo-nx/game_root (the extracted disc).
-    // banjo-nx (2026-10-29): then title update 3's update folder and its default.xexp check
-    // (renut_engine/title_update.h), and the user data folder the DLC installer looks in.
+    // On the Switch that is sdmc:/switch/katamari-nx/game_root (the extracted disc).
     void OnConfigurePaths(rex::PathConfig& paths) override {
+#if defined(KATAMARI_BUILTIN_CONFIG)
+        // The player's settings file. Not renut.toml: the test builds' full one, left on an SD card, would override
+        // every built-in setting.
+        paths.config_path = rex::filesystem::GetExecutableFolder() / "katamari.toml";
+#endif
         if (paths.game_data_root.empty()) {
             const auto folder = rex::filesystem::GetExecutableFolder();
             std::error_code ec;
@@ -244,8 +291,7 @@ public:
                 paths.game_data_root = extracted;
             }
         }
-        banjo::title_update::ConfigurePaths(paths);
-        renut::dlc::SetUserDataRoot(paths.user_data_root);
+        renut::dlc::SetUserDataRoot(paths.user_data_root);  // the folder the DLC installer checks for installed ones
     }
 
 #if !REX_PLATFORM_SWITCH
@@ -254,9 +300,21 @@ public:
         std::function<void(rex::PathConfig)> resume) override
     {
         StartRenutRenderer();
+        // renut-ultimate (port 69, 2026-11-10, blur-nx): with no saved paths, a game folder given on the command line or
+        // in the toml (or the game_root next to the executable) that holds default.xex is used as given, with no wizard.
+        // Before, a new port's first PC run waited for a click on the path dialog, which looked like a hang right after
+        // the swapchain was made. Saved paths still come first, as the wizard takes them (a player's own folders).
+        std::error_code given_ec;
+        const bool given = !defaults.game_data_root.empty() &&
+                           std::filesystem::is_regular_file(defaults.game_data_root / "default.xex", given_ec) &&
+                           !PathConfigStore::TryLoad(app_name_);
+        if (!path_wizard_ || given) {
+            // katamari-nx (2026-11-01): banjo_renderer = "emulated" creates no app dialogs (OnCreateDialogs), so no
+            // wizard: the paths as given (the command line / the toml).
+            renut::dlc::SetUserDataRoot(defaults.user_data_root);
+            return rex::ReXApp::OnFinalizePaths(defaults, std::move(resume));
+        }
         path_wizard_->Init(app_name_, defaults, [resume](rex::PathConfig resolved) {
-            // banjo-nx (2026-10-29): the wizard's game folder (the PC) gets the update folder and its check too.
-            banjo::title_update::ConfigurePaths(resolved);
             renut::dlc::SetUserDataRoot(resolved.user_data_root);
             resume(resolved);
             });
@@ -280,4 +338,5 @@ private:
 #endif
     std::unique_ptr<FpsOverlayDialog> fps_dialog_;
     std::unique_ptr<ProfilerOverlayDialog> profiler_dialog_;
+    std::unique_ptr<blur::GameMenuDialog> game_menu_;  // blur-nx (2026-11-18)
 };

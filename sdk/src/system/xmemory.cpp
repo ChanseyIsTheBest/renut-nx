@@ -43,6 +43,16 @@ REXCVAR_DEFINE_BOOL(protect_on_release, false, "Memory",
 
 REXCVAR_DEFINE_BOOL(scribble_heap, false, "Memory", "Scribble 0xCD into all allocated heap memory");
 
+// blur-nx (2026-11-17, CG-08): the indirect call sites' caches (tools/indirect_calls.py). The section's bounds come from
+// the linker (weak: a build without generated code has no such section); the flag says a word was filled since.
+extern "C" {
+unsigned char g_rex_site_cache_dirty = 0;
+#if defined(__SWITCH__)
+extern uint64_t __start_rex_site_cache[] __attribute__((weak));
+extern uint64_t __stop_rex_site_cache[] __attribute__((weak));
+#endif
+}
+
 namespace rex::memory {
 
 uint32_t get_page_count(uint32_t value, uint32_t page_size, uint32_t page_size_shift) {
@@ -1022,6 +1032,14 @@ bool Memory::SetFunction(uint32_t guest_address, PPCFunc* host_function) {
   }
   auto* slot = TranslateVirtual<PPCFunc**>(table_address);
   *slot = host_function;
+#if defined(__SWITCH__)
+  // blur-nx (2026-11-17, CG-08): the indirect call sites' one-entry caches (tools/indirect_calls.py, section
+  // rex_site_cache) may hold the old function: emptied, when any was filled since the last time.
+  if (__atomic_load_n(&g_rex_site_cache_dirty, __ATOMIC_RELAXED)) {
+    __atomic_store_n(&g_rex_site_cache_dirty, 0, __ATOMIC_RELAXED);
+    for (uint64_t* p = __start_rex_site_cache; p < __stop_rex_site_cache; ++p) __atomic_store_n(p, 0, __ATOMIC_RELAXED);
+  }
+#endif
   return true;
 }
 
@@ -1645,6 +1663,20 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t 
          base_page_number -= page_scan_stride) {
       if (page_table_[base_page_number].state != 0) {
         // Base page not free, skip to next usable page.
+        // mk9-nx (2026-10-26; port 56): past the whole region it belongs to, to the highest base whose range ends below
+        // the region (every base above it has a range that holds the region's first page, so the stride-by-stride scan
+        // ends at the same address): a match load's physical allocations stepped through tens of thousands of used
+        // pages each (the worst load frame 880 -> 350 ms on mk9-nx's console).
+        const PageEntry& used = page_table_[base_page_number];
+        if (used.region_page_count && used.base_address <= base_page_number &&
+            base_page_number < int64_t(used.base_address) + used.region_page_count) {
+          int64_t next = int64_t(used.base_address) - int64_t(page_count);
+          if (next < int64_t(low_page_number)) {
+            break;
+          }
+          next -= next % page_scan_stride;
+          base_page_number = next + page_scan_stride;  // cancel out loop logic
+        }
         continue;
       }
       // Check requested range to ensure free.
@@ -1683,6 +1715,18 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t 
          base_page_number += page_scan_stride) {
       if (page_table_[base_page_number].state != 0) {
         // Base page not free, skip to next usable page.
+        // mk9-nx (2026-10-26; port 56): past the whole region it belongs to (every base inside it is used: the same
+        // result as stepping a stride at a time).
+        const PageEntry& used = page_table_[base_page_number];
+        if (used.region_page_count && uint32_t(used.base_address) <= base_page_number &&
+            base_page_number < uint32_t(used.base_address) + uint32_t(used.region_page_count)) {
+          const uint64_t next = rex::round_up(uint64_t(used.base_address) + used.region_page_count,
+                                              uint64_t(page_scan_stride));
+          if (next > max_base_page_number) {
+            break;
+          }
+          base_page_number = uint32_t(next) - page_scan_stride;  // cancel out loop logic
+        }
         continue;
       }
       // Check requested range to ensure free.

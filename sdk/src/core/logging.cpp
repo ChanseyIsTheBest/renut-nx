@@ -38,11 +38,8 @@
 #include <rex/sys_counters.h>
 #include <rex/thread.h>
 
-#include <rex/banjo_switch_default.h>  // banjo-nx (2026-11-01)
 #if REX_PLATFORM_SWITCH
 #include "threading_switch.h"
-// banjo-nx (2026-11-01): ui/switch_crash_hooks.c, stderr to logs/rex/rex_stderr.log.
-extern "C" void RexSwitchRedirectStderr(void);
 #endif
 
 #ifdef __SWITCH__
@@ -52,6 +49,8 @@ extern "C" void RexSwitchRedirectStderr(void);
 #include <unistd.h>
 #include <switch.h>
 #include <spdlog/sinks/base_sink.h>
+// blur-nx (2026-11-18): sdk/src/ui/switch_crash_hooks.c's (weak: an executable without the crash hooks has none).
+extern "C" __attribute__((weak)) void RexSwitchStderrToFile(int on);
 #endif
 
 #if REX_PLATFORM_WIN32
@@ -62,10 +61,8 @@ extern "C" void RexSwitchRedirectStderr(void);
 
 REXCVAR_DEFINE_STRING(log_network, "", "Log",
                       "Switch: also send every log line (and stdout/stderr, e.g. NVK's messages) over TCP to this "
-                      "host:port, for watching a run live (e.g. 192.168.1.76:28771). Empty = off");
-// banjo-nx (2026-11-01, the public build): off on the Switch (crash logs only: rex_crash.log is written by the
-// crash handler itself); "info" in renut.toml turns the logs on again.
-REXCVAR_DEFINE_STRING(log_level, BANJO_SWITCH_DEFAULT("off", "info"), "Log",
+                      "host:port, for watching a run live (e.g. YOUR_PC_IP:28771). Empty = off");
+REXCVAR_DEFINE_STRING(log_level, "info", "Log",
                       "Global log level: trace, debug, info, warn, error, critical, off")
     .allowed({"trace", "debug", "info", "warn", "error", "critical", "off"});
 
@@ -577,22 +574,28 @@ void InitLogging(const LogConfig& config) {
   }
 
   // File sink (rotating) with sequential naming fallback
-  // banjo-nx (2026-11-01, the public build): none when the level is off (no empty log file each start), and on the
-  // Switch stderr goes to rex_stderr.log only when logging is on.
-  const bool logging_off = config.default_level == spdlog::level::off;
-#if REX_PLATFORM_SWITCH
-  if (!logging_off)
-    RexSwitchRedirectStderr();
-#endif
   std::string resolved_path;
-  if (logging_off) {
-  } else if (config.log_file) {
+  if (config.log_file) {
     resolved_path = config.log_file;
   } else if (!config.app_name.empty()) {
     auto log_dir = config.log_dir.empty() ? std::filesystem::current_path() / "logs"
                                           : std::filesystem::path(config.log_dir);
     resolved_path = NextSequentialLogPath(log_dir, config.app_name).string();
   }
+  // katamari-nx (2026-11-02, the user: "turn off all logging besides crash logging"): with every level off no file is
+  // made (an empty log a run, and the writer thread's buffer). rex_crash.log and the crash hooks' rex_stderr.log are
+  // written by the crash handler, not by this logger.
+  const bool every_level_off =
+      config.default_level == spdlog::level::off &&
+      std::all_of(config.category_levels.begin(), config.category_levels.end(),
+                  [](const auto& category) { return category.second == spdlog::level::off; });
+  if (every_level_off)
+    resolved_path.clear();
+#ifdef __SWITCH__
+  // blur-nx (2026-11-18): stderr to logs/rex/rex_stderr.log only when something is logged; with every level off it
+  // stays in memory and only a crash report carries it (sdk/src/ui/switch_crash_hooks.c).
+  if (RexSwitchStderrToFile) RexSwitchStderrToFile(every_level_off ? 0 : 1);
+#endif
   if (!resolved_path.empty()) {
     const size_t max_size = static_cast<size_t>(REXCVAR_GET(log_max_file_size_mb)) * 1024 * 1024;
     const size_t max_files = static_cast<size_t>(REXCVAR_GET(log_max_files));

@@ -126,6 +126,20 @@ def shared_word_offset(expr, temps):
     return int(m.group(1)) * 16 + 'xyzw'.index(m.group(2)) * 4
 
 
+def sampler_variant(expr, temps):
+    """vivapinata-nx (2026-11-03): XenosRecomp's `word + Nu` for a fetch that names its own filters (the variant N of the
+    word's sampler slot, render/textures.cpp SamplerSlotUncached), through a temporary or not: (the word's expression, N)."""
+    e = strip_index_mask(expr)
+    for _ in range(3):
+        m = re.match(r'^(.*\S)\s*\+\s*(\d+)u$', e, re.S)
+        if m:
+            return m.group(1).strip(), int(m.group(2))
+        if e not in temps:
+            break
+        e = strip_index_mask(temps[e])
+    return expr, 0
+
+
 def convert(src, stage, ubo_map, sampler_words='ids'):
     text = src.replace('\r\n', '\n')
     notes = []
@@ -134,16 +148,17 @@ def convert(src, stage, ubo_map, sampler_words='ids'):
     # the uploaded constants (plume_deko3d: dkCmdBufBindTextures). The others stay bindless (dkh).
     bound = sampler_words == 'handle'
     bindings = {}  # (sampler type, texture word offset, sampler word offset or None) -> binding
-    # katamari-nx (2026-10-30, their commit 32330443): host shaders' multisampled textures (the depth resolve's
-    # texelFetch of a multisampled depth target) are BOUND textures, bindings 0.. in order of first use: the renderer
-    # binds them by descriptor slot (plume::Deko3DBindFragmentTextures). A bindless multisampled fetch compiles to TLD.MS
-    # with the handle in a register, which Ryujinx's shader translator cannot follow ("Failed to find handle source for
-    # bindless access of type texture2DMS": the fetch became 0); bound, uam emits the TLDS.LZ.MS form, which it decodes.
+    # katamari-nx (2026-10-30): host shaders' multisampled textures (the depth resolve's texelFetch of a 4x depth
+    # target) are BOUND textures, bindings 0.. in order of first use: the renderer binds them by descriptor slot
+    # (plume::Deko3DBindFragmentTextures). A bindless multisampled fetch compiles to TLD.MS with the handle in a
+    # register, which Ryujinx's shader translator cannot follow ("Failed to find handle source for bindless access of
+    # type texture2DMS": the fetch became 0, the depth of field read depth 0 everywhere and blurred the whole scene);
+    # bound, uam emits the multisampled TLDS.LZ form, which it decodes.
     ms_bound = {}  # index expression -> (binding, sampler type)
     temps = {m.group(1): m.group(2).strip() for m in re.finditer(r'^\s*uint (_\d+) = ([^;]+);', src, re.M)}
 
-    def bind(stype, t_off, s_off):
-        key = (stype, t_off, s_off)
+    def bind(stype, t_off, s_off, variant=0):
+        key = (stype, t_off, s_off, variant)
         if key not in bindings:
             if len(bindings) >= 32:
                 return None
@@ -199,10 +214,14 @@ def convert(src, stage, ubo_map, sampler_words='ids'):
                 out.append(text[pos:m.start()])
                 var = None
                 if bound:
+                    # vivapinata-nx: the sampler word has its slot at bit 20, so a variant counts from there.
+                    s_word, s_variant = sampler_variant(s_expr, temps)
                     t_off = shared_word_offset(t_expr, temps)
-                    s_off = shared_word_offset(s_expr, temps)
+                    s_off = shared_word_offset(s_word, temps)
                     if t_off is not None and s_off is not None:
-                        var = bind(m.group(0)[:-1], t_off, s_off)
+                        var = bind(m.group(0)[:-1], t_off, s_off, s_variant)
+                    elif s_variant:
+                        s_expr = f'(({s_word}) + {s_variant << 20}u)'
                 out.append(var if var else f'{m.group(0)}dkh({t_expr}, {s_expr}))')
                 pos = close_i + 1
             else:
@@ -380,9 +399,10 @@ def convert(src, stage, ubo_map, sampler_words='ids'):
     if vin:
         meta += ' vin=' + ','.join(map(str, vin))
     if bindings:
-        # bound textures: binding:texture word:sampler word (byte offsets in SharedConstants; 65535 = no sampler)
-        meta += ' texb=' + ','.join(f'{k}:{t}:{65535 if s is None else s}'
-                                    for (_, t, s), k in sorted(bindings.items(), key=lambda kv: kv[1]))
+        # bound textures: binding:texture word:sampler word (byte offsets in SharedConstants; 65535 = no sampler), then
+        # the sampler's variant when it has one (vivapinata-nx)
+        meta += ' texb=' + ','.join(f'{k}:{t}:{65535 if s is None else s}' + (f':{v}' if v else '')
+                                    for (_, t, s, v), k in sorted(bindings.items(), key=lambda kv: kv[1]))
 
     # ---- extensions
     lines = text.split('\n')
@@ -400,7 +420,7 @@ def convert(src, stage, ubo_map, sampler_words='ids'):
         else:
             # Host shaders: sampler ids (the push constants' samplerIndex); the shifted form, which Ryujinx follows too.
             extra.append('#define dkh(t, s) uvec2(uint(t) | (uint(s) << 20u), 0u)')
-    for (stype, _, _), k in sorted(bindings.items(), key=lambda kv: kv[1]):
+    for (stype, _, _, _), k in sorted(bindings.items(), key=lambda kv: kv[1]):
         extra.append(f'layout(binding = {k}) uniform {stype} dk_tex_b{k};')
     for k, stype in sorted(ms_bound.values()):
         extra.append(f'layout(binding = {k}) uniform {stype} dk_ms_b{k};')

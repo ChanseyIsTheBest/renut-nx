@@ -13,6 +13,7 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
 #include <algorithm>
+#include <array>  // port 59: the multiple waits' objects
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -868,12 +869,24 @@ u32 NtWaitForSingleObjectEx_entry(u32 object_handle, u32 wait_mode, u32 alertabl
   return result;
 }
 
+// port 59 (2026-11-10): the objects a multiple wait keeps on the stack (the 360's MAXIMUM_WAIT_OBJECTS).
+static constexpr uint32_t kInlineWaitObjects = 64;
+
 u32 KeWaitForMultipleObjects_entry(u32 count, mapped_u32 objects_ptr, u32 wait_type,
                                    u32 wait_reason, u32 processor_mode, u32 alertable,
                                    mapped_u64 timeout_ptr, mapped_void wait_block_array_ptr) {
   assert_true(wait_type <= 1);
 
-  std::vector<object_ref<XObject>> objects;
+  // port 59 (2026-11-10, from LostOdysseyRecomp 299ac550): no heap allocation per call: up to 64 objects
+  // (the 360's MAXIMUM_WAIT_OBJECTS) on the stack, more on the heap as before (newlib's malloc has one lock
+  // for every thread).
+  std::array<object_ref<XObject>, kInlineWaitObjects> inline_objects;
+  std::vector<object_ref<XObject>> heap_objects;
+  object_ref<XObject>* objects = inline_objects.data();
+  if (count > kInlineWaitObjects) {
+    heap_objects.resize(count);
+    objects = heap_objects.data();
+  }
   for (uint32_t n = 0; n < count; n++) {
     auto object_ptr = REX_KERNEL_MEMORY()->TranslateVirtual(objects_ptr[n]);
     auto object_ref = XObject::GetNativeObject<XObject>(REX_KERNEL_STATE(), object_ptr);
@@ -881,12 +894,12 @@ u32 KeWaitForMultipleObjects_entry(u32 count, mapped_u32 objects_ptr, u32 wait_t
       return X_STATUS_INVALID_PARAMETER;
     }
 
-    objects.push_back(std::move(object_ref));
+    objects[n] = std::move(object_ref);
   }
 
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
   X_STATUS result = XObject::WaitMultiple(
-      uint32_t(objects.size()), reinterpret_cast<XObject**>(objects.data()), wait_type, wait_reason,
+      count, reinterpret_cast<XObject**>(objects), wait_type, wait_reason,
       processor_mode, alertable, timeout_ptr ? &timeout : nullptr);
   if (alertable && result == X_STATUS_USER_APC) {
     XThread::GetCurrentThread()->DeliverAPCs();
@@ -899,17 +912,26 @@ uint32_t xeNtWaitForMultipleObjectsEx(uint32_t count, rex::be<uint32_t>* handles
                                       uint64_t* timeout_ptr) {
   assert_true(wait_type <= 1);
 
-  std::vector<object_ref<XObject>> objects;
+  // port 59 (2026-11-10, from LostOdysseyRecomp 299ac550): no heap allocation per call: up to 64 objects
+  // (the 360's MAXIMUM_WAIT_OBJECTS) on the stack, more on the heap as before (newlib's malloc has one lock
+  // for every thread).
+  std::array<object_ref<XObject>, kInlineWaitObjects> inline_objects;
+  std::vector<object_ref<XObject>> heap_objects;
+  object_ref<XObject>* objects = inline_objects.data();
+  if (count > kInlineWaitObjects) {
+    heap_objects.resize(count);
+    objects = heap_objects.data();
+  }
   for (uint32_t n = 0; n < count; n++) {
     uint32_t object_handle = handles[n];
     auto object = REX_KERNEL_OBJECTS()->LookupObject<XObject>(object_handle);
     if (!object) {
       return X_STATUS_INVALID_PARAMETER;
     }
-    objects.push_back(std::move(object));
+    objects[n] = std::move(object);
   }
 
-  auto result = XObject::WaitMultiple(count, reinterpret_cast<XObject**>(objects.data()), wait_type,
+  auto result = XObject::WaitMultiple(count, reinterpret_cast<XObject**>(objects), wait_type,
                                       6, wait_mode, alertable, timeout_ptr);
   if (alertable && result == X_STATUS_USER_APC) {
     XThread::GetCurrentThread()->DeliverAPCs();
@@ -1601,11 +1623,9 @@ REX_EXPORT_STUB(__imp__KeIpiGenericCall);
 REX_EXPORT_STUB(__imp__KeQueryBackgroundProcessors);
 REX_EXPORT_STUB(__imp__KeQueryInterruptTime);
 REX_EXPORT_STUB(__imp__KeRegisterDriverNotification);
-REX_EXPORT_STUB(__imp__KeRestoreFloatingPointState);
 REX_EXPORT_STUB(__imp__KeRestoreVectorUnitState);
 REX_EXPORT_STUB(__imp__KeRetireDpcList);
 REX_EXPORT_STUB(__imp__KeRundownQueue);
-REX_EXPORT_STUB(__imp__KeSaveFloatingPointState);
 REX_EXPORT_STUB(__imp__KeSaveVectorUnitState);
 REX_EXPORT_STUB(__imp__KeSetBackgroundProcessors);
 REX_EXPORT_STUB(__imp__KeSetPriorityClassThread);
@@ -1621,3 +1641,20 @@ REX_HOOK_RAW(__imp__KfRaiseIrql) {
   rex::kernel::xboxkrnl::KfRaiseIrql_raw(ctx, base);
 }
 static rex::ppc::detail::PPCFuncRegistrar _ppc_reg___imp__KfRaiseIrql("__imp__KfRaiseIrql", &__imp__KfRaiseIrql);
+
+// mk9-nx (2026-10-20; port 56): Mortal Kombat calls these ~40 times a second each (one game thread around its
+// floating-point work). The recompiled code keeps each guest thread's floating-point state in its own host context, so
+// there is nothing to save or restore: both succeed (STATUS_SUCCESS in r3; the logging stub left the caller's buffer
+// pointer there) without a log line per call.
+REX_HOOK_RAW(__imp__KeSaveFloatingPointState) {
+  (void)base;
+  ctx.r3.u64 = 0;
+}
+static rex::ppc::detail::PPCFuncRegistrar _ppc_reg___imp__KeSaveFloatingPointState("__imp__KeSaveFloatingPointState",
+                                                                                    &__imp__KeSaveFloatingPointState);
+REX_HOOK_RAW(__imp__KeRestoreFloatingPointState) {
+  (void)base;
+  ctx.r3.u64 = 0;
+}
+static rex::ppc::detail::PPCFuncRegistrar _ppc_reg___imp__KeRestoreFloatingPointState(
+    "__imp__KeRestoreFloatingPointState", &__imp__KeRestoreFloatingPointState);

@@ -28,6 +28,9 @@ constexpr size_t kBlockSize = 0x200000;
 /* kameo-nx (2026-11-05): banjo_window_blocks, see RexGmInit. */
 bool g_window_blocks = true;
 
+/* port 56 (mk9-nx 1.0.5): waits of 100 ms for the kernel's memory blocks (RexGmCommit), for RexGmFallbacks. */
+std::atomic<uint64_t> g_block_retries{0};
+
 constexpr size_t AlignDown(size_t v, size_t a) { return v & ~(a - 1); }
 constexpr size_t AlignUp(size_t v, size_t a) { return (v + a - 1) & ~(a - 1); }
 
@@ -115,6 +118,8 @@ struct State {
     std::set<std::pair<size_t, size_t>> view_mapped;
 
     size_t   committed = 0;
+    /* sasrt-nx (2026-11-09 night, RexGmDecommitFigures): bytes decommits asked for, and those they freed. */
+    size_t   decommit_asked = 0, decommit_freed = 0;
     size_t   mapped = 0;
     uint32_t last_result = 0;
 };
@@ -232,13 +237,31 @@ bool ProtectWithPermissions(uint8_t* page, bool read_only) {
     g_read_only = ReadOnly::kSi;
     return true;
 }
+/*
+ * mk9-nx (2026-10-25; port 56): one unmap call for the range; if it fails (one page of it not mapped as the call
+ * expects), the pages go one by one so the rest are not left mapped. A page left behind made a later chunk's map at
+ * that place fail (0xD401), the suspected start of mk9-nx's rare boot hang. Counted for RexGmFallbacks.
+ */
+std::atomic<uint64_t> g_unmap_page_fallbacks{0}, g_unmap_page_failures{0};
+
+void UnmapRangeOrPages(State& s, size_t win_off, uint8_t* src, size_t len) {
+    if (R_SUCCEEDED(svcUnmapProcessMemory(s.base + win_off, Proc(), reinterpret_cast<u64>(src), len))) {
+        s.mapped -= len;
+        return;
+    }
+    g_unmap_page_fallbacks.fetch_add(1, std::memory_order_relaxed);
+    for (size_t p = 0; p < len; p += kPageSize) {
+        if (R_SUCCEEDED(svcUnmapProcessMemory(s.base + win_off + p, Proc(), reinterpret_cast<u64>(src + p), kPageSize)))
+            s.mapped -= kPageSize;
+        else
+            g_unmap_page_failures.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
 void UnmapWindowRange(State& s, size_t win_off, uint8_t* src, size_t len) {
     if (g_read_only == ReadOnly::kSi) {
         /* No holes here: everything was mapped, watched or not. */
-        if (R_SUCCEEDED(svcUnmapProcessMemory(s.base + win_off, Proc(),
-                                              reinterpret_cast<u64>(src), len))) {
-            s.mapped -= len;
-        }
+        UnmapRangeOrPages(s, win_off, src, len);
         return;
     }
     const size_t end = win_off + len;
@@ -251,11 +274,7 @@ void UnmapWindowRange(State& s, size_t win_off, uint8_t* src, size_t len) {
             continue;
         }
         const size_t stop = (it != s.protection.end() && it->first < end) ? it->first : end;
-        if (R_SUCCEEDED(svcUnmapProcessMemory(s.base + cur, Proc(),
-                                              reinterpret_cast<u64>(src + (cur - win_off)),
-                                              stop - cur))) {
-            s.mapped -= stop - cur;
-        }
+        UnmapRangeOrPages(s, cur, src + (cur - win_off), stop - cur);  /* port 56 */
         cur = stop;
     }
 }
@@ -345,6 +364,42 @@ bool MapChunkIntoView(State& s, size_t view_index, const Chunk& c) {
     if (!MapWindowRange(s, win_off, src, hi - lo)) return false;
     s.view_mapped.insert({view_index, c.offset});
     return true;
+}
+
+/*
+ * mk9-nx (2026-10-25; port 56): its rare boot hang (1 boot in ~25). A chunk's map into a view failed with 0xD401
+ * (InvalidCurrentMemory: part of the destination already mapped), so FaultIn answered no and the handler emulated the
+ * access through the shadow; every following access to the chunk faulted again (1,200 failed maps a second, the game
+ * frozen at boot). Here the chunk goes in page by page, the pages already mapped skipped, and is then counted as in the
+ * view. Protected pages as MapWindowRange treats them: skipped (unmapped on purpose), or, where watched pages are
+ * read-only (g_read_only kSi), mapped and made read-only. Counted, with the first failure, for RexGmFallbacks.
+ */
+std::atomic<uint64_t> g_pagewise_runs{0};
+std::atomic<uint32_t> g_pagewise_first_rc{0};
+
+bool MapChunkIntoViewPagewise(State& s, size_t view_index, const Chunk& c) {
+    const View& v = s.views[view_index];
+    size_t lo, hi;
+    if (!Intersect(c.offset, c.length, v.offset, v.length, &lo, &hi)) return false;
+    const size_t win_off = static_cast<size_t>(v.base - s.base) + (lo - v.offset);
+    uint8_t* src = static_cast<uint8_t*>(c.shadow) + (lo - c.offset);
+    uint32_t expected = 0;
+    g_pagewise_first_rc.compare_exchange_strong(expected, s.last_result ? s.last_result : 1u);
+    size_t mapped = 0, skipped = 0;
+    for (size_t p = 0; p < hi - lo; p += kPageSize) {
+        const bool protected_page = s.protection.count(win_off + p) != 0;
+        if (protected_page && g_read_only != ReadOnly::kSi) continue;
+        if (R_SUCCEEDED(svcMapProcessMemory(s.base + win_off + p, Proc(), reinterpret_cast<u64>(src + p), kPageSize))) {
+            s.mapped += kPageSize;
+            mapped++;
+            if (protected_page) ProtectWithPermissions(s.base + win_off + p, true);
+        } else {
+            skipped++;  /* already mapped (the overlap) */
+        }
+    }
+    g_pagewise_runs.fetch_add(1, std::memory_order_relaxed);
+    s.view_mapped.insert({view_index, c.offset});
+    return mapped > 0 || skipped > 0;
 }
 
 void UnmapChunkFromViews(State& s, const Chunk& c) {
@@ -480,6 +535,15 @@ uint32_t RexGmLastResult(void) {
     return s.last_result;
 }
 
+void RexGmFallbacks(uint64_t* block_retries, uint64_t* pagewise_maps, uint64_t* unmap_fallbacks,
+                    uint64_t* unmap_page_failures, uint32_t* first_map_failure) {
+    *block_retries = g_block_retries.load(std::memory_order_relaxed);
+    *pagewise_maps = g_pagewise_runs.load(std::memory_order_relaxed);
+    *unmap_fallbacks = g_unmap_page_fallbacks.load(std::memory_order_relaxed);
+    *unmap_page_failures = g_unmap_page_failures.load(std::memory_order_relaxed);
+    *first_map_failure = g_pagewise_first_rc.load(std::memory_order_relaxed);
+}
+
 bool RexGmAddView(uint8_t* base, size_t offset, size_t length) {
     State& s = S();
     std::lock_guard<std::mutex> lock(s.mutex);
@@ -559,12 +623,25 @@ bool RexGmCommit(size_t offset, size_t length, RexGmAccess access) {
         }
         memset(backing, 0, sz);
 
-        virtmemLock();
-        void* shadow = virtmemFindCodeMemory(sz, align);
-        Result rc = shadow ? svcMapProcessCodeMemory(Proc(), reinterpret_cast<u64>(shadow),
-                                                     reinterpret_cast<u64>(backing), sz)
-                           : 0;
-        virtmemUnlock();
+        /*
+         * mk9-nx 1.0.5 (port 56): 0xCE01 (2001-0103, out of the kernel's memory blocks) at start, with next to nothing
+         * mapped, ended a game started seconds after the last one closed: the blocks are the whole console's, and a
+         * process being torn down may still hold them. So a moment later, up to 5 s, before this counts as a failure.
+         */
+        constexpr Result kOutOfBlocks = 0xCE01;
+        void* shadow = nullptr;
+        Result rc = 0;
+        for (int attempt = 0;; ++attempt) {
+            virtmemLock();
+            shadow = virtmemFindCodeMemory(sz, align);
+            rc = shadow ? svcMapProcessCodeMemory(Proc(), reinterpret_cast<u64>(shadow),
+                                                  reinterpret_cast<u64>(backing), sz)
+                        : 0;
+            virtmemUnlock();
+            if (!shadow || rc != kOutOfBlocks || attempt >= 50) break;
+            g_block_retries.fetch_add(1, std::memory_order_relaxed);
+            svcSleepThread(100000000);
+        }
 
         if (!shadow) {
             free(backing);
@@ -578,7 +655,12 @@ bool RexGmCommit(size_t offset, size_t length, RexGmAccess access) {
         }
 
         /* The code alias starts without write access; it has to be opened. */
-        rc = svcSetProcessMemoryPermission(Proc(), reinterpret_cast<u64>(shadow), sz, Perm_Rw);
+        for (int attempt = 0;; ++attempt) {
+            rc = svcSetProcessMemoryPermission(Proc(), reinterpret_cast<u64>(shadow), sz, Perm_Rw);
+            if (rc != kOutOfBlocks || attempt >= 50) break;  /* port 56: the blocks, as above */
+            g_block_retries.fetch_add(1, std::memory_order_relaxed);
+            svcSleepThread(100000000);
+        }
         if (R_FAILED(rc)) {
             svcUnmapProcessCodeMemory(Proc(), reinterpret_cast<u64>(shadow),
                                       reinterpret_cast<u64>(backing), sz);
@@ -633,7 +715,17 @@ bool RexGmFaultIn(uint64_t window_address) {
     Chunk* c = ChunkAt(s, off);
     if (!c) return false;                                       /* not committed */
     if (s.view_mapped.count({vi, c->offset}) != 0) return false; /* already there */
-    return MapChunkIntoView(s, vi, *c);
+    if (MapChunkIntoView(s, vi, *c)) return true;
+    return MapChunkIntoViewPagewise(s, vi, *c);  /* port 56: mk9-nx's fallback */
+}
+
+void RexGmDecommitFigures(size_t* committed, size_t* chunks, size_t* asked, size_t* freed) {
+    State& s = S();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    *committed = s.committed;
+    *chunks = s.chunks.size();
+    *asked = s.decommit_asked;
+    *freed = s.decommit_freed;
 }
 
 bool RexGmDecommit(size_t offset, size_t length) {
@@ -643,6 +735,7 @@ bool RexGmDecommit(size_t offset, size_t length) {
 
     const size_t begin = AlignDown(offset, kPageSize);
     const size_t end   = AlignUp(offset + length, kPageSize);
+    s.decommit_asked += end - begin;  /* sasrt-nx (2026-11-09 night) */
 
     for (auto it = s.chunks.begin(); it != s.chunks.end();) {
         const Chunk c = it->second;
@@ -655,9 +748,33 @@ bool RexGmDecommit(size_t offset, size_t length) {
             UnmapChunkFromViews(s, c);
             ReleaseChunk(c);
             s.committed -= c.length;
+            s.decommit_freed += c.length;  /* sasrt-nx (2026-11-09 night) */
             it = s.chunks.erase(it);
         } else {
             ++it;
+        }
+    }
+    return true;
+}
+
+/*
+ * peggle2-nx: zero a range of the mapping through each committed chunk's always-RW alias (shadow), whatever the
+ * protection of its views. memory_switch.cpp calls it when the guest decommits or releases memory: the backing
+ * stays committed there (see that file's header), and the Xbox 360, like VirtualAlloc on the PC, hands out
+ * zero-filled pages when the range is committed again. Without this the next commit found the old contents.
+ * Chunks never committed are left alone (they are zero-filled when created).
+ */
+bool RexGmZero(size_t offset, size_t length) {
+    State& s = S();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.base || !length) return false;
+    const size_t begin = offset, end = offset + length;
+    for (auto& entry : s.chunks) {
+        const Chunk& c = entry.second;
+        const size_t lo = std::max(begin, c.offset);
+        const size_t hi = std::min(end, c.offset + c.length);
+        if (lo < hi && c.shadow) {
+            memset(static_cast<uint8_t*>(c.shadow) + (lo - c.offset), 0, hi - lo);
         }
     }
     return true;

@@ -55,6 +55,7 @@
 #include <rex/hook.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
+#include <rex/ppc/fma_single.h>  // port 96
 
 #include "cpu/banjo_enhancements.h"
 #include "me/me_verify.h"
@@ -136,13 +137,11 @@ inline void Barrier() { std::atomic_signal_fence(std::memory_order_seq_cst); }
 // PPC arithmetic as the recompiler emits it
 //-----------------------------------------------------------------------------
 
-// fmadds frD = frA * frC + frB: double(float(std::fma(A, C, B))) in double.
+// fmadds frD = frA * frC + frB as the processed generated code makes it: rex::ppc::FmaddsSingle (renut-ultimate,
+// 2026-11-12, port 96: tools/fma_single.py; on floats one single-precision fused multiply-add, the Xenon's one rounding;
+// REX_FMADDS_DOUBLE_ROUNDING, CMake BLUR_FMADDS_SINGLE OFF: double(float(std::fma(A, C, B))) as before).
 inline float Fmadds(float a, float c, float b) {
-#if defined(__aarch64__)
-  return float(std::fma(double(a), double(c), double(b)));
-#else
-  return float(double(a) * double(c) + double(b));  // a*c is exact in double: same value
-#endif
+  return float(::rex::ppc::FmaddsSingle(double(a), double(c), double(b)));
 }
 
 // fctidz, exactly the generated expression (only the low word is used).

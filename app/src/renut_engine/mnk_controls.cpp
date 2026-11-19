@@ -981,6 +981,9 @@ void renutMnk_ApplyPadState(PPCRegister& r3, PPCRegister& r4) {
 // missing pad we soften that to EMPTY: "no keystroke waiting" keeps the menu
 // alive, "no controller" makes it stop listening.
 // =============================================================================
+// katamari-nx (2026-10-30): rex_XInputGetKeystroke is the name N&B's config gives its XAPI keystroke function; Beautiful
+// Katamari's is not named yet, so this hook is not built (the pad path, XInputGetState, is the SDK's and unchanged).
+#if KATAMARI_BANJO_ADDRESS_HOOKS
 REX_EXTERN(__imp__rex_XInputGetKeystroke);
 
 // The X_ERROR_* macros expand to a cast through rex::X_RESULT.
@@ -1013,3 +1016,4 @@ REX_HOOK_RAW(rex_XInputGetKeystroke) {
     ctx.r3.u64 = static_cast<uint32_t>(X_ERROR_EMPTY);
   }
 }
+#endif  // KATAMARI_BANJO_ADDRESS_HOOKS

@@ -1,9 +1,1 @@
-# banjo-nx (2026-10-19, CPU proposal 7 of docs/cpu-codegen-proposals-2026-10-19.md): the console profile's hottest
-# calls from one generated file to a leaf function of another (rex_profile of 2026-10-19, leaf-callee view).
-# tools/inline_leaves.py --hot gives the caller's file an inline copy of the callee (a leaf of up to 128 guest
-# instructions) and calls it there; any other file keeps the call. One edge per line: caller callee.
-sub_82382290 sub_82381778
-sub_8220F0B0 sub_8220F138
-sub_82376B98 sub_82375768
-sub_826CFED8 sub_826F0250
-sub_82376128 sub_82376300
+# katamari-nx: empty until this game's console profile

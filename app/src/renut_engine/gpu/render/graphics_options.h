@@ -54,5 +54,6 @@ double DynamicGpuMs();  // banjo-nx (2026-10-28): a decimal key (34.5)
 double DynamicUpSeconds();  // banjo-nx (2026-10-28): banjo_renut_dynamic_up_s (1 s)
 int32_t DynamicTestSeconds();
 int32_t DynamicSteps();  // banjo-nx (2026-10-28, night_gpu5): banjo_renut_dynamic_steps, the heights between the ends
+int32_t DynamicStepLines(bool docked);  // sasrt-nx (2026-11-09): sasrt_dynamic_lines_handheld / _docked (the grid)
 
 } // namespace renut::gpu

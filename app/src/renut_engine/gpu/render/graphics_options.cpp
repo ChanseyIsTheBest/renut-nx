@@ -2,7 +2,6 @@
  * @file    gpu/render/graphics_options.cpp
  */
 #include "renut_engine/gpu/render/graphics_options.h"
-#include "banjo_switch_default.h"  // banjo-nx (2026-11-01): the shipped Switch defaults
 
 #include <cstdlib>
 #include <string>
@@ -24,12 +23,13 @@ REXCVAR_DEFINE_STRING(renut_ambient_occlusion, "Half", "Nuts&Bolts/Graphics",
                       "or Full.")
     .allowed({"Half", "Full"});
 
-REXCVAR_DEFINE_BOOL(banjo_renut_dynamic_resolution, BANJO_SWITCH_DEFAULT(true, false), "Nuts&Bolts/Graphics",
+REXCVAR_DEFINE_BOOL(banjo_renut_dynamic_resolution, false, "Nuts&Bolts/Graphics",
                     "Dynamic resolution (2026-10-28, the user's request; not pixel-identical while it acts): the 3D "
                     "image between banjo_renut_dynamic_handheld_low and _high in handheld mode, _docked_low and _high "
                     "docked (in place of banjo_renut_render_height_handheld / _docked): the low height while the GPU's "
                     "time a frame is above banjo_renut_dynamic_gpu_ms, the high one when it would fit again (at least "
-                    "5 s between changes). One end of each range is 720 lines (the 1x scale)")
+                    "5 s between changes). One end of each range is 720 lines (the 1x scale) on the PC's back ends; "
+                    "on deko3d any range, started at its step nearest below 720 (sasrt-nx, port 52)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(banjo_renut_dynamic_handheld_low, 540, "Nuts&Bolts/Graphics",
                      "banjo_renut_dynamic_resolution: the handheld range's low height (a multiple of 9)")
@@ -39,9 +39,8 @@ REXCVAR_DEFINE_INT32(banjo_renut_dynamic_handheld_high, 720, "Nuts&Bolts/Graphic
                      "banjo_renut_dynamic_resolution: the handheld range's high height")
     .range(360, 1080)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(banjo_renut_dynamic_docked_low, BANJO_SWITCH_DEFAULT(540, 720), "Nuts&Bolts/Graphics",
-                     "banjo_renut_dynamic_resolution: the docked range's low height (2026-11-01, the user's request: 540 on "
-                     "the Switch, 720 before)")
+REXCVAR_DEFINE_INT32(banjo_renut_dynamic_docked_low, 720, "Nuts&Bolts/Graphics",
+                     "banjo_renut_dynamic_resolution: the docked range's low height")
     .range(360, 1080)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(banjo_renut_dynamic_docked_high, 1080, "Nuts&Bolts/Graphics",
@@ -54,6 +53,21 @@ REXCVAR_DEFINE_INT32(banjo_renut_dynamic_steps, 4, "Nuts&Bolts/Graphics",
                      "and high, evenly spaced (multiples of 36: 576 612 648 684 handheld, 792 864 936 1008 docked); the "
                      "GPU's time picks the highest that fits. 0: only the two ends")
     .range(0, 8)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// sasrt-nx (2026-11-09, the user: "more steps, especially in docked"): each mode's grid of heights (a multiple of 9:
+// whole host pixels across the 1280-wide screen). 36 (banjo's) is whole pixels at 320x180 too; 18 at 640x360, and a
+// quarter-size target's edge then rounds to the nearest pixel (RenderScale::Coord), half a pixel off at most.
+// vivapinata-nx (2026-11-12, the owner: 6 steps, then "Yes, port the grid"): 540-720 has room for only 4 heights on 36
+// lines; Viva's built-in settings take 18 handheld (app/vivapinata_switch_defaults.toml).
+REXCVAR_DEFINE_INT32(sasrt_dynamic_lines_handheld, 36, "Nuts&Bolts/Graphics",
+                     "banjo_renut_dynamic_resolution: the handheld steps are multiples of this many lines (9 to 72, a "
+                     "multiple of 9; 36 banjo's; from sasrt-nx)")
+    .range(9, 72)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(sasrt_dynamic_lines_docked, 36, "Nuts&Bolts/Graphics",
+                     "banjo_renut_dynamic_resolution: the docked steps are multiples of this many lines (9 to 72, a "
+                     "multiple of 9; 36 banjo's; from sasrt-nx)")
+    .range(9, 72)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_DOUBLE(banjo_renut_dynamic_up_s, 1.0, "Nuts&Bolts/Graphics",
                       "banjo_renut_dynamic_resolution: seconds in a row the high height must be predicted to fit (and "
@@ -81,7 +95,7 @@ REXCVAR_DEFINE_STRING(renut_anisotropic_filtering, "Game", "Nuts&Bolts/Graphics"
                       "16x.")
     .allowed({"Game", "2x", "4x", "8x", "16x"});
 
-REXCVAR_DEFINE_STRING(renut_post_process_precision, BANJO_SWITCH_DEFAULT("Game", "High"), "Nuts&Bolts/Graphics",
+REXCVAR_DEFINE_STRING(renut_post_process_precision, "High", "Nuts&Bolts/Graphics",
                       "Precision of the bloom, depth of field and SSAO buffers: Game keeps the "
                       "console's 8 bits (faint glow shows as blobs sliding over dark areas), High "
                       "uses 16 bits.")
@@ -225,6 +239,12 @@ int32_t DynamicTestSeconds() {
 int32_t DynamicSteps() {
   static const int32_t v = int32_t(REXCVAR_GET(banjo_renut_dynamic_steps));
   return v < 0 ? 0 : v > 8 ? 8 : v;
+}
+int32_t DynamicStepLines(bool docked) {  // sasrt-nx (2026-11-09): sasrt_dynamic_lines_handheld / _docked
+  static const int32_t h = int32_t(REXCVAR_GET(sasrt_dynamic_lines_handheld));
+  static const int32_t d = int32_t(REXCVAR_GET(sasrt_dynamic_lines_docked));
+  const int32_t v = (docked ? d : h) / 9 * 9;
+  return v < 9 ? 9 : v > 72 ? 72 : v;
 }
 
 uint32_t AnisotropyCap() {

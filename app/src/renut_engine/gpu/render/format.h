@@ -131,11 +131,19 @@ enum class GpuColorFormat : u32 {
   Fmt16_16_16_16 = 5,
   Fmt16_16_Float = 6,
   Fmt16_16_16_16_Float = 7,
+  // sasrt-nx (2026-11-11, port 75; its formats batch, found on the way: renut_format_edram_as_variants): the two EDRAM
+  // formats that fell to 8-bit RGBA before (ColorTargetFormat's default).
+  Fmt2_10_10_10_As10_10_10_10 = 10,
+  Fmt2_10_10_10_Float_As16_16_16_16 = 12,
   Fmt32_Float = 14,
   Fmt32_32_Float = 15,
 };
 
 plume::RenderFormat ColorTargetFormat(GpuColorFormat format);
+// sasrt-nx (2026-11-11, port 75; its formats batch, row 38 and the diagnostic): renut_float32_point_filter's formats
+// and renut_diag_formats' names (the batch's switches are gpu/ultimate.h's: Format10BitExactOn and the others).
+bool IsFloat32TextureFormat(GpuTextureFormat format);
+const char *GpuTextureFormatName(u32 format);  // for the logs: bits 0-5 of a D3D or fetch format word
 plume::RenderFormat DepthTargetFormat();
 // banjo-nx (2026-10-19, banjo_deko3d_depth24): the host format of a depth target of D3D format 'd3d_format': 24-bit
 // unorm with stencil (4 bytes a pixel, the Xenos D24S8's own) for D24S8 on deko3d, else DepthTargetFormat().
@@ -153,11 +161,14 @@ enum class TexelConversion : u8 {
   R5G6B5,        // 16-bit packed formats expanded to RGBA8
   R5G5B5A1,
   R4G4B4A4,
-  R10G10B10A2,   // expanded to RGBA16 UNORM (plume has no 10:10:10:2 format)
+  R10G10B10A2,   // expanded to RGBA16 UNORM: the _AS_16_16_16_16 form, and 2_10_10_10 with renut_format_10bit_exact
+                 // off (sasrt-nx (2026-11-11, port 75; its formats batch, rows 6, 8, 10, 74, 93): on, 2_10_10_10 is
+                 // copied as it is into R10G10B10A2_UNORM; its audit's finding 8)
   R11G11B10,     // Fmt11_11_10: R 11, G 11, B 10 bits, UNORM, to RGBA16 UNORM
   R10G11B11,     // Fmt10_11_11: R 10, G 11, B 11 bits, UNORM, to RGBA16 UNORM
   Depth24,       // Fmt24_8 / Fmt24_8_Float: depth in the high 24 bits, to R32_FLOAT
   CTX1,          // 4x4 blocks of two-component (normal map) data, decoded to R8G8
+  DXT3A,         // vivapinata-nx: 4x4 blocks of 4-bit values (DXT3's alpha block alone), decoded to R8
 };
 
 struct TextureFormatInfo {

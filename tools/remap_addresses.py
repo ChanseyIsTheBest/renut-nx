@@ -23,6 +23,17 @@ import os
 import re
 import sys
 
+
+def gen_file(gen, suffix):
+    """renut-ultimate (2026-11-19, port 186; found by sasrt-nx's sync): the generator names its files after the project
+    (<project>_pch.h, <project>_init.cpp, <project>_recomp.N.cpp): renut_ in the base, a port's own name otherwise."""
+    for name in sorted(os.listdir(gen)):
+        m = re.fullmatch(r'(\w+)_recomp\.\d+\.cpp', name)
+        if m:
+            return os.path.join(gen, m.group(1) + '_' + suffix)
+    return os.path.join(gen, 'renut_' + suffix)
+
+
 FUNC = re.compile(r'^DEFINE_REX_FUNC\(([A-Za-z_][A-Za-z0-9_]*)\) \{$')
 TABLE = re.compile(r'\{ 0x([0-9A-Fa-f]{8}), ([A-Za-z_][A-Za-z0-9_]*) \}')
 INSN = re.compile(r'^\s*// ([a-z][a-z0-9.+\-]*)(?:\s+(.*))?$')
@@ -39,7 +50,7 @@ class Code:
         self.sigs = sigs
         self.insns = None
         names = {}
-        with open(os.path.join(gen_dir, 'renut_init.cpp'), encoding='utf-8', errors='replace') as f:
+        with open(gen_file(gen_dir, 'init.cpp'), encoding='utf-8', errors='replace') as f:
             for m in TABLE.finditer(f.read()):
                 names[m.group(2)] = m.group(1).upper()
         self.names = names

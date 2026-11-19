@@ -17,6 +17,7 @@ add_library(rexfilesystem OBJECT
     devices/stfs_container_device.cpp
     devices/stfs_container_entry.cpp
     devices/stfs_container_file.cpp
+    lz4_blocks.cpp
 )
 add_library(rex::filesystem ALIAS rexfilesystem)
 

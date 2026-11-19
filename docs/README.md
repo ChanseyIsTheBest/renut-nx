@@ -1,82 +1,66 @@
-# renut-nx documentation
+# The base's documentation
 
-Developer notes for renut-nx, the Switch port of Banjo-Kazooie: Nuts & Bolts. To install or play the game, see the
-[main README](../README.md) instead.
+The pages in this folder: where to start, what each page is, and how they are kept. The [repository's README](../README.md)
+is the summary of the base itself.
 
-renut-nx draws with [reNut](https://github.com/masterspike52/reNut)'s Direct3D-level renderer on deko3d, the Switch's native
-GPU API, and runs title update 3 with its DLC. These pages cover that renderer and the CPU work around it.
-
-The earlier PM4 renderer is not documented here. Its code is still in the NRO, but idle: nothing on the Switch uses it or
-its keys ([deko3d-renderer.md](deko3d-renderer.md), section 23). Its pages are in the git history, up to tag `v1.0.1`.
-
-Many pages were written as the work happened, so a later section can replace a detail in an earlier one. When two pages
-disagree, trust the newer one.
+The base builds Beautiful Katamari as checked in, so the names and numbers in these pages are Katamari's unless a page
+says otherwise. A new port's differ wherever they name the game: its manifest, its shader finder, its tomls.
 
 ## Where to start
 
-| You want to | Read |
-|---|---|
-| Know what a `renut.toml` key does | [enhancements-reference.md](enhancements-reference.md) |
-| Understand the renderer | [deko3d-renderer.md](deko3d-renderer.md), then [record-time-draw-path.md](record-time-draw-path.md) |
-| Understand the shaders | [shader.md](shader.md), then [deko3d-shader-optimisations.md](deko3d-shader-optimisations.md) |
-| Make a game function faster | [Beautiful Katamari's optimising functions guide](https://github.com/ChanseyIsTheBest/katamari-nx/blob/main/docs/optimising-functions.md) |
-| Build the release NRO | [pgo-lto.md](pgo-lto.md) |
-| Change the title update, DLC or language handling | [title-update-3.md](title-update-3.md) |
-| Port another Xbox 360 game from this one | [porting-start-here.md](porting-start-here.md), or start a session with [the porting prompt](porting-a-360-game-prompt.md) |
-| See which XDK a game was built with | [xdk-versions.md](xdk-versions.md) |
+| To | Read |
+| --- | --- |
+| Start a new port from the base | [porting-a-360-game-prompt.md](porting-a-360-game-prompt.md), the order of work and its rules as a prompt for a new session, then [building.md](building.md) |
+| Build the base | [building.md](building.md): the game files, code generation, the shaders, the Switch builds, PGO, the installer, tests |
+| See what the base changed from katamari-nx 1.0.1 | [changelog.md](changelog.md), a line per port, then the port's full row in [ultimate-fixes.md](ultimate-fixes.md) |
+| Find out why a switch is off, or turn one on for a game | [off-by-default.md](off-by-default.md) |
+| Check that the Switch build's one flush mode (CG-13, on) suits a game | `tools/cg13_census.ps1` on the PC build: [building.md](building.md) section 6, [off-by-default.md](off-by-default.md) section 2 |
+| Fix a picture bug | A RenderDoc capture first: [porting-a-360-game-prompt.md](porting-a-360-game-prompt.md), appendix B, with Katamari's depth-of-field blur in [katamari-notes.md](katamari-notes.md) as the worked example |
+| Run a build on the console | [porting-a-360-game-prompt.md](porting-a-360-game-prompt.md), appendix A (sys-botbase, sys-ftpd-light, `tools/switch_remote.py`); [building.md](building.md) section 6 on measuring |
+| Take the base's later ports into a port | [building.md](building.md) section 7 (`tools/ult_port_sync.py`), then each port's row in [ultimate-fixes.md](ultimate-fixes.md) |
+| Make the game's CPU side faster | [hand-and-machine-optimising-guide.md](hand-and-machine-optimising-guide.md) (sasrt-nx's, with the later tools), then [optimising-functions.md](optimising-functions.md) (the method in full) and [sasrt-batch-cc2.md](sasrt-batch-cc2.md) (register liveness, stack forwarding, the calling-convention traps) |
+| Fix a crash the code generation caused | [codegen-crash-fixes.md](codegen-crash-fixes.md): the kinds of bug, and the scans that find more of each |
+| Port a game built with a later XDK | [xdk-notes.md](xdk-notes.md) |
+| See a whole port, step by step | [katamari-notes.md](katamari-notes.md) |
 
-## The renderer
+## Every page
 
-| Page | What it covers |
-|---|---|
-| [deko3d-renderer.md](deko3d-renderer.md) | The deko3d back end, feature by feature: mapping plume to deko3d, shaders, memory, resolves, zcull, resolution, and the notes for releases 1.0.0 and 1.0.1 |
-| [renut-renderer-port.md](renut-renderer-port.md) | How reNut's renderer is built in and fitted to the A57: the import tool, the hooks, exactness and memory rules |
-| [record-time-draw-path.md](record-time-draw-path.md) | Translating the game's draw state once, when it is recorded, instead of on every draw: the plan, the work and the A/B results |
-| [shader.md](shader.md) | How shaders get from the Xbox 360 to the Switch's GPU, what the translator does to them, the specialization constants, and how to measure them |
-| [deko3d-shader-optimisations.md](deko3d-shader-optimisations.md) | The GLSL passes and the optimisations added to uam, deko3d's shader compiler |
+Three kinds of page: a **guide** applies to any port and is kept current; a **reference** grows with every port; a
+**record** is one port's notes as they were written, with that game's dates and numbers, and a note at its top says
+what in it still applies.
 
-## Keys and CPU work
+| Page | Kind | What is in it |
+| --- | --- | --- |
+| [building.md](building.md) | Guide | The tools, the game files, code generation and the shader translator, the shaders, the Switch builds (LTO, PGO, the shader package), the installer, tests (PC verify, Ryujinx, the guard, the difftests, the console, RenderDoc), taking the base's later ports |
+| [porting-a-360-game-prompt.md](porting-a-360-game-prompt.md) | Guide | A fill-in prompt for a new port's session: the placeholders, the rules, the order of work. Appendix A: the console over the network. Appendix B: RenderDoc |
+| [ultimate-fixes.md](ultimate-fixes.md) | Reference | Every port by number: its source and commit, the evidence, what was run here, its switch. Also the test runs of 2026-11-07/08, the hooks that need a game's own function address, what sasrt-nx reported, what was left out and why, and what is not done yet |
+| [changelog.md](changelog.md) | Reference | One line per port from port 44 on (ports 1-43 are the first round, in the README's "What's in it") |
+| [off-by-default.md](off-by-default.md) | Reference | The switches that are off and why: fixes that break another game's picture, faster forms that are not exact, speed-ups the console measured as slower or as no gain, trials |
+| [xdk-notes.md](xdk-notes.md) | Reference | What ports at a later XDK met: hooks, the device layout |
+| [hand-and-machine-optimising-guide.md](hand-and-machine-optimising-guide.md) | Guide | sasrt-nx's guide (2026-11-11): measuring first, machine copies, hand natives, the order that paid off, a checklist for one function |
+| [optimising-functions.md](optimising-functions.md) | Guide | The hot-function method written for Katamari: the machine track, the hand track, console profiles, checking, measuring, PGO |
+| [sasrt-batch-cc2.md](sasrt-batch-cc2.md) | Record | sasrt-nx's handoff of port 121: whole-program register liveness for the machine copies, stack forwarding, the trap and calling-convention rules, its results |
+| [katamari-notes.md](katamari-notes.md) | Record | katamari-nx's notes, 2026-10-30 to 11-05: code generation, Renut at Katamari's addresses, the shaders, the hot functions, Ryujinx, every console test, 1.0.0 and 1.0.1 |
+| [codegen-crash-fixes.md](codegen-crash-fixes.md) | Record | Katamari's code-generation crashes (a function never found, a function table read as a jump table, a split function, a vcall thunk, a DLC level) and the scans after them |
 
-| Page | What it covers |
-|---|---|
-| [enhancements-reference.md](enhancements-reference.md) | Every run-time key that acts on this renderer and the CPU: what it does, why it keeps the picture exact, how it is checked, what was measured |
-| [enhancements.md](enhancements.md) | The history of the CPU work: localized copies, hand-written natives, bulk copies and the later rounds |
-| [Optimising game functions](https://github.com/ChanseyIsTheBest/katamari-nx/blob/main/docs/optimising-functions.md) (katamari-nx) | Beautiful Katamari's guide to making a game's own functions faster on the Switch: machine copies of as many functions as possible, and hand-written ones only from console profile data. It uses that port's tools and numbers |
-| [codegen-enhancements.md](codegen-enhancements.md) | Build-time changes to the generated game code: generator options and post-codegen passes |
-| [renut-cpu-work-from-sa2.md](renut-cpu-work-from-sa2.md) | The CPU work taken from sa2-nx, what changed for this game, and what was left out |
-| [four-core-mode.md](four-core-mode.md) | Using the fourth CPU core through a forwarder, following NetherSX2_nx's layout |
-| [pgo-lto.md](pgo-lto.md) | The link-time and profile-guided optimised Switch build |
+## Elsewhere
 
-## The game
+| Where | What is in it |
+| --- | --- |
+| [app/README.md](../app/README.md) | The app's layout (the game layer, Renut's renderer, the shader translator, plume) and reNut's credits |
+| [sdk/README.md](../sdk/README.md) | The ReXGlue SDK fork and its Horizon (Switch) layer |
+| [tools/difftest/README.md](../tools/difftest/README.md) | The shader difftests: a pass checked bit for bit on random inputs |
+| [tools/renut_patches/README.md](../tools/renut_patches/README.md) | banjo-nx's changes to Renut's files, as patches |
+| [shaders/README.md](../shaders/README.md) | masseffect-nx's old shader tools, not used by Renut's build |
+| [renut-nx's docs](https://github.com/ChanseyIsTheBest/renut-nx/tree/master/docs) | The method docs the base was built on: the renderer guide, the enhancements reference, deko3d, PGO and LTO |
+| [katamari-nx](https://github.com/ChanseyIsTheBest/katamari-nx) | Katamari's console run breakdowns and progress log |
 
-| Page | What it covers |
-|---|---|
-| [title-update-3.md](title-update-3.md) | Moving the port to title update 3, installing the DLC, and the `language` key |
-| [controls-and-keyboard.md](controls-and-keyboard.md) | The input driver from sa2-nx, two players, and the Switch software keyboard |
+## Keeping these pages
 
-## Porting another game
-
-Start at [porting-start-here.md](porting-start-here.md): it gives the reading order, says which guides are current, and
-lists the method rules.
-
-| Page | What it covers |
-|---|---|
-| [porting-guide-renderer.md](porting-guide-renderer.md) | Moving a ReXGlue Switch port to this renderer: what each piece gains, the order of work, and (section 6b) what measured slower on the console |
-| [deko3d-native-renderer-kit.md](deko3d-native-renderer-kit.md) | The deko3d kit given to other ports: which parts to reuse, the route, and the traps. Older than the current renderer |
-| [deko3d-port-faq.md](deko3d-port-faq.md) | Answers to the questions other ports asked while following the kit. Older than the current renderer |
-| [porting-a-360-game-prompt.md](porting-a-360-game-prompt.md) | A generic fill-in prompt to paste into a new coding-agent session to start a port from katamari-nx |
-| [xdk-versions.md](xdk-versions.md) | The XDK build, title ID and kernel version of 27 of our Xbox 360 ports' games, and how they were read |
-
-## Words used in these pages
-
-- **banjo-nx** is this project's former name. Repository paths such as `dist/switch/banjo-nx/` keep it.
-- **Package** or **round** followed by a number or date means one numbered test build.
-- **Exact** or **pixel-identical** means a change that must leave the picture the same.
-- **A/B** is a comparison with one key on and off, often inside a single run.
-- **uam** is deko3d's shader compiler. **DKSH** is its compiled shader format.
-- **EDRAM** is the Xbox 360's render-target memory. The game still thinks in terms of it, even though the renderer does not
-  emulate it.
-- **NVK** and **NAK** are the Vulkan driver and its shader compiler, used before deko3d. A few pages mention them when
-  explaining why something was done.
-- Paths starting `D:\` or `C:\` are on the author's PC. They are not part of this repository, and that includes sister
-  ports' folders.
+- A port of a fix gets its row in [ultimate-fixes.md](ultimate-fixes.md), its line in [changelog.md](changelog.md), and,
+  when its switch is off, a row in [off-by-default.md](off-by-default.md) (its "Keeping this page" has the rule).
+- A guide changes with the code it describes, in the same commit.
+- A record stays as its port wrote it. When it goes stale, say so in its top note; do not rewrite it.
+- Dates are written out (2026-11-13), not "today" or "last week".
+- No personal details: no names, e-mail addresses, home network addresses or user-profile folders. The console's
+  address is `<CONSOLE_IP>` in the guide and `out/switch_host.txt` on your own PC (`out/` is not committed).

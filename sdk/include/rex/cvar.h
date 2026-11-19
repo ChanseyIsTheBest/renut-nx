@@ -121,6 +121,9 @@ namespace rex::cvar {
 
 std::vector<std::string> Init(int argc, char** argv);
 void LoadConfig(const std::filesystem::path& config_path);
+// sa2-nx: the same from TOML text (an application's built-in defaults, applied before its config file, which then
+// overrides them key by key). `origin` names it in the log.
+void LoadConfigString(std::string_view toml_text, std::string_view origin);
 void ApplyEnvironment();
 void FinalizeInit();
 bool IsFinalized();

@@ -71,8 +71,9 @@ if(NOT TARGET rexglue_switch_startup)
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/runtime_switch.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_elf_stubs.c"
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_crash_hooks.c"
-        "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_perf.cpp"
+        # kameo-nx (2026-11-05): the NRO's code on 2 MB blocks.
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_code_blocks.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_perf.cpp"
         # FPS and resolution for the console overlays (SaltyNX) and Reverse-NX reading.
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_saltynx.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_sysclk.cpp"
@@ -92,6 +93,8 @@ if(NOT TARGET rexglue_switch_startup)
         "LINKER:--wrap=nvFenceWait,--wrap=nvGpuChannelKickoff,--wrap=nvMapCreate"
         "LINKER:--wrap=nvAddressSpaceAllocFixed,--wrap=nvioctlNvhostAsGpu_MapBufferEx"
         "LINKER:--wrap=armDCacheClean,--wrap=nwindowQueueBuffer,--wrap=bqDequeueBuffer"
+        # renut-ultimate (2026-11-16, port 145): async present (switch_perf.cpp, banjo_async_present).
+        "LINKER:--wrap=nwindowDequeueBuffer"
         "LINKER:--wrap=svcSleepThread,--wrap=svcSetThreadCoreMask")
 endif()
 

@@ -129,8 +129,7 @@ REXCVAR_DEFINE_BOOL(banjo_gpu_zcull_greater, false, "Banjo/Enhancements",
                     "(NVK_ZCULL=greater), the one Banjo's reversed-depth scene can use. Culling is conservative, so "
                     "the picture should be the same; false = the driver's default direction (less)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-#include <rex/banjo_switch_default.h>  // banjo-nx (2026-11-01): the shipped Switch defaults
-REXCVAR_DEFINE_STRING(banjo_shader_misses, BANJO_SWITCH_DEFAULT("sdmc:/switch/banjo-nx/shader_misses", ""), "Nuts&Bolts/Graphics",
+REXCVAR_DEFINE_STRING(banjo_shader_misses, "", "Nuts&Bolts/Graphics",
                       "Folder where the native renderer writes each shader it cannot identify (raw microcode, once), "
                       "to add them to banjo_shaders.mesp later; empty = off (MASSEFFECT_SHADER_DISCOVERY overrides)");
 REXCVAR_DEFINE_INT32(banjo_renderdoc_capture_s, 0, "Nuts&Bolts/Graphics",
@@ -215,7 +214,7 @@ REXCVAR_DEFINE_BOOL(masseffect_native_edram4_several_rect, true, "Mass Effect",
                     "Native renderer: auto-index rect lists of 2..8 rectangles (D3D Clear of several regions) are "
                     "proven per rectangle, so mode 4 skips the transfers they overwrite. false = only single rects")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(masseffect_renderer_native, BANJO_SWITCH_DEFAULT(true, false),  /* banjo-nx: off until it draws Banjo correctly */ "Mass Effect",
+REXCVAR_DEFINE_BOOL(masseffect_renderer_native, false,  /* banjo-nx: off until it draws Banjo correctly */ "Mass Effect",
                     "Switch: use the native renderer (true) or ReXGlue's Xenos emulation (false, needs "
                     "gpu_plugin = \"xenos\")")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -256,27 +255,39 @@ REXCVAR_DEFINE_BOOL(masseffect_native_edram4_overwrite, true, "Mass Effect",
                     "overwrites completely (depth ALWAYS without stencil, or opaque full-mask color)");
 // Ring-thread CPU switches: every one keeps the old path and checks itself against it for the first
 // masseffect_native_verify_n uses (a DIFFERENCE line in the log and the old path for the rest of the session).
-REXCVAR_DEFINE_BOOL(masseffect_native_flat_identity, BANJO_SWITCH_DEFAULT(true, false), "Mass Effect",
+REXCVAR_DEFINE_BOOL(masseffect_native_flat_identity, false, "Mass Effect",
                     "Ring: shader identity checks (VS fetch-patch match, PS microcode match) memoized in small "
                     "direct-mapped tables keyed by (library entry, load generation) instead of an unordered_map and a "
                     "word-by-word compare per use; exact (pure function of the loaded microcode and the entry)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(masseffect_native_fast_pair, BANJO_SWITCH_DEFAULT(true, false), "Mass Effect",
+REXCVAR_DEFINE_BOOL(masseffect_native_fast_pair, false, "Mass Effect",
                     "Ring: draw/record pairing without the cold cache lines and locks: record start addresses in a "
                     "compact array (the best record of a packet is found in two 32-byte rows), object -> library entry "
                     "through a lock-free table, no draw-queue mutex per unpaired draw, prefetch while draining")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(masseffect_native_raw_microcode, BANJO_SWITCH_DEFAULT(true, false), "Mass Effect",
+REXCVAR_DEFINE_BOOL(masseffect_native_raw_microcode, false, "Mass Effect",
                     "Ring: IM_LOAD of the same address and size as the last load of that stage compares the guest "
                     "words against a raw copy of the last load (one memcmp) instead of byte-swapping them first; "
                     "exact (the swap is a bijection)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(masseffect_native_pm4_fast, BANJO_SWITCH_DEFAULT(true, false), "Mass Effect",
+REXCVAR_DEFINE_BOOL(masseffect_native_pm4_fast, false, "Mass Effect",
                     "Ring: runs of constant/fetch register writes (type 0, SET_CONSTANT2/SET_SHADER_CONSTANTS, "
                     "LOAD_ALU_CONSTANT) are byte-swapped, compared and stored four words at a time with NEON "
                     "straight from the guest words; same register contents and generation bumps")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DECLARE(bool, banjo_cpu_verify);  // src/cpu/banjo_enhancements.cpp
+// Port 172 (from fnxf_xiii): see VblankLoop (and the SDK's GraphicsSystem vsync worker). Off by default: every title's vblank timing changes.
+REXCVAR_DEFINE_BOOL(banjo_vblank_from_display, false, "GPU",
+                    "The guest's vblanks follow the display's refreshes (its vsync event), the 60 Hz timer only while "
+                    "none comes for 1.5 periods: on the timer the guest's vblank drifted against the display, and 30 fps "
+                    "frames came out uneven (fnxf_xiii). Needs a title that follows the display (banjo_display_sync). "
+                    "false: the timer, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+namespace rex::graphics {
+// Port 172: the display's refresh count, waited for (set by app/src/renut_engine/display_sync.cpp; read here and by
+// sdk/src/graphics/graphics_system.cpp). Defined here: this object is in every build.
+uint64_t (*g_display_refresh_wait)(uint64_t seen, uint64_t timeout_ns) = nullptr;
+}
 REXCVAR_DECLARE(bool, masseffect_native_deferred_recording);  // masseffect_native_deferred.cpp
 REXCVAR_DECLARE(bool, banjo_d3d_api_clear);  // src/me/banjo_d3d_clear.h
 REXCVAR_DECLARE(bool, banjo_d3d_api_resolve);  // src/me/banjo_d3d_clear.h
@@ -1761,7 +1772,30 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
     const auto interval =
         std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / hz));
     auto next = Clock::now() + interval;
+    // Port 172 (from fnxf_xiii, its notes of 2026-10-27 and 10-29; banjo_vblank_from_display): a vblank at each of the
+    // display's refreshes (its vsync event, counted by app/src/renut_engine/display_sync.cpp); the timer's only while
+    // none comes for 1.5 periods (the display asleep). On the timer the guest's vblank drifted against the display and
+    // 30 fps frames came out uneven (fnxf_xiii). Looked for at every tick: the display's thread may start later.
+    static const bool follow_display = REXCVAR_GET(banjo_vblank_from_display);
     while (active_.load(std::memory_order_acquire)) {
+      if (follow_display && rex::graphics::g_display_refresh_wait) {
+        const uint64_t period_ns = uint64_t(1e9 / hz);
+        uint64_t seen = rex::graphics::g_display_refresh_wait(UINT64_MAX, 0);
+        auto last = Clock::now();
+        while (active_.load(std::memory_order_acquire)) {
+          const uint64_t count = rex::graphics::g_display_refresh_wait(seen, period_ns * 3 / 2);
+          const auto now = Clock::now();
+          if (count == seen && now - last < interval)
+            continue;
+          seen = count;
+          last = now;
+          counter_.fetch_add(1, std::memory_order_relaxed);
+          Interrupt(0, 2);
+          WakeRingWait();  // banjo_ring_wait_vblank: the interrupt handler has run
+          REX_SYS_COUNT(rex::syscount::kVblankTick, 1);
+        }
+        return 0;
+      }
       const auto now = Clock::now();
       if (now - next > std::chrono::milliseconds(250)) next = now;
       while (now >= next) {

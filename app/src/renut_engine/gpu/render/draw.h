@@ -242,11 +242,11 @@ constexpr u32 FieldOfOffset(u32 at) {
     return kFieldMisc;
   // Title update 3's CDevice (banjo-nx 2026-10-29): 4 bytes more from 0x2AC0 and 8 from 0x2E30 (the base's 0x2E2C),
   // the same from 0x3390 (d3d.h); the base's boundaries in the comments of DrawField moved with their fields.
-  if (at < 0x2E04)
+  if (at < 0x2DF8)  // katamari-nx: 0x2E04->0x2DF8
     return kFieldUnread;
   if (at >= d3d::kDeviceOffsetVertexDeclaration && at < d3d::kDeviceOffsetVertexDeclaration + 4)
     return kFieldDecl;
-  if (at < 0x2F08)
+  if (at < 0x2EF8)  // katamari-nx: 0x2F08->0x2EF8
     return kFieldPrivate;
   if (at < d3d::kDeviceOffsetIndexBuffer)
     return kFieldTail;
@@ -258,7 +258,7 @@ constexpr u32 FieldOfOffset(u32 at) {
     return kFieldStreams;
   if (at < d3d::kDeviceOffsetTextures + 4 * d3d::kTextureFetchSlots)
     return kFieldTexWords;
-  if (at < 0x318C)
+  if (at < 0x317C)  // katamari-nx: 0x318C->0x317C
     return kFieldTail;
   if (at < d3d::kDeviceOffsetPixelShader)
     return kFieldScissor;
@@ -368,11 +368,39 @@ struct HostTexture;
 // banjo-nx (2026-10-19, banjo_renut_depth_words_lazy): 'dest' (a depth resolve destination) is read through its words:
 // writes them now if its last resolve did not (from the unchanged source), and from now on at every resolve.
 void EnsureDepthWordsLocked(HostTexture &dest);
+// renut-ultimate (2026-11-13, sasrt-nx's resolve project R1, sasrt_gpu_diag_depth_words): the 10 s line's text (empty
+// with the key off); it starts the counts again.
+std::string DepthWordsCensusReport();
+// vivapinata-nx (2026-11-12, vivapinata_depth_resolve_skip_unread): a depth resolve destination is read (sampled, or
+// its words): its resolves are drawn from now on, and a resolve left out is drawn now.
+void DepthResolveReadLocked(HostTexture &dest, int path = 0);  // path: 0 slot, 1 alias, 2 words (the log)
 
 void ResolveStateLocked(const u8 *device_state, u32 flags, const ClearRect *source_rect,
                         u32 dest_texture_va, const d3d::TextureFetchConstant *dest_format,
                         i32 dest_x, i32 dest_y, u32 dest_level, u32 dest_slice,
                         const float clear_color[4], float clear_depth, u32 clear_stencil);
+
+// blur-nx (2026-11-13, cycle 3: M-35 of Blur's docs/cpu-moonshots-50-1113.md): of the device a resolve reads only
+// the words of SetRenderTarget's four targets and SetDepthStencilSurface's surface (kDeviceOffsetRenderTargets, then
+// kDeviceOffsetDepthStencil = kDeviceOffsetRenderTargets + 16), the source as word 'flags & 7' (0-7, so eight words:
+// what device.U32(kDeviceOffsetRenderTargets + source * 4) read). The queued resolve (backend/queued.cpp) keeps those
+// 32 bytes instead of copying the whole 12.9 KB device; ResolveStateLocked reads them out of a whole state and runs the
+// same code (exact: nothing else of the device is read).
+constexpr u32 kResolveTargetWords = 8;
+// blur-nx (2026-11-13, #55 of docs/cpu-near-exact-50-1113.md, exact): a clear reads of the device only the target words
+// above and the viewport's four floats (x, y, width, height at kClearViewportOffset: CDevice's, as D3D clamps a clear
+// to it). ClearTargetsLocked is the clear on those; ClearStateLocked reads them out of a whole state.
+// renut-ultimate (2026-11-14): the offset is the XDK's (d3d.h); blur-nx's 0x3218 is past Katamari's device snapshot.
+constexpr u32 kClearViewportOffset = d3d::kDeviceOffsetViewport;
+static_assert(kClearViewportOffset + 16 <= d3d::kDeviceSnapshotSize);
+void ReadClearViewport(const u8 *device_state, float viewport[4]);
+void ClearTargetsLocked(const u32 *target_words, const float *viewport, u32 flags, const ClearRect *rect,
+                        const float color[4], float depth, u32 stencil);
+void ReadResolveTargets(const u8 *device_state, u32 targets[kResolveTargetWords]);
+void ResolveTargetsLocked(const u32 *targets, u32 flags, const ClearRect *source_rect,
+                          u32 dest_texture_va, const d3d::TextureFetchConstant *dest_format,
+                          i32 dest_x, i32 dest_y, u32 dest_level, u32 dest_slice,
+                          const float clear_color[4], float clear_depth, u32 clear_stencil);
 
 // Reads render target 'source' (0-3) of the device state back for the CPU:
 // what a color resolve of its rect (0, 0, width, height) into an X8R8G8B8
@@ -385,6 +413,9 @@ bool ReadRenderTargetLocked(const u8 *device_state, u32 source, u32 &width, u32 
 
 // What Swap scans out for the guest front buffer texture, or an empty image.
 PresentImage FrontBufferImageLocked(u32 texture_va);
+// Port 169 (from fnxf_xiii; banjo_renut_scaler_crop): the same, scanning out the scaler's source rect (x1 y1 x2 y2,
+// guest pixels) when it is a part of the front buffer from its corner.
+PresentImage FrontBufferImageLocked(u32 texture_va, const i32 scaler[4]);
 // banjo-nx (2026-10-19): the texture at that address holds what a resolve wrote (not a new, uninitialised image).
 bool FrontBufferWrittenLocked(u32 texture_va);
 
@@ -427,6 +458,7 @@ bool SortableShadersLocked(u32 vs_va, u32 ps_va);
 bool ShaderSortableByHash(uint64_t hash, const ShaderCacheEntry *entry, bool pixel);
 void CountMergedDraws(uint64_t draws, uint64_t ops);
 std::string DrawKindsReport();
+std::string DroppedDrawsReport();  // halo3-nx (2026-11-03): draws that never reached the GPU, by why
 inline uint64_t RenderTicks() {
 #if defined(__aarch64__)
   uint64_t t;
