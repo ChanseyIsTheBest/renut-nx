@@ -19,10 +19,10 @@ until the user decides, with its sites below.
 | #42 vector max/min lanes that differ | `REX_NX_VMINMAX_FAST` (BLUR_NX_ONLY) | **956,781 of 393.6 million lanes** (0.24 %, run 1), 472,260 of 529.4 million (0.09 %, run 2) | not recorded | counts: off | off |
 | #5 integer compares copying XER[SO] = 1 | `REX_NX_XER_SO_ZERO` | 0 in every window | none | cleared | on in the cleared set |
 | #19 traps only log | `REX_NX_NO_TRAPS` | no trap line in either run | none | cleared | on in the cleared set |
-| #9 r1 assumed preserved | `BLUR_NX_R1_ASSUME=1` (post-codegen) | | | | |
+| #9 r1 assumed preserved | `BLUR_NX_R1_ASSUME=1` (post-codegen) | the proof (r1_preserve.py on this tree): 31,381 functions proven with indirect calls taken as preserving; `--near-exact` assumes 8,143 more (39,524), 390 left (25 setjmp / longjmp, the rest r1 writes the flow cannot follow). The check: REX_R1_CHECK (PC verify) tests every assumed call | the 8,143 (out/census/r1_near_exact.json) | see the verify run below | |
 | ABI trust in the copies | `BLUR_LOCALIZE_ABI_TRUST=1` (post-codegen) | | | | |
 | Stack-frame elisions | `BANJO_GEN_LR_MOVES_ELIDE`, `_NV_SAVES_ELIDE`, `_BACK_CHAIN_ELIDE`; `SASRT_HOT_LR_ELIDE` | | | | |
-| No trapping math | `BANJO_GENERATED_NO_TRAPPING_MATH` | | | | |
+| No trapping math | `BANJO_GENERATED_NO_TRAPPING_MATH` (CMake; the Switch's GCC only: clang on the PC assumes no traps already) | not a run: a code census. app/generated/fp_env_files.txt lists the 5 files that write the guest FPSCR: `_ctrlfp`, `_set_fsr`, `_FPreset`, `_set_statfp`, `JumpToContinuation` (the CRT's; cg13_town1 counted 34 writes, 10 to a mode other than nearest); they keep -ftrapping-math (the CMake form grafted from blur-nx: the base's switch put the option on every file, the writers too). The 5 readers (`loadFromHost`: `_get_fsr` and the same CRT functions) return the rounding mode only, never the host's exception flags, and no game code enables a host trap; under CG-13 there is no flush-mode switch left for an operation to move across | the 5 writers | cleared (exact under CG-13: what it lets GCC move changes no value the guest sees) | on in the Switch build (text size below) |
 
 ## Runs
 
