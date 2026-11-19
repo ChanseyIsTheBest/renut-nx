@@ -79,8 +79,15 @@ log_level = "info"
 # fetch types for every draw), is left out: its off half needs every pixel variant with 975 = 0, which this package's
 # DKSH cache does not hold (tools/deko3d_variant_cache.py --round-ab makes them), so the console would compile them in
 # the off halves and the A/B would measure the compiles.)
-banjo_renut_ab_targets = "83,1"
+# 151 (2026-11-20): Renut's early alpha test (constant 976; vivapinata_shader_noearly is its off half). On N&B it adds
+# about 110 instructions to each main pixel shader (13,223 against 11,900 without it over the console's variants;
+# renut-nx 1.0.2's: 11,938): the off half is the cheaper shader, the on half discards alpha-tested quads earlier. Same
+# pixels. The 2026-11-20 cache holds both halves (--noearly-ab). If the off half is faster, set
+# vivapinata_shader_noearly = true in renut.toml.
+banjo_renut_ab_targets = "151,83,1"
 banjo_renut_ab_s = 30
+# The variants the cache still lacks, named in deko3d.log (send it back for the next cache).
+banjo_deko3d_log_misses = true
 
 # ---- Controls ----
 # Face buttons by position, as on the Xbox 360 pad the game was made for (the bottom button acts as A, the right one
