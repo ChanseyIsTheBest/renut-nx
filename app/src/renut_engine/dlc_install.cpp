@@ -1,6 +1,5 @@
 // banjo-nx (2026-10-29): reNut upstream's DLC installer (ab60251, src/renut_engine/app/dlc_install.cpp; GPL-3.0, credit reNut),
-// the DLC folder next to the NRO / exe (sdmc:/switch/banjo-nx/dlc on the Switch). katamari-nx (2026-10-31): the same
-// file, game-agnostic (the running title's packages only): sdmc:/switch/katamari-nx/dlc, Beautiful Katamari's 16 packs.
+// the DLC folder next to the NRO / exe (sdmc:/switch/banjo-nx/dlc on the Switch).
 #include "renut_engine/dlc_install.h"
 
 #include <algorithm>
@@ -24,26 +23,12 @@
 REXCVAR_DEFINE_STRING(renut_dlc_folder, "dlc", "Nuts&Bolts/DLC",
     "Folder of DLC packages (Xbox Live content files) reNut installs when the game starts, relative to "
     "reNut's folder.");
-// katamari-nx (2026-11-01, the user's request): Beautiful Katamari's packs that only unlock presents and cousins the
-// game unlocks by itself, which takes the fun out of unlocking them; off by default (the user, the same day). The
-// stage packs (Shopping Spree, Milky Way Constellations, High-calorie, Dangerous, Mechanical and Perfectly Sized
-// Katamari, The Weaver Girl) are not in it.
-REXCVAR_DEFINE_BOOL(katamari_dlc_unlock_packs, false, "Nuts&Bolts/DLC",
-    "Beautiful Katamari's DLC packs that only unlock presents and cousins (Accessory Sets A-D, Character Sets A-D, "
-    "Special Accessory): false (the default) keeps them from the game, though they stay installed; true shows them "
-    "too. The stage packs are shown either way.");
-REXCVAR_DECLARE(std::string, dlc_hidden);  // sdk/src/system/xam/content_manager.cpp
 
 namespace renut::dlc {
 
 namespace {
 
 namespace fs = std::filesystem;
-
-// The display names of the packs katamari_dlc_unlock_packs = false hides (their package headers' names).
-constexpr std::array<const char *, 9> kKatamariUnlockPacks = {
-    "Accessory Set A", "Accessory Set B", "Accessory Set C", "Accessory Set D", "Character Set A",
-    "Character Set B", "Character Set C", "Character Set D", "Special Accessory"};
 
 // An Xbox 360 package's header (big-endian): the magic, then at 0x344 the
 // content type, 0x360 the title ID and 0x411 the display name (UTF-16).
@@ -131,16 +116,6 @@ void SetUserDataRoot(const fs::path &root) {
 void InstallPackages(rex::Runtime *runtime) {
     if (!runtime || !runtime->kernel_state())
         return;
-    if (!REXCVAR_GET(katamari_dlc_unlock_packs)) {
-        std::string &hidden = REXCVAR_GET(dlc_hidden);
-        for (const char *name : kKatamariUnlockPacks) {
-            if (!hidden.empty())
-                hidden += ';';
-            hidden += name;
-        }
-        RNUT_INFO("DLC: katamari_dlc_unlock_packs = false: the accessory, character and special accessory packs "
-                  "are kept from the game");
-    }
     fs::path folder = rex::to_path(REXCVAR_GET(renut_dlc_folder));
     if (folder.is_relative())
         folder = rex::filesystem::GetExecutableFolder() / folder;  // banjo-nx: next to the NRO / exe

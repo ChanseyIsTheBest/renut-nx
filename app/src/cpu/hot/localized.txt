@@ -1,119 +1,64 @@
-# katamari-nx: the localized native copies (tools/localize_native.py --list; banjo-nx's method, docs/enhancements.md
-# "Localized copies"). Written 2026-10-30 from the PC sampling profile of title, menus, intro and first gameplay
-# (out/pc_runs/renut4/pc_profile.log, all seven 60-s windows; shares are of every busy sample of every thread).
-# A line is "<address> [options] <what>". The first five carry the hand-written natives (hand.txt): their hooks.
-82759C98 4x4 matrix copy (hand-written native; PC rank 1, 5.2 % of busy samples in gameplay)
-827598C0 4x4 matrix multiply in place (hand-written native; rank 2)
-82759780 4x4 matrix multiply, three operands (hand-written native; rank 11)
-82759D20 translation matrix (hand-written native; rank 20)
-827E7A40 C runtime memset (hand-written native, banjo-nx's)
-827E73A8 C runtime word copy (hand-written native, 2026-10-30 evening)
-8266AF60 string hash (hand-written native, 2026-10-30 evening; ARM 187 samples)
-827596B0 4x4 matrix product, three operands (hand-written native, 2026-10-31)
-82316A78 sphere test against a box (job threads, 1.3 % of the console's guest samples) (hand-written native, 2026-10-31)
-8275A828 N vectors turned by a 3x3 matrix (hand-written native, 2026-10-31)
-8276E3D8 integration step of N bodies (positions, rotations normalised) (hand-written native, 2026-10-31)
-824E97F0 sine (range reduction and polynomial) (hand-written native, 2026-10-31)
-# The top 100 others of the profile (machine-optimised: localized copies, small callees inlined, direct dispatch).
-# Left out (the copy tool refuses them: an atomic compare-and-swap, state shared with other threads): 826A13D8,
-# 82210630, 826E9E38; the next ones of the profile take their places.
-82265C08 Main XThread: PC 1.61 % of busy samples (7949 samples, windows 1-7); rank 3
-827A5B00 Main XThread: PC 1.53 % of busy samples (7557 samples, windows 1-7); rank 4
-82536F90 XThread50B8: PC 1.24 % of busy samples (6120 samples, windows 1-7); rank 5
-82656DF8 XThread4B10: PC 0.93 % of busy samples (4603 samples, windows 1-7); rank 6
-82277E70 Main XThread: PC 0.80 % of busy samples (3931 samples, windows 1-7); rank 7
-822683D0 Main XThread: PC 0.68 % of busy samples (3367 samples, windows 1-7); rank 8
-82738260 XThread4B10: PC 0.66 % of busy samples (3273 samples, windows 1-7); rank 9
-822772C0 Main XThread: PC 0.62 % of busy samples (3070 samples, windows 1-7); rank 10
-824BFE50 Main XThread: PC 0.60 % of busy samples (2968 samples, windows 1-7); rank 12
-82678260 XThread4B10: PC 0.50 % of busy samples (2468 samples, windows 1-7); rank 13
-82672410 XThread4B10: PC 0.46 % of busy samples (2288 samples, windows 1-7); rank 14
-8227A280 Main XThread: PC 0.46 % of busy samples (2275 samples, windows 1-7); rank 15
-8276C9E8 Main XThread: PC 0.44 % of busy samples (2176 samples, windows 1-7); rank 16
-82659D00 XThread4B10: PC 0.43 % of busy samples (2141 samples, windows 1-7); rank 17
-82539960 XThread50B8: PC 0.43 % of busy samples (2097 samples, windows 1-7); rank 18
-8279F0B0 Main XThread: PC 0.38 % of busy samples (1896 samples, windows 1-7); rank 19
-8221F640 Main XThread: PC 0.38 % of busy samples (1865 samples, windows 1-7); rank 21
-827E6F50 Main XThread: PC 0.34 % of busy samples (1671 samples, windows 1-7); rank 23
-827877C0 Main XThread: PC 0.34 % of busy samples (1654 samples, windows 1-7); rank 24
-822652E8 Main XThread: PC 0.33 % of busy samples (1616 samples, windows 1-7); rank 25
-8278B2B8 Main XThread: PC 0.32 % of busy samples (1595 samples, windows 1-7); rank 26
-822470D0 Main XThread: PC 0.31 % of busy samples (1511 samples, windows 1-7); rank 27
-82220388 Main XThread: PC 0.31 % of busy samples (1506 samples, windows 1-7); rank 28
-8223A970 Main XThread: PC 0.30 % of busy samples (1457 samples, windows 1-7); rank 29
-82541A50 XThread50B8: PC 0.29 % of busy samples (1440 samples, windows 1-7); rank 30
-82746D50 XThread4B10: PC 0.29 % of busy samples (1440 samples, windows 1-7); rank 31
-8271FD20 XThread4B10: PC 0.28 % of busy samples (1387 samples, windows 1-7); rank 32
-82746B70 XThread4B10: PC 0.28 % of busy samples (1365 samples, windows 1-7); rank 33
-82689A40 XThread4B10: PC 0.25 % of busy samples (1209 samples, windows 1-7); rank 34
-82787298 Main XThread: PC 0.23 % of busy samples (1139 samples, windows 1-7); rank 35
-8271F358 XThread4B10: PC 0.23 % of busy samples (1137 samples, windows 1-7); rank 36
-822814D0 Main XThread: PC 0.22 % of busy samples (1071 samples, windows 1-7); rank 37
-82539A88 XThread50B8: PC 0.22 % of busy samples (1068 samples, windows 1-7); rank 38
-8271FAD0 XThread4B10: PC 0.20 % of busy samples (978 samples, windows 1-7); rank 39
-824D42A0 XThread4B10: PC 0.20 % of busy samples (974 samples, windows 1-7); rank 40
-822889D8 Main XThread: PC 0.15 % of busy samples (739 samples, windows 1-7); rank 41
-8274F128 XThread4B10: PC 0.15 % of busy samples (736 samples, windows 1-7); rank 42
-8270FE40 XThread4B10: PC 0.14 % of busy samples (693 samples, windows 1-7); rank 43
-82536478 XThread50B8: PC 0.13 % of busy samples (643 samples, windows 1-7); rank 44
-82536110 XThread50B8: PC 0.12 % of busy samples (593 samples, windows 1-7); rank 45
-826583E8 XThread4B10: PC 0.12 % of busy samples (582 samples, windows 1-7); rank 46
-82536990 XThread50B8: PC 0.10 % of busy samples (512 samples, windows 1-7); rank 47
-8253FC20 XThread50B8: PC 0.10 % of busy samples (471 samples, windows 1-7); rank 48
-82759A00 XThread4B10: PC 0.09 % of busy samples (445 samples, windows 1-7); rank 49
-827E8940 XThread4B10: PC 0.08 % of busy samples (386 samples, windows 1-7); rank 51
-825366B8 XThread50B8: PC 0.08 % of busy samples (381 samples, windows 1-7); rank 52
-8278B190 Main XThread: PC 0.08 % of busy samples (380 samples, windows 1-7); rank 53
-82497C98 Main XThread: PC 0.07 % of busy samples (369 samples, windows 1-7); rank 54
-82536A38 XThread50B8: PC 0.07 % of busy samples (366 samples, windows 1-7); rank 55
-82266060 Main XThread: PC 0.07 % of busy samples (366 samples, windows 1-7); rank 56
-8254B9A8 XThread50B8: PC 0.07 % of busy samples (340 samples, windows 1-7); rank 57
-8266D8A0 XThread6E8C: PC 0.07 % of busy samples (340 samples, windows 1-7); rank 58
-824B9970 Main XThread: PC 0.07 % of busy samples (325 samples, windows 1-7); rank 59
-82535930 XThread50B8: PC 0.06 % of busy samples (279 samples, windows 1-7); rank 60
-8271F9C0 XThread4B10: PC 0.06 % of busy samples (273 samples, windows 1-7); rank 61
-829EB4C0 XThread33AC: PC 0.05 % of busy samples (237 samples, windows 1-7); rank 62
-82535FE0 XThread50B8: PC 0.05 % of busy samples (226 samples, windows 1-7); rank 63
-825471D0 XThread50B8: PC 0.05 % of busy samples (223 samples, windows 1-7); rank 64
-8252E9F8 XThread50B8: PC 0.04 % of busy samples (206 samples, windows 1-7); rank 65
-824BAAE0 Main XThread: PC 0.04 % of busy samples (203 samples, windows 1-7); rank 66
-825361E0 XThread50B8: PC 0.04 % of busy samples (195 samples, windows 1-7); rank 67
-8275AA88 Main XThread: PC 0.04 % of busy samples (194 samples, windows 1-7); rank 68
-82536548 XThread50B8: PC 0.04 % of busy samples (193 samples, windows 1-7); rank 69
-829DBC18 XThread33AC: PC 0.04 % of busy samples (187 samples, windows 1-7); rank 70
-82536828 XThread50B8: PC 0.04 % of busy samples (184 samples, windows 1-7); rank 71
-8275A198 Main XThread: PC 0.04 % of busy samples (184 samples, windows 1-7); rank 72
-8249C780 Main XThread: PC 0.03 % of busy samples (168 samples, windows 1-7); rank 73
-8253EB88 XThread50B8: PC 0.03 % of busy samples (156 samples, windows 1-7); rank 74
-82493C20 XThread4B10: PC 0.03 % of busy samples (129 samples, windows 1-7); rank 75
-8271C5E8 Main XThread: PC 0.02 % of busy samples (121 samples, windows 1-7); rank 76
-827DDEB0 Main XThread: PC 0.02 % of busy samples (118 samples, windows 1-7); rank 77
-82534AB0 XThread50B8: PC 0.02 % of busy samples (109 samples, windows 1-7); rank 79
-829EE070 XThread33AC: PC 0.02 % of busy samples (98 samples, windows 1-7); rank 80
-829F2E10 XThread33AC: PC 0.02 % of busy samples (89 samples, windows 1-7); rank 81
-8275FC38 Main XThread: PC 0.02 % of busy samples (88 samples, windows 1-7); rank 82
-82610428 XThread33AC: PC 0.02 % of busy samples (87 samples, windows 1-7); rank 83
-8226B978 Main XThread: PC 0.02 % of busy samples (85 samples, windows 1-7); rank 84
-82212938 Main XThread: PC 0.02 % of busy samples (83 samples, windows 1-7); rank 85
-827E8D20 XThread4B10: PC 0.02 % of busy samples (80 samples, windows 1-7); rank 86
-82628F00 XThread6AB8: PC 0.02 % of busy samples (75 samples, windows 1-7); rank 87
-82497E30 Main XThread: PC 0.01 % of busy samples (73 samples, windows 1-7); rank 88
-82534150 XThread50B8: PC 0.01 % of busy samples (72 samples, windows 1-7); rank 89
-8272FDD0 XThread4B10: PC 0.01 % of busy samples (68 samples, windows 1-7); rank 90
-827595D0 Main XThread: PC 0.01 % of busy samples (67 samples, windows 1-7); rank 91
-829E05B8 XThread33AC: PC 0.01 % of busy samples (63 samples, windows 1-7); rank 92
-82541CE0 XThread50B8: PC 0.01 % of busy samples (63 samples, windows 1-7); rank 93
-824AC010 Main XThread: PC 0.01 % of busy samples (60 samples, windows 1-7); rank 94
-824B9570 Main XThread: PC 0.01 % of busy samples (57 samples, windows 1-7); rank 95
-829F2ED0 XThread33AC: PC 0.01 % of busy samples (51 samples, windows 1-7); rank 96
-824B97F0 Main XThread: PC 0.01 % of busy samples (49 samples, windows 1-7); rank 97
-8271F470 XThread4B10: PC 0.01 % of busy samples (47 samples, windows 1-7); rank 98
-824ABF90 Main XThread: PC 0.01 % of busy samples (47 samples, windows 1-7); rank 99
-82294B28 Main XThread: PC 0.01 % of busy samples (46 samples, windows 1-7); rank 100
-824AC748 Main XThread: PC 0.01 % of busy samples (45 samples, windows 1-7); rank 101
-824BC2F8 Main XThread: PC 0.01 % of busy samples (45 samples, windows 1-7); rank 102
-824B6D48 Main XThread: PC 0.01 % of busy samples (44 samples, windows 1-7); rank 103
-82627520 XThread33AC: PC 0.01 % of busy samples (41 samples, windows 1-7); rank 104
-829EC658 XThread33AC: PC 0.01 % of busy samples (34 samples, windows 1-7); rank 105
-825410A0 XThread50B8: PC 0.01 % of busy samples (34 samples, windows 1-7); rank 106
-829ECA00 XThread33AC: PC 0.01 % of busy samples (29 samples, windows 1-7); rank 108
+# banjo-nx: the guest functions replaced by localized native copies (docs/enhancements.md, "Hot guest functions as
+# localized copies"). tools/localize_native.py writes app/generated/hot/ from this list after every codegen
+# (tools/post_codegen.py), and app/src/cpu/banjo_hot_guest.cpp includes the result: one hook, one key
+# (banjo_cpu_native_<function>, CPU group) and one guard per line.
+#
+#   <address or generated name> [off] [key=<cvar>] [closure=<lines>] <what it is, with the shares that chose it>
+#
+# "off": the key's default is false. Shares: of the guest-code samples of the game threads on the PC (gameplay /
+# intro / menu, 2026-10-13) and samples of the console run of 2026-10-13 (title, menus, intro).
+# Write no other function's address on a line: tools/direct_calls.py reads every address in app/src as a hooked one.
+
+82376878 draw threads: binds a draw's textures, one loop that calls the texture setter (PC 3.72 / 2.61 / 2.74 %, console 9 samples; rank 3)
+823769E8 draw threads: uploads a draw's shader constants, four loops over the two constant writers (PC 2.08 / 1.68 / 1.46 %, console 2 samples; rank 6)
+82B6B258 audio thread: XAudio sample loop (the hottest guest function of that thread on the console) (PC 1.60 / 1.44 / 1.73 %, console 35 samples; rank 10)
+82B6A678 audio thread: XAudio limiter, log10 / log / pow of every sample in its closure (console 2026-10-16, package 20e: 7.3 % of the game threads' samples with rex_log10 and rex_log; CPU codegen agent proposal 3)
+82373F70 draw threads: one draw's state set-up, fifteen callees (PC 1.09 / 0.72 / 0.85 %, console 5 samples; rank 22)
+821F9BB8 draw threads: Direct3D state setter writing into the command buffer (PC 0.90 / 0.63 / 0.78 %, console 3 samples; rank 26)
+822DA610 main thread: float and vector routine with four small callees (PC 0.52 / 0.46 / 1.79 %, console 3 samples; rank 28)
+82377E88 draw threads: list walk with one call per element (PC 0.49 / 0.35 / 1.39 %, console 3 samples; rank 35)
+823828A8 draw threads: straight-line float and vector routine (PC 0.51 / 0.48 / 0.03 %, console 6 samples; rank 48)
+82376450 draw threads: two loops over a draw's bindings, three callees (PC 0.45 / 0.29 / 0.41 %, console 1 samples; rank 49)
+8222A1D0 main thread (menus): list walk, nine small callees (PC 0.20 / 0.23 / 1.08 %, console 0 samples; rank 50)
+82378BC0 draw threads: float and vector routine, eight callees (PC 0.49 / 0.39 / 0.10 %, console 3 samples; rank 51)
+82229110 main thread (menus): small routine with four callees (PC 0.07 / 0.14 / 1.35 %, console 0 samples; rank 59)
+82382780 draw threads: float routine with two callees (PC 0.40 / 0.39 / 0.00 %, console 2 samples; rank 65)
+rex_Process_M_03_Native_SRC_XAUDIO__SAXPAUXAUDIOSRCHDR_2__Z key=banjo_cpu_native_xaudio_src_m03 audio thread: XAudio sample-rate converter loop (mono) (PC 0.24 / 0.15 / 0.64 %, console 0 samples; rank 68)
+82A02D00 main thread: routine with nine small callees (PC 0.10 / 0.34 / 0.61 %, console 3 samples; rank 71)
+822216C8 main thread: float routine with six callees (PC 0.10 / 0.20 / 0.44 %, console 2 samples; rank 88)
+82376768 draw threads: Direct3D state setter with five callees (PC 0.23 / 0.13 / 0.14 %, console 0 samples; rank 98)
+82229C90 main thread (menus): small routine with four callees (PC 0.18 / 0.13 / 0.24 %, console 0 samples; rank 104)
+82C111C0 key=banjo_cpu_native_memcpy every thread: the C runtime's memcpy as a hook of its own, the hand-written native in front (PC 1.29 / 2.07 / 1.83 %, console 7 samples; rank 7)
+82C116F0 key=banjo_cpu_native_memset every thread: the C runtime's memset as a hook of its own, the hand-written native in front (PC 0.56 / 0.45 / 1.42 %, console 2 samples; rank 29)
+821FE108 key=banjo_cpu_native_constants_vs draw threads: Direct3D's float-constant writer of the vertex shader block, the hand-written native in front (PC 1.47 / 0.87 / 0.54 %, console 4 samples; rank 18)
+821FE230 key=banjo_cpu_native_constants_ps draw threads: Direct3D's float-constant writer of the pixel shader block, the hand-written native in front (PC 1.10 / 0.80 / 1.35 %, console 5 samples; rank 19)
+821FC1C8 key=banjo_cpu_native_flush_constants draw threads: Direct3D's state flush, dirty float-constant blocks into the command buffer, the hand-written native in front (PC 1.19 / 0.79 / 0.91 %, console 8 samples; rank 21)
+821FBC70 key=banjo_cpu_native_flush_registers draw threads: Direct3D's state flush, dirty register words into the command buffer, the hand-written native in front (PC 0.86 / 0.83 / 1.12 %, console 4 samples; rank 23)
+# banjo-nx (2026-10-23, batch 5): the game's named functions (rex_*) that still ran as generated code. tools/switch_hot_bulk.py
+# counted them as host code, so no bulk list ever took them; from the console's batch-4 profiles (share of all samples).
+rex_XAUDIO__CRouterEffect__Process key=banjo_cpu_native_xaudio_router audio thread: XAudio router, a channel's ramped copy or mix per route (console 0.89 %; 14 % of the audio thread)
+rex_XACT__CSound__ProcessEvents key=banjo_cpu_native_xact_sound_events audio thread: XACT sound event processing (console 0.29 %)
+rex_MainFrameLoop_8220B5E8 key=banjo_cpu_native_main_frame_loop main thread: the game's frame loop (console 0.23 %)
+rex_XAUDIO__CEngine__ProcessFrame key=banjo_cpu_native_xaudio_engine_frame audio thread: XAudio engine frame (console 0.16 %)
+rex_RtlpCoalesceFreeBlocks key=banjo_cpu_native_heap_coalesce every thread: the guest heap's free-block coalescing (console 0.12 %)
+rex_XAUDIO__SRC__LinearVector__ProcessBlock_short_2_ key=banjo_cpu_native_xaudio_src_stereo audio thread: XAudio sample-rate converter, stereo 16-bit (console 0.12 %)
+rex_XAUDIO__CRoutedVoice__ProcessEffects key=banjo_cpu_native_xaudio_routed_effects audio thread: XAudio routed voice effects (console 0.08 %)
+rex_XAUDIO__CSourceVoice__GetVoiceState key=banjo_cpu_native_xaudio_voice_state audio thread: XAudio source voice state (console 0.04 %)
+rex_XACT__CXAudioSourceVoice__GetVoiceState key=banjo_cpu_native_xact_voice_state audio thread: XACT source voice state (console 0.04 %)
+rex_XAUDIO__CXMASourceEffect__SynchronizeSourceBuffers key=banjo_cpu_native_xma_sync_buffers audio thread: XMA source buffer sync (console 0.04 %)
+rex_XAUDIO__CXMASourceEffect__SynchronizePackets key=banjo_cpu_native_xma_sync_packets audio thread: XMA packet sync (console 0.04 %)
+rex_XAUDIO__SRC__Linear__Process_short_1_ key=banjo_cpu_native_xaudio_src_scalar audio thread: XAudio sample-rate converter, scalar mono 16-bit path (console 0.9 % of the audio thread)
+rex_XAUDIO__SRC__LinearVector__Process_short_2_ key=banjo_cpu_native_xaudio_src_stereo_outer audio thread: XAudio stereo converter's outer loop, its block function inlined (console 0.5 % of the audio thread)
+rex_XHVEnginepCalculateWork key=banjo_cpu_native_xhv_work XHV (voice) engine work calculation (console 0.05 %)
+# banjo-nx (2026-10-23, batch 6, the user's request: the audio mixer further): the mixer thread's named functions that
+# still ran as plain generated code in the batch-5 city profile (share of that thread's samples).
+rex_SetVolume_CWave_XACT__UAAJM_Z key=banjo_cpu_native_xact_wave_volume audio thread: XACT wave volume (0.5 % of the mixer thread; XMASourceEffect::Process, 2.5 %, cannot be a copy: raw guest access)
+rex_UpdateRPCs_CTrack_XACT__AAAXXZ key=banjo_cpu_native_xact_track_rpcs audio thread: XACT track RPC (runtime parameter) update (1.4 % of the mixer thread)
+rex_XACT__CRPC__ProcessEvents key=banjo_cpu_native_xact_rpc_events audio thread: XACT RPC event processing (0.8 % of the mixer thread)
+rex_SetVolume_CEventPlayWaveVariation_XACT__UAAXM_Z key=banjo_cpu_native_xact_variation_volume audio thread: XACT play-wave variation volume (0.3 % of the mixer thread; PCMSourceEffect::Process, 0.8 %, and CSubmixVoice::Process cannot be copies: raw guest access)
+rex_XACT__CEngine__ProcessEvents key=banjo_cpu_native_xact_engine_events audio thread: XACT engine event processing (0.6 % of the mixer thread, under its thunk rex_j_XACT__CEngine__ProcessEvents)
+rex_XACT__CCue__GetState_0 key=banjo_cpu_native_xact_cue_state audio thread: XACT cue state (0.6 % of the mixer thread)
+rex_OnVariableChange_CRPC_XACT__UAAXM_Z key=banjo_cpu_native_xact_rpc_variable audio thread: XACT RPC variable change (0.2 % of the mixer thread; CSourceVoice::ProcessEffects and CEngine::ProcessVoiceList cannot be copies: raw guest access)
+rex_XAUDIO__CEngine__ProcessEngineCallbacks key=banjo_cpu_native_xaudio_engine_callbacks audio thread: XAudio engine callbacks (0.6 % of the mixer thread)
+rex_XAUDIO__SRC__LinearVector__Process_short_1_ key=banjo_cpu_native_xaudio_src_mono_outer audio thread: XAudio mono converter's outer loop (0.6 % of the mixer thread)
+rex_XACT__CClip__Stop key=banjo_cpu_native_xact_clip_stop audio thread: XACT clip stop (0.2 % of the mixer thread; CWave::ProcessEvents and XMAPlaybackResumePlayback cannot be copies: raw guest access, MMIO)

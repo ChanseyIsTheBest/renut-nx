@@ -7,13 +7,14 @@
 #include "globals.h"
 #include "profiler/profiler.h"
 #include "renut_engine/display_sync.h"  // banjo-nx (2026-10-19, latency batch 3)
+#include "banjo_switch_default.h"  // banjo-nx (2026-11-01): the shipped Switch defaults
 
 #include <chrono>
 #include <cstdlib>
 #include <string>
 #include <thread>
 
-REXCVAR_DEFINE_INT32(target_refreshRate, -1, "Nuts&Bolts/Performance", "The index for a given VSync setting. Options are: \n\t-1 = Unaffected\n\t0 = Immediate (Uncapped)\n\t1 = 60Hz\n\t2 = 30Hz (No Threshold)\n\t3 = 20Hz\n\t4 - 9 = Variants of 30Hz.").range(-1, 9);
+REXCVAR_DEFINE_INT32(target_refreshRate, BANJO_SWITCH_DEFAULT(0, -1), "Nuts&Bolts/Performance", "The index for a given VSync setting. Options are: \n\t-1 = Unaffected\n\t0 = Immediate (Uncapped)\n\t1 = 60Hz\n\t2 = 30Hz (No Threshold)\n\t3 = 20Hz\n\t4 - 9 = Variants of 30Hz.").range(-1, 9);
 
 // Typed import of the original generated implementation at sub_823bbe58.
 REX_IMPORT(__imp__rex_setParamInterval, setParamInterval, void(int));
@@ -91,7 +92,7 @@ void klungoDlcDestruct_hook()
 
 #endif
 
-REXCVAR_DEFINE_STRING(frame_cap, "Off", "Nuts&Bolts/Performance",
+REXCVAR_DEFINE_STRING(frame_cap, BANJO_SWITCH_DEFAULT("30", "Off"), "Nuts&Bolts/Performance",
 	"Frame-rate cap (low-overhead limiter that cuts GPU load). "
 	"Off = uncapped, Display = match monitor refresh.")
 	.allowed({ "Off", "30", "60", "120", "144", "Display" });

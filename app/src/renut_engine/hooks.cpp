@@ -1,6 +1,7 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
+#include "banjo_switch_default.h"  // banjo-nx (2026-11-01): the shipped Switch defaults
 #include <cstdint> // For uintptr_t
 #include <rex/cvar.h>
 #include <rex/system/kernel_state.h>
@@ -53,8 +54,13 @@ REXCVAR_DEFINE_BOOL(disable_particles, false, "Nuts&Bolts/Graphics", "Disables p
 REXCVAR_DEFINE_BOOL(disable_shadows, false, "Nuts&Bolts/Graphics", "Disables shadows");
 // Name = "Disable Contact Shadows"
 REXCVAR_DEFINE_BOOL(disable_cao, false, "Nuts&Bolts/Graphics", "Disables the dark contact patches under characters (CAO)");
-// Name = "Disable MSAA"
-REXCVAR_DEFINE_BOOL(disable_msaa, false, "Nuts&Bolts/Graphics", "Disables MSAA on the scene render target. Matrices/aspect are unaffected. Applies on the next resolution change or restart.");
+// Name = "MSAA" (banjo-nx, 2026-11-01, the user's lean renut.toml): the scene's MSAA level instead of a switch.
+// 0 = off (the Switch's default), 2 = the game's own 2x (the default elsewhere). Higher values count as 2: the
+// game's tiling is laid out for 2x. disable_msaa = true (older tomls) still turns it off.
+REXCVAR_DEFINE_INT32(msaa_level, BANJO_SWITCH_DEFAULT(0, 2), "Nuts&Bolts/Graphics", "The scene's MSAA: 0 = off, 2 = the game's own 2x (more GPU time). Matrices/aspect are unaffected. Applies on the next resolution change or restart.");
+// Name = "Disable MSAA" (older tomls; msaa_level above is the setting now)
+REXCVAR_DEFINE_BOOL(disable_msaa, false, "Nuts&Bolts/Graphics", "Older key: true turns MSAA off whatever msaa_level says. Applies on the next resolution change or restart.");
+static bool MsaaOff() { return REXCVAR_GET(disable_msaa) || REXCVAR_GET(msaa_level) < 2; }
 // Name = "Disable Motion Blur"
 REXCVAR_DEFINE_BOOL(disable_motion_blur, false, "Nuts&Bolts/Graphics", "Disables the full-screen speed/camera motion blur");
 // Name = "Max Acquired Parts Access"
@@ -142,13 +148,13 @@ bool disable_cao() {
 // are identical to stock -- matrices are unaffected. Both surfaces share a
 // sample count in D3D, so both calls must be zeroed together.
 void disable_msaa_color(PPCRegister& r6) {
-    if (REXCVAR_GET(disable_msaa)) {
+    if (MsaaOff()) {
         r6.u32 = 0; // D3DMULTISAMPLE_NONE
     }
 }
 
 void disable_msaa_depth(PPCRegister& r6) {
-    if (REXCVAR_GET(disable_msaa)) {
+    if (MsaaOff()) {
         r6.u32 = 0; // D3DMULTISAMPLE_NONE
     }
 }
@@ -280,7 +286,7 @@ REXCVAR_DEFINE_BOOL(single_tile, false, "Nuts&Bolts/Graphics",
 REX_EXTERN(__imp__sub_821F99C0);
 REX_HOOK_RAW(sub_821F99C0) {
   __imp__sub_821F99C0(ctx, base);
-  if (REXCVAR_GET(single_tile) && REXCVAR_GET(disable_msaa) && ctx.r3.u32 > 1) {
+  if (REXCVAR_GET(single_tile) && MsaaOff() && ctx.r3.u32 > 1) {
     ctx.r3.u64 = 1;
   }
 }

@@ -16,4 +16,16 @@ namespace banjo::title_update {
 // there (the code is the update's: without the patch the game would run the base XEX's data through it).
 void ConfigurePaths(rex::PathConfig &paths);
 
+// renut-nx 1.0.1 (2026-11-02, the user's request): RenutApp::OnPostSetup, before the game starts: the language key
+// (system, the default: the Switch's system language; or english, french, german, ...) as the console settings the game
+// chooses its language from. Adds the key to a renut.toml from before 1.0.1.
+void ApplyLanguage();
+
+// banjo-nx (2026-10-30, the user's request): RenutApp::OnPostSetup, with the patched image in memory and before the game
+// loads its fonts and scenes. Two of 1.0.0's looks the update replaced, both off by default:
+// - banjo_font_andy_bold: Latin and Cyrillic text in 1.0.0's font (Andy Bold, euro.sbp) instead of the update's bold
+//   Comic Sans (russian.sbp). The same glyph size, so the update's big text stays big.
+// - banjo_dialogue_boxes_original: 1.0.0's dialogue scenes (the old box with its cogs) instead of the update's.
+void ApplyStyleOptions();
+
 }  // namespace banjo::title_update

@@ -1,4 +1,4 @@
-﻿// Mass Effect - the game's D3D wait for the GPU without spinning (native renderer).
+// Mass Effect - the game's D3D wait for the GPU without spinning (native renderer).
 //
 // WHY (Switch stack profile)
 //   sub_821FEBE0 is the D3D check "has the GPU read pointer moved since the last iteration":
@@ -36,7 +36,8 @@ REXCVAR_DEFINE_BOOL(masseffect_wait_blocking_ring, false, "Mass Effect",
                     "Native renderer: the game's D3D sleeps while waiting for the ring thread to advance "
                     "instead of spinning in sub_821FEBE0")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(masseffect_notify_no_lock, false, "Mass Effect",
+#include <rex/banjo_switch_default.h>  // banjo-nx (2026-11-01): the shipped Switch defaults
+REXCVAR_DEFINE_BOOL(masseffect_notify_no_lock, BANJO_SWITCH_DEFAULT(true, false), "Mass Effect",
                     "Ring thread: NotifyRingProgress takes the progress mutex only when the game's D3D wait is "
                     "registered as sleeping (sequentially consistent handshake on both sides) instead of on every call "
                     "(one per fence write and per ring segment). Same wake-ups")
@@ -132,9 +133,6 @@ void WaitRingProgress() {
 
 }  // namespace me::native
 
-// katamari-nx (2026-10-30): N&B's ring-wait function; not hooked in Beautiful Katamari (the address is another function
-// here). KATAMARI_BANJO_ADDRESS_HOOKS stays 0 until the game's own wait is found.
-#if KATAMARI_BANJO_ADDRESS_HOOKS
 REX_EXTERN(__imp__sub_82634740);
 REX_HOOK_RAW(sub_82634740) {
   BANJO_RENUT_YIELD_SHARED(sub_82634740)  // Renut's renderer chosen (banjo_renderer = "renut")
@@ -163,7 +161,6 @@ REX_HOOK_RAW(sub_82634740) {
   }
   __imp__sub_82634740(ctx, base);
 }
-#endif  // KATAMARI_BANJO_ADDRESS_HOOKS
 
 // banjo-nx: Mass Effect's other hooks on its D3D busy-waits (sub_822CE0C0 render-thread handoff, sub_82811750
 // occlusion poll) are not ported: Banjo's equivalents have not been identified.

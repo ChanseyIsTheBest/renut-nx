@@ -122,5 +122,4 @@ u32 PhotoCapture_hook(u32 photo) {
 
 } // namespace
 
-// katamari-nx (2026-10-30): N&B's photo function; another function in Beautiful Katamari. Compiled, not registered.
-BANJO_RENUT_UNHOOKED_HOOK(sub_825160B0, PhotoCapture_hook);  // sub_825160B0
+BANJO_RENUT_HOOK(sub_825160B0, PhotoCapture_hook);  // sub_825160B0
