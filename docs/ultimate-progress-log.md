@@ -48,3 +48,11 @@ Times AEST. One line per step; the details are in docs/banjo-ultimate-notes.md, 
 - 16:00 Not-exact censuses without a run: #9 r1 (8,143 functions assumed beyond the proof, REX_R1_CHECK to test them),
   no trapping math (the 5 CRT FPSCR writers keep -ftrapping-math: blur-nx's CMake form grafted; the base put the option
   on every file). The tree-wide frame elisions need a frame-exact test that N&B does not have: off.
+- 16:16 The DKSH cache build stopped at its 90-minute limit (50,400 of 53,113 variants) and wrote nothing; none of
+  1.0.2's 28,614 entries match (the base's translator writes other GLSL). Started again at 17:21 with a 3-hour limit.
+- 16:17-17:09 Code generation and post-codegen with BLUR_NX_R1_ASSUME=1 and BLUR_LOCALIZE_ABI_TRUST=1 (r1 reloads
+  after calls 10,571 -> 612; 1,204 non-volatile reloads left out after 714 calls), the PC build with SASRT_HOT_LR_ELIDE.
+- 17:11 verify_ne (600 s, the census route): r1 assume and ABI trust cleared (0 differences in 810.9 million r1 checks
+  and 300.4 million guard compares); the LR elision 2 differences at the LR save slot (off); sub_8221BFA0's f6 (a
+  single denormal against 0, the class of sub_82C41318) turned off. The two cleared switches on by default in
+  post_codegen.py; code generation again for the list change.

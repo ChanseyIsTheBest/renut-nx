@@ -19,12 +19,35 @@ until the user decides, with its sites below.
 | #42 vector max/min lanes that differ | `REX_NX_VMINMAX_FAST` (BLUR_NX_ONLY) | **956,781 of 393.6 million lanes** (0.24 %, run 1), 472,260 of 529.4 million (0.09 %, run 2) | not recorded | counts: off | off |
 | #5 integer compares copying XER[SO] = 1 | `REX_NX_XER_SO_ZERO` | 0 in every window | none | cleared | on in the cleared set |
 | #19 traps only log | `REX_NX_NO_TRAPS` | no trap line in either run | none | cleared | on in the cleared set |
-| #9 r1 assumed preserved | `BLUR_NX_R1_ASSUME=1` (post-codegen) | the proof (r1_preserve.py on this tree): 31,381 functions proven with indirect calls taken as preserving; `--near-exact` assumes 8,143 more (39,524), 390 left (25 setjmp / longjmp, the rest r1 writes the flow cannot follow). The check: REX_R1_CHECK (PC verify) tests every assumed call | the 8,143 (out/census/r1_near_exact.json) | see the verify run below | |
-| ABI trust in the copies | `BLUR_LOCALIZE_ABI_TRUST=1` (post-codegen) | | | | |
-| Stack-frame elisions | `BANJO_GEN_LR_MOVES_ELIDE`, `_NV_SAVES_ELIDE`, `_BACK_CHAIN_ELIDE`; `SASRT_HOT_LR_ELIDE` | | | | |
+| #9 r1 assumed preserved | `BLUR_NX_R1_ASSUME=1` (post-codegen) | the proof (r1_preserve.py on this tree): 31,381 functions proven with indirect calls taken as preserving; `--near-exact` assumes 8,143 more (39,524), 390 left (25 setjmp / longjmp, the rest r1 writes the flow cannot follow). In r1_local (9,188 functions with r1 as a local): calls assumed 29,571 -> 39,530, r1 reloads after a call 10,571 -> 612 (out/post_codegen_ne.log). The check: REX_R1_CHECK (PC verify) tests every assumed call | the 8,143 (out/census/r1_near_exact.json) | **cleared**: verify_ne, 810.9 million calls checked, 0 differences | on (post-codegen with BLUR_NX_R1_ASSUME=1) |
+| ABI trust in the copies | `BLUR_LOCALIZE_ABI_TRUST=1` (post-codegen) | the copies take r14-r31, f14-f31, v14-v31, v64-v127 and cr2-cr4 as a real call left them: 1,204 non-volatile reloads left out after 714 real calls (out/post_codegen_ne.log). What it changes: a callee that breaks the PowerPC ABI (hand-written assembly). The check: the guard compares every copy's registers and memory with the generated original | the 714 calls | **cleared**: verify_ne, 300.4 million copy calls compared, no register difference from it (the three differences are the LR elision's and a volatile f6) | on (post-codegen with BLUR_LOCALIZE_ABI_TRUST=1) |
+| Stack-frame elisions, all game code | `BANJO_GEN_LR_MOVES_ELIDE`, `_NV_SAVES_ELIDE`, `_BACK_CHAIN_ELIDE` | not run: they change the stale words a guest frame holds, and only a frame-exact test of every scene can clear them (sa2-nx's lockstep capture found a game reading a frame word it never wrote: tinted characters). N&B has no lockstep frame comparison (docs/enhancements.md), and the PC verify compares machine copies with the generated code, not frames | — | not cleared: no test exists for N&B | off |
+| The link register's elision in the bulk copies | `SASRT_HOT_LR_ELIDE` (CMake; the 12 bulk shards) | the guard (verify_ne, with it on): **2 differences**, both the link register's save slot (r1 at entry - 8) of a copy: sub_822C4390 (0x43 against 0x00) and sub_8229A920 (0xBF against 0x00): the original stores the stale ctx.lr word (0), the copy leaves the frame's old content (sasrt-nx's and vivapinata-nx's finding, base port 84) | sub_822C4390, sub_8229A920 | counts: off | off |
 | No trapping math | `BANJO_GENERATED_NO_TRAPPING_MATH` (CMake; the Switch's GCC only: clang on the PC assumes no traps already) | not a run: a code census. app/generated/fp_env_files.txt lists the 5 files that write the guest FPSCR: `_ctrlfp`, `_set_fsr`, `_FPreset`, `_set_statfp`, `JumpToContinuation` (the CRT's; cg13_town1 counted 34 writes, 10 to a mode other than nearest); they keep -ftrapping-math (the CMake form grafted from blur-nx: the base's switch put the option on every file, the writers too). The 5 readers (`loadFromHost`: `_get_fsr` and the same CRT functions) return the rounding mode only, never the host's exception flags, and no game code enables a host trap; under CG-13 there is no flush-mode switch left for an operation to move across | the 5 writers | cleared (exact under CG-13: what it lets GCC move changes no value the guest sees) | on in the Switch build (text size below) |
 
 ## Runs
+
+### verify_ne (2026-11-19 17:11, PC, 600 s: the census route, the not-exact codegen)
+
+The tree from post-codegen with `BLUR_NX_R1_ASSUME=1` and `BLUR_LOCALIZE_ABI_TRUST=1` (out/post_codegen_ne.log), the PC
+build with `SASRT_HOT_LR_ELIDE=ON`; `tools/run_pc_verify.ps1 -Seconds 600 -Script
+"40:A;46:A;52:A;58:A;64:A;70:A;76:A;82:A;88:A;94:A;250:Y;262:B;330:Y;345:A;400:B;470:Y;482:A;540:Y" -Sticks 160` (the
+census route: the menus, the save, Showdown Town in the vehicle, out of it and back). 533 hand-picked copies reached,
+487 of 506 bulk; **300.4 million calls compared**, 164.5 million not comparable (both forms stopped with the same
+stores), 692 differed once and not when repeated. The r1 mirror checked after **810.9 million calls**, 299.2 million
+link-register write-backs: 0 differences. Stack forwards 9.8 million, generated-code self-checks (11.2 billion folded
+loads, 72.8 million promoted calls, 27.8 million PCR owners) and the flush-mode flow (10.6 billion): 0 differences.
+
+**Three guard differences:**
+
+| Copy | Difference | Cause |
+|---|---|---|
+| sub_822C4390 (bulk; saves through `__savegprlr`, frame 496) | memory 0x7010EF38: copy 0x43, original 0x00 | the LR elision: the save slot at r1 - 8 |
+| sub_8229A920 (bulk; `mflr r12; bl __savegprlr_24`, frame 176) | memory 0x7010F658 (+40 of the range 0x7010F630, r1 - 8 for an entry r1 of 0x7010F660): copy 0xBF, original 0x00 | the same |
+| sub_8221BFA0 (bulk) | f6 (volatile): copy 0, original 0x36E7000000000000 (a single denormal) | none of the three switches (they change r1 reloads, non-volatile reloads and the LR slot): the class of sub_82C41318's f3 (verify1), reached by this longer route. `off` in localized_bulk.txt as that one |
+
+verify1 (the exact build, a shorter route that never left the vehicle) did not reach the three, so the attribution of
+the first two rests on their address (the LR save slot); a run with the elision off would confirm it.
 
 ### cg13_town1 (2026-11-19 12:42, PC, 460 s: the menus, then Showdown Town in the vehicle with the sticks wandering)
 

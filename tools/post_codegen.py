@@ -71,6 +71,12 @@ PROMOTIONS = os.path.join(APP, 'indirect_promotions.txt')
 HOOK_TOMLS = [APP, os.path.join(APP, 'config', 'renut_hooks.toml'), os.path.join(APP, 'config', 'renut_gpu_funcs.toml'),
               os.path.join(APP, 'config', 'renut_crt.toml')]
 
+# banjo-nx (2026-11-19, the rebase; docs/banjo-near-exact.md): two of the base's near-exact switches, cleared on N&B by
+# their census (verify_ne: REX_R1_CHECK 810.9 million calls and the guard 300.4 million, 0 differences from them), on
+# by default here, so that the build's own codegen step gives the same tree. =0 in the environment: the exact forms.
+os.environ.setdefault('BLUR_NX_R1_ASSUME', '1')
+os.environ.setdefault('BLUR_LOCALIZE_ABI_TRUST', '1')
+
 
 def run(*args):
     result = subprocess.run([sys.executable, *args], cwd=ROOT)

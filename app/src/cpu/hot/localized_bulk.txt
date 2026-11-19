@@ -76,7 +76,7 @@
 82216278 74 console samples, 224 instructions, 18 direct callees
 8238C358 72 console samples, 970 instructions, 17 direct callees
 821F5D48 72 console samples, 2782 instructions, 20 direct callees
-8221BFA0 72 console samples, 108 instructions, 1 direct callees
+8221BFA0 off 72 console samples, 108 instructions, 1 direct callees  # banjo-nx 2026-11-19: off, the PC guard (verify_ne) found f6 differing (copy 0, original a single denormal), as 82C41318
 8220DDE8 71 console samples, 88 instructions, 7 direct callees
 82229188 71 console samples, 540 instructions, 37 direct callees
 823ACFA8 71 console samples, 178 instructions, 3 direct callees
