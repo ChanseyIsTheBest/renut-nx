@@ -168,3 +168,24 @@ the same. No difference to take to RenderDoc.
 new1's log: the DKSH cache (53,113 variants) used, 4 shader compiles in the whole run, no crash, guest memory 594 MB,
 12,869 pipeline objects. One finding: the forms self-check reported near-exact #2's NaN conversions as differences
 (and wrote banjo_selfcheck_failed.txt next to the NRO): fixed (2ed2e120; a handoff).
+
+## The hot-function round and the final PC verify (steps 5 and 6; 2026-11-19 evening)
+
+**Profile:** prof1, Ryujinx, 600 s, `switch_profile_stacks = true` (out/emu/emu_prof.toml; the emulator starts the
+NRO without argv, so the profiler writes sdmc:/switch/rex_profile.log, not the NRO's logs/rex/): 54 windows, the
+intro, the menus, the opening story and gameplay on foot. `tools/switch_hot_bulk.py ... --merge --min-samples 3`
+added 40 functions (their lines say "Ryujinx samples") and, by the base's rule, took out the list's 59 copies under
+40 instructions with fewer than 50 samples: 506 -> 489 listed, 487 made (two cannot be copies, as before).
+
+**Final PC verify** (the shipped configuration: the cleared codegen, the LR elision off, sub_82C41318 and sub_8221BFA0
+off; `banjo_hot_bulk_lines` on, a line per reached bulk copy, new): two routes.
+
+| Run | Route | Compared | Bulk reached | Differences |
+|---|---|---|---|---|
+| verify_final_a | the save: Showdown Town in the vehicle, out and back (600 s) | 245.2 million calls (159.0 million not comparable, same stores) | 469 of 487 | 0 |
+| verify_final_b | a new game (the save moved aside): the intro, the menus, the opening story, on foot (540 s) | 180.1 million (107.4 million not comparable; 4 not comparable with stores that were not the same before the stop) | 455 of 487 | 0 |
+
+Both: the r1 mirror (714.5 / 569.7 million calls), the stack forwards, the generated-code self-checks and the
+flush-mode flow: 0 differences. **All 40 new copies were reached** (on one route or both); 9 of them only in calls
+that reach a function outside the copy (the guard compared their stores up to that call). Open: route B's 4 not-
+comparable calls whose stores before the stop differed (no difference line; a thread race is the usual cause).
