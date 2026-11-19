@@ -25,7 +25,10 @@ WHOLE = ['tools/indirect_calls.py', 'tools/indirect_promotions_rekey.py', 'tools
          'app/src/renut_engine/gpu/render/pipeline.cpp', 'app/src/renut_engine/gpu/backend/memory_report.cpp',
          'sdk/src/ui/switch_perf.cpp',
          # The forms self-check under near-exact #2 (found in N&B's Ryujinx run).
-         'app/src/cpu/banjo_forms_selfcheck.cpp']
+         'app/src/cpu/banjo_forms_selfcheck.cpp',
+         # 2026-11-20, the console regression: the cache tool's round guess, census::On() inline, and the tools.
+         'tools/deko3d_variant_cache.py', 'app/src/renut_engine/gpu/stage_census.h', 'tools/deko3d_miss_coverage.py',
+         'tools/profile_threads.py', 'tools/deko3d_package_extract.py', 'tools/deko3d_glsl_compare.py']
 
 
 def base_text(path):
@@ -112,6 +115,12 @@ def bulk_lines_pairs():
     ]
 
 
+CENSUS_ON = [(
+    "bool On() {\n  static const bool on = REXCVAR_GET(blur_renut_diag_stage_census);\n  return on;\n}\n",
+    "std::atomic<int> g_on{-1};\nbool OnSlow() {\n  const bool on = REXCVAR_GET(blur_renut_diag_stage_census);\n"
+    "  g_on.store(on ? 1 : 0, std::memory_order_relaxed);\n  return on;\n}\n")]
+
+
 RUN_PC_QUOTE = [(
     "        @($Extra -split ' ' | Where-Object { $_ })\n$style = ",
     "        @($Extra -split ' ' | Where-Object { $_ })\n"
@@ -138,7 +147,8 @@ def main():
             put(b, path, new)
         for path, pairs in (('app/src/renut_engine/gpu/guest/command_buffers.cpp', PORT87),
                             ('tools/run_pc.ps1', RUN_PC_QUOTE), ('app/CMakeLists.txt', notrap_pairs()),
-                            ('app/src/cpu/banjo_hot_guest.cpp', bulk_lines_pairs())):
+                            ('app/src/cpu/banjo_hot_guest.cpp', bulk_lines_pairs()),
+                            ('app/src/renut_engine/gpu/banjo_renut_tuning.cpp', CENSUS_ON)):
             old = base_text(path)
             put(a, path, old)
             put(b, path, edit(old, pairs, path))
