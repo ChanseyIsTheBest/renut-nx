@@ -253,3 +253,12 @@ about 70.
 **Not measured yet: the console.** It froze with 1.0.2 at 02:03 (block 2, 1 ms sampling) and waits for the user.
 tools/card_swap_when_free.py puts the card back to this build once N&B is closed (renames: the -ult files in place,
 1.0.2's as -1.0.2) with renut.toml = the shipped settings, logs on, banjo_deko3d_log_misses on (for the next cache).
+
+**The remaining 10 % (specialised pixel shaders against 1.0.2's).** The console's 13 pixel run-time variants, compiled
+with their own constants and with one base feature's constant changed (scratchpad rt_variant975.py: the same uam):
+13,223 instructions as run; 25,303 with 975 = 0 (the shader round off: it is what makes the variants small); 11,900
+with 976 = 0 (vivapinata_shader_noearly: Renut's early alpha test left out; the same pixels); 990 and 914 change
+nothing; 1.0.2's same shaders 11,938. So the early alpha test is the 10 %: about 110 instructions a shader, for the
+quads it discards early. Per game by the base's rule (off-by-default.md section 4): the console decides, A/B 151 in
+renut_ab.toml (the 2026-11-20 cache holds both halves, --noearly-ab); off half faster: vivapinata_shader_noearly =
+true.
