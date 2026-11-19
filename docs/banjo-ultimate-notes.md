@@ -225,3 +225,31 @@ optimising it costs 20 minutes a build).
 **The console tools:** the virtual pad (sys-botbase) did not reach the game's title in handheld mode (only the Home
 menu); the attract loop needs no input. 1 ms stack sampling froze 1.0.2 after two minutes (and sys-botbase with it:
 the console needed the user); prefer no sampling or a longer interval for the next console runs.
+
+### The fixes and their emulator checks (2026-11-20, 03:00-06:10)
+
+**PGO and LTO.** The instrumented NRO (every library in PGO but uam), two Ryujinx training runs (the title loop; the
+menus, the story and gameplay on foot with 1 s presses: the instrumented build at 8-11 fps misses 0.2 s ones), 663
+.gcda files in pgo-inplace/, then the optimised NRO with LTO (`out/switch_pgo_use.bat`: 23 minutes; LTO's temporary
+files on C:'s scratchpad, a path without spaces). NRO 84a50b1d (118 MB); Ryujinx: the same route and pictures, the
+forms self-check 45,134 of 45,134.
+
+**The DKSH cache.** v1 (the evening's) held 0.2 % of the variants the renderer asked for. `--round-guess` (the GPU
+rounds' run-time words for list records made before them: the plain fetches' 950 / 958 / 966 + r and 926's bit 31;
+the vertex shaders' byte-order words 937 / 939 and 932 = 7) and the run-time logs of four runs (`--runtime-log`;
+banjo_deko3d_log_misses names every fallback) gave v3: 105,814 variants, 1.18 GB. The same route in Ryujinx with the
+PGO + LTO NRO:
+
+| Cache | Stages given the generic variant | Compiles (variants not in the cache) | Cache hits |
+|---|---|---|---|
+| v1 (the emulator's copy, with the training runs' compiles appended) | 25,651 | 54 | |
+| v2 (the round guess, pixel shaders) | 17,160 | 163 (64 named: all vertex shaders with 937 / 939) | 8,952 |
+| v3 (+ the vertex shaders' words) | 10,401 | 16 | 9,490 |
+
+The generic count also counts the variants read from the cache in the background (6,763 in the v3 run: milliseconds
+each once the uam thread is not compiling). On the console a compile took 3.9 s of core 3; the user's session made
+about 70.
+
+**Not measured yet: the console.** It froze with 1.0.2 at 02:03 (block 2, 1 ms sampling) and waits for the user.
+tools/card_swap_when_free.py puts the card back to this build once N&B is closed (renames: the -ult files in place,
+1.0.2's as -1.0.2) with renut.toml = the shipped settings, logs on, banjo_deko3d_log_misses on (for the next cache).

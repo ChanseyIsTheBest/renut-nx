@@ -1,5 +1,12 @@
 # renut-nx on the ultimate base: the test package, its notes, and what the installer would need
 
+**2026-11-20: out/package_ultimate_2026-11-20/** replaces the package below for testing: the NRO with PGO and LTO
+(md5 84a50b1d6fe14ea1d1bbeafba5970199, 118,140,646 bytes, every library but uam in both; ELF beside it), the DKSH cache
+v3 (105,814 variants, 1,184,506,656 bytes: the run-time keys the renderer asks for; docs/banjo-ultimate-notes.md, "The
+console regression"), renut.toml = the shipped settings with logs on and banjo_deko3d_log_misses on (it names the
+variants the cache still lacks in deko3d.log: send them back for the next cache). The same three-file swap on the card
+(renut-nx.nro, deko3d_shaders.bin; 1.0.2's deko3d_glsl.bin renamed away).
+
 The package of branch `ultimate` (banjo-nx-ult, 2026-11-19): renut-nx 1.0.2's game layer on the ultimate base at
 6cd02ae7 (ports 1-188). The picture and the settings are 1.0.2's (rumble on, as the user asked); the CPU side has the
 base's ports and the not-exact forms cleared on N&B (docs/banjo-near-exact.md).
