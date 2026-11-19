@@ -17,3 +17,12 @@ Times AEST. One line per step; the details are in docs/banjo-ultimate-notes.md, 
 - 10:40 PC build: the first configure stopped at `generated/rexglue.cmake` (generator output, untracked in both trees:
   the base's copy, with port 69's PCH byproduct, put in app/generated) and at vcvars (vswhere off the PATH: the VS
   Installer folder added). The shader dump and glslang copied from banjo-nx's out/ (game-derived, not committed).
+- 11:05 FFmpeg's configure output, DXC's binaries and a few ignored SDK files copied from the base's working tree.
+- 11:25 Code generation ran (407 files, 39,926 functions); post_codegen stopped at indirect_calls (19 sites not found):
+  the site key fixed (named functions by their own address), the list re-keyed (b84f4e37).
+- 11:35-11:50 Build fixes (a duplicate A/B case, a duplicate FetchSpecialised, a configure after the code generation);
+  renut.exe linked. cc_entry_census: v0 read by sub_82402910 (kept live at indirect calls); cc_exit_census: every
+  read value-independent (5510bbe5).
+- 12:09 PC boot (boot1): title update 3, the save, Showdown Town in the vehicle at ~140 s. run_pc.ps1's arguments quoted.
+- 12:19 PC verify (verify1, 480 s): 0 differences but one bulk copy (sub_82C41318, f3, a single denormal against -0.0):
+  `off` in the list until explained.

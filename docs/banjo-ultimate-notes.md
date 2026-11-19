@@ -75,6 +75,29 @@ The census names the listed register and then says none.
 So the exit bound holds for N&B with `SASRT_REG_LIVENESS_EXIT_ABI` on (the default). The census now knows these forms
 (a handoff): it lists 631 sites, the traps alone.
 
+## The PC port (step 2; 2026-11-19)
+
+**Boot (run boot1, 170 s):** Renut on Vulkan, the user's save, title update 3 mounted ("XEX patch applied ... 0.0.3.1",
+the update folder at `D:\Banjo kazooie port\update`), 1.0.0's font and dialogue boxes. A presses 40-94 s: the title, the
+menus, the save loaded (93 s, "Saving content"), Showdown Town in the vehicle from about 140 s. The picture as renut-nx
+1.0.2's. 138 error lines, all `NtQueryInformationFile(XFileXctdCompressionInformation) unimplemented` (a normal log has
+about 127). tools/run_pc.ps1 first wrote no log at all: Start-Process does not quote, and Banjo's folders have spaces
+(fixed; a handoff).
+
+**Verify (run verify1, 480 s, tools/run_pc_verify.ps1, the same presses, then input_script_sticks from 160 s):** 533 hand-
+picked copies reached (532 on), 487 of 506 bulk copies reached; 261 million calls compared, 134 million not comparable
+(both forms stopped with the same stores); the stack forwards 9.3 million checked, 0 differences; the generated-code
+self-checks (9.2 billion folded loads, 56.7 million promoted calls, 18 million owners from the PCR) 0 differences; the r1
+mirror and link-register write-backs 0; the flush-mode flow 8.4 billion checks, 0 switches. **One copy differed:**
+`sub_82C41318` (bulk), `f3: copy=0x8000000000000000 original=0xB6F4000000000000` three passes in a row (inputs r3 40EEF720
+..., f1 3F6028F2A0000000), memory the same (204 bytes in 20 ranges): the original returns a negative single-precision
+denormal in f3 where the copy returns -0.0. It is reached only through a one-line thunk (sub_82C42018, `b 0x82c41318`)
+by pointer, so by the convention f3 is dead to its callers; f3 is in the guard's compare only as reg_liveness's margin
+(f1-f4 kept as results). The flush modes before each f3 producer are the same in the two forms; the change since
+renut-nx 1.0.2 (whose guard had this copy at 0) is ports 96 / 136's single-precision fused forms (REX_FMADDS_KNOWN). Not
+explained, so not shipped: `off` in localized_bulk.txt (the generated original runs). Open: whether it is the guard's
+two runs starting in different host flush states, or the fused form.
+
 ### Port 87's offsets, and the per-XDK values in shared files
 
 See docs/ultimate-rebase-plan.md, "Found on the way". In short: port 87 (tiles once) now reads `native::off`; port

@@ -65,7 +65,7 @@
 82215920 90 console samples, 72 instructions, 6 direct callees
 82375CE0 89 console samples, 110 instructions, 3 direct callees
 822177E0 85 console samples, 130 instructions, 14 direct callees
-82C41318 85 console samples, 832 instructions, 0 direct callees
+82C41318 off 85 console samples, 832 instructions, 0 direct callees  # banjo-nx 2026-11-19: off, the PC guard found f3 differing (copy -0.0, original a float denormal; docs/banjo-ultimate-notes.md)
 82218650 84 console samples, 130 instructions, 0 direct callees
 821F2EC0 83 console samples, 92 instructions, 0 direct callees
 82219660 81 console samples, 76 instructions, 5 direct callees
