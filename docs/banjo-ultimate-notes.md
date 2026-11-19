@@ -102,3 +102,32 @@ two runs starting in different host flush states, or the fused form.
 
 See docs/ultimate-rebase-plan.md, "Found on the way". In short: port 87 (tiles once) now reads `native::off`; port
 169's scaler copy is at N&B's +0x359C; the device's own declaration at +0x2FA8; port 138's viewport at 0x3170.
+
+## The hot functions (step 6)
+
+The base's machine copies (sasrt-nx's tools/localize_native.py) with N&B's own lists: app/src/cpu/hot/localized.txt
+(the hand-picked copies: 533 reached) and localized_bulk.txt (506 bulk copies in 12 shards, from 1.0.2's console
+profile), banjo_hand_natives.h (the XAudio filter's hand-written native) and the blur_* hand helpers. Two bulk
+functions cannot be copies (sub_82335C28 reads the time base; sub_828177E8's callee has a switch line the tool does not
+know). Checked by the guard twice: verify1 (exact build, 261.0 million calls compared) and verify_ne (the cleared
+not-exact codegen, 300.4 million): two bulk copies are off for a single denormal against zero in a volatile float
+register (sub_82C41318's f3, sub_8221BFA0's f6), the rest show no difference. On the Switch the copies are in place
+(SASRT_HOT_IN_PLACE, the base's default there: no hook, no guard; an `off` copy keeps the generated original).
+
+## PGO and LTO (step 7): ready, no profile yet
+
+pgo/ and pgo-inplace/ are empty: Katamari's profiles went with its layer, and 1.0.2's profile (banjo-nx's untracked
+pgo/) is for other code (the base's generator and passes changed most of the game code), so it would mostly be dropped
+as mismatched. The tree builds both steps as docs/pgo-lto.md says; for this branch:
+
+1. The instrumented NRO, with the copies in place as the release has them:
+   `set BUILD_DIR=app\out\switch-pgo-gen` / `set "CMAKE_EXTRA=-DBANJO_PGO=generate"` / `set IN_PLACE=ON` /
+   `tools\build_switch.bat`. The Switch defaults (CG-13, the cleared near-exact set, no trapping math) hold in every
+   Switch folder, so the instrumented and the optimised build compile the same code.
+2. Play it (the console, or Ryujinx with the banjo-ult data folder: the counts are code paths, not timing): the
+   title, the menus, Showdown Town on foot and in the vehicle, a challenge. Then `python tools/pgo_merge.py <the pgo
+   folder of streams> pgo-inplace --gen-build app\out\switch-pgo-gen\renut.elf` (one stream unless `--all`).
+3. `tools\build_switch_release.bat`: app\out\switch-pgo-use\renut.nro (LTO, the profile, no game shader inside: it
+   reads deko3d_glsl.bin beside itself, as the installer's package). Its log must have no "mismatch" line.
+
+The everyday NRO of this package is app\out\switch (no PGO, no LTO, the shaders inside).
