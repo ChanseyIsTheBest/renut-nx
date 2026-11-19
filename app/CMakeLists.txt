@@ -119,8 +119,19 @@ endif()
 # conversions not rare: 80 a second) and #42 (4 % of vector max/min lanes differ) out of the set; BLUR_NX_ONLY names
 # switches to use alone (a ;-list, for a bisect; #2 and #42 only this way), BLUR_NX_SKIP leaves some out. Every
 # generated file, the copies and the SDK change with them: retrain the PGO profile.
-option(BLUR_NEAR_EXACT "blur-nx's near-exact compile-time switches (not bit-exact in rare cases)" OFF)
-set(BLUR_NX_ONLY "" CACHE STRING "With BLUR_NEAR_EXACT: only these switches (a ;-list, for a bisect; empty: all)")
+# banjo-nx (2026-11-19, the rebase; docs/banjo-near-exact.md): N&B's census cleared #1, #2, #17, #5 and #19 (0 in every
+# gameplay window of two runs) and not #41 (12 in the boot) or #42 (0.1-0.2 % of lanes): ON in the Switch build with
+# BLUR_NX_ONLY that set; the PC build stays exact (the census counts there). An existing folder keeps its values.
+if(REXGLUE_PLATFORM_SWITCH)
+    set(_banjo_near_exact_default ON)
+    set(_banjo_nx_only_default "REX_NX_SNAN_PASS;REX_NX_FCTI_NO_NAN;REX_NX_DIV_NO_CHECK;REX_NX_XER_SO_ZERO;REX_NX_NO_TRAPS")
+else()
+    set(_banjo_near_exact_default OFF)
+    set(_banjo_nx_only_default "")
+endif()
+option(BLUR_NEAR_EXACT "blur-nx's near-exact compile-time switches (not bit-exact in rare cases)" ${_banjo_near_exact_default})
+set(BLUR_NX_ONLY "${_banjo_nx_only_default}" CACHE STRING
+    "With BLUR_NEAR_EXACT: only these switches (a ;-list, for a bisect; empty: all)")
 set(BLUR_NX_SKIP "" CACHE STRING "With BLUR_NEAR_EXACT: every switch but these (a ;-list)")
 set(_blur_nx_switches REX_NX_SNAN_PASS REX_NX_DIV_NO_CHECK REX_NX_FCMP_NO_UN REX_NX_XER_SO_ZERO REX_NX_NO_TRAPS)
 if(BLUR_NEAR_EXACT AND NOT BLUR_NX_ONLY STREQUAL "")
@@ -320,7 +331,15 @@ endforeach()
 # compute a denormal operand in the wrong mode. It bought sa2-nx at most 0.5 % of one file. Not exact, so off;
 # -DBANJO_GENERATED_NO_TRAPPING_MATH=ON puts it back for a measurement.
 option(BANJO_GENERATED_MATH_FLAGS "-fno-math-errno on the generated game code" ON)
-option(BANJO_GENERATED_NO_TRAPPING_MATH "-fno-trapping-math on the generated game code (not exact, see the comment)" OFF)
+# banjo-nx (2026-11-19, docs/banjo-near-exact.md): ON in the Switch build (cleared under CG-13, the FPSCR writers keep
+# -ftrapping-math, below); the PC's clang assumes no traps already.
+if(REXGLUE_PLATFORM_SWITCH)
+    set(_banjo_no_trapping_default ON)
+else()
+    set(_banjo_no_trapping_default OFF)
+endif()
+option(BANJO_GENERATED_NO_TRAPPING_MATH "-fno-trapping-math on the generated game code (not exact, see the comment)"
+       ${_banjo_no_trapping_default})
 if(BANJO_GENERATED_MATH_FLAGS AND TARGET renut_recomp AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(renut_recomp PRIVATE -fno-math-errno)
     # banjo-nx (2026-11-19, the rebase; blur-nx's BLUR_NO_TRAPPING_MATH form, 2026-11-16, CG-26): only with
