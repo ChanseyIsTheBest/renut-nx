@@ -26,3 +26,13 @@ Times AEST. One line per step; the details are in docs/banjo-ultimate-notes.md, 
 - 12:09 PC boot (boot1): title update 3, the save, Showdown Town in the vehicle at ~140 s. run_pc.ps1's arguments quoted.
 - 12:19 PC verify (verify1, 480 s): 0 differences but one bulk copy (sub_82C41318, f3, a single denormal against -0.0):
   `off` in the list until explained.
+- 12:42-13:15 CG-13 / near-exact censuses (cg13_town1 460 s, cg13_town2 620 s with the vehicle left): CG-13 harmless
+  (audio and VMX-consumed sites), ON; #1 #2 #17 #5 #19 cleared, #41 (12 in the boot) and #42 count. The denormal site
+  report widened to 256. uam built from the base's sources (ports 162/163).
+- 13:20 r1_preserve.py / lr_preserve.py imported banjo-nx master's leaf_dead_stores.py (a hard-coded path): fixed.
+- 13:25 The user: rumble stays on by default; the game menu (A+B+X+Y+L+R) to show every key of 1.0.2's renut.toml.
+  app/src/banjo_menu.cpp through a hook in the base's menu (SetGameMenuRows): 25 rows in the toml's order, in the
+  menu's twelve languages.
+- 13:47 The Switch shader package: 4,916 shaders translated and compiled with uam (0 failed), 332 MB of GLSL -> 29 MB.
+- 13:48 dist/switch/renut-nx: renut.toml (shipped + logs), renut_play.toml (shipped), renut_ab.toml (A/B 83, 150, 86,
+  control 1; 30 s halves).

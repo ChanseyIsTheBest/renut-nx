@@ -192,6 +192,7 @@ set(RENUT_SOURCES
     #src/renut_engine/fixes/mullhwucrash.cpp
 	src/renut_engine/cvar_menu.cpp
     src/game_menu.cpp  # blur-nx (2026-11-18): the game menu (A+B+X+Y+L+R on the Switch, F8 on the PC)
+    src/banjo_menu.cpp  # banjo-nx (2026-11-19): N&B's rows on the game menu (every key of 1.0.2's renut.toml)
     src/blur_small_alloc.cpp  # blur-nx (2026-11-17, #220; port 151): small C++ allocations per thread (Switch; 32 MB)
 	src/renut_engine/FPS.cpp
 	src/renut_engine/shader_dump.cpp

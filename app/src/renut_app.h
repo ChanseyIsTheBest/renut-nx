@@ -29,6 +29,9 @@
 #include "renut_engine/gpu/banjo_renut_capture.h"
 #endif
 #include "cpu/banjo_enhancements.h"
+namespace banjo::menu {
+void InstallMenuRows(const std::string& file);  // banjo-nx (2026-11-19): N&B's rows on the game menu (src/banjo_menu.cpp)
+}
 namespace blur::small_alloc {
 void Enable();  // blur-nx (2026-11-17, #220; renut-ultimate port 151): src/blur_small_alloc.cpp, after setup
 }
@@ -108,6 +111,7 @@ public:
         drawer->AddDialog(profiler_dialog_.get());
         // blur-nx (2026-11-18, the user's request): the game menu. Attached for good (its constructor adds it), it
         // asks for no ImGui frame while closed (WantsFrame), so the drawer builds none for it then.
+        banjo::menu::InstallMenuRows(config_path().filename().string());  // banjo-nx: 1.0.2's keys on its Settings tab
         game_menu_ = std::make_unique<blur::GameMenuDialog>(drawer, config_path(), [this] { return runtime(); },
                                                             [this] { return immediate_drawer(); });
 #if !REX_PLATFORM_SWITCH

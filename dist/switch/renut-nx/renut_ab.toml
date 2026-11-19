@@ -1,0 +1,126 @@
+# renut-nx on the ultimate base (banjo-nx-ult, 2026-11-19): the shipped settings with the logs on and an in-run A/B (30 s halves, control target 1)
+# Made from renut-nx 1.0.2's shipped renut.toml (banjo-nx-installer/release/renut.toml). Copy it next to the NRO as
+# renut.toml. Credits: reNut's renderer (masterspike52, reuse permitted), the ultimate base and the ports whose fixes it
+# carries, sa2-nx, NetherSX2_nx (four-core layout), battd_nx, bejeweled3-nx and the zuma ports.
+
+# renut-nx settings (Switch). Only the settings meant to be changed are listed here. Everything else is built into
+# the NRO with the values the longer renut.toml of earlier packages had (2026-11-01), and any key from an older
+# renut.toml still works if you add it back.
+
+# ---- Language ----
+# The game's language. "system" follows the Switch's system language (English if the game has no text for it).
+# Or one of: "english", "french", "german", "spanish", "italian", "japanese", "korean", "tradchinese",
+# "simpchinese", "russian", "polish", "czech", "dutch", "norwegian", "swedish".
+language = "system"
+
+# ---- Picture ----
+# MSAA on the 3D scene: 0 = off, 2 = the game's own 2x (smoother edges, more GPU time).
+msaa_level = 0
+# SMAA anti-aliasing on the 3D image, before the HUD is drawn over it (the HUD and text stay sharp).
+banjo_renut_smaa = true
+
+# ---- Resolution ----
+# Dynamic resolution: the 3D image's height follows the GPU's load, between the low and high heights below. The HUD
+# and menus stay at the display's resolution.
+banjo_renut_dynamic_resolution = true
+banjo_renut_dynamic_handheld_low = 540
+banjo_renut_dynamic_handheld_high = 720
+banjo_renut_dynamic_docked_low = 540
+banjo_renut_dynamic_docked_high = 1080
+# Heights between low and high (4: handheld 540 576 612 648 684 720, docked 540 648 756 864 972 1080; 0 = only
+# the two ends).
+banjo_renut_dynamic_steps = 4
+# The resolution goes down while the GPU takes more than this many ms a frame, and up again after this many seconds
+# with room to spare.
+banjo_renut_dynamic_gpu_ms = 34.5
+banjo_renut_dynamic_up_s = 1.0
+# The 3D height when dynamic resolution is off (360 to 1080, rounded to a multiple of 9).
+banjo_renut_render_height_handheld = 648
+banjo_renut_render_height_docked = 864
+# The docked output height (HUD, menus and text).
+banjo_renut_display_height_docked = 1080
+
+# ---- Fur detail (not the game's exact picture) ----
+# Percent of each fur part's shells drawn (100 = all of them, as the game; the outermost shell is always drawn).
+banjo_renut_fur_shells_percent = 75
+# The dialogue portrait: percent of its fur shells, and its MSAA samples (0 = the game's 4x, 2 = 2x, 1 = none).
+banjo_renut_portrait_fur_shells_percent = 50
+banjo_renut_portrait_msaa_samples = 2
+
+# ---- 1.0.0 look ----
+# Andy Bold, 1.0.0's font (false = the title update's Comic Sans). The text size stays the game's own.
+banjo_font_andy_bold = true
+# 1.0.0's dialogue box, white-edged with the cog (false = the title update's dark rounded box).
+banjo_dialogue_boxes_original = true
+
+# ---- Frame rate ----
+# The frame cap: "30", "60" or "Off".
+frame_cap = "30"
+
+# ---- Four-core mode ----
+# Started from a Sphaira forwarder (Sphaira: X, Install Forwarder, Address Space 39-bit, Create Forwarder), the game
+# gets the fourth core from its second start: 1 = audio, the mixer and the shader compiler run on core 3, the game on
+# cores 0-2; 0 = core 3 left to the system. No effect through a title takeover (three cores).
+banjo_system_core = 1
+# A forwarder Sphaira made for renut-nx.nro is recognised by itself. This program ID is only for a forwarder made
+# another way: renut-nx writes its four-core NPDM to sdmc:/atmosphere/contents/<id>/exefs/main.npdm.
+banjo_forwarder_program_id = "05D6EA1333487000"
+
+# ---- Logs ----
+# Off: only crash logs are written (logs/rex/rex_crash.log next to the NRO). For a bug report, remove the "#" below
+# and send the logs/ folder.
+log_level = "info"
+
+# ---- In-run A/B (the console measurement) ----
+# Each listed target off for 30 s, then on for 30 s, in turn; the 10 s lines give fps and the per-target halves.
+# 1 is the control: banjo_renut_precise_barriers, which does nothing on deko3d (both halves the same build).
+# 83: the fetch spec (Nutty Acres' water), 150: the vertex fetch types for every draw, 86: tiles once (predicated
+# tiling replayed once for every tile).
+banjo_renut_ab_targets = "83,150,86,1"
+banjo_renut_ab_s = 30
+
+# ---- Controls ----
+# Face buttons by position, as on the Xbox 360 pad the game was made for (the bottom button acts as A, the right one
+# as B, the left one as X, the top one as Y); false = by letter.
+input_xbox_layout = true
+# Single Joy-Cons held sideways, one per player (SL / SR are ZL / ZR, minus or plus is Start).
+input_joycon_sideways = true
+# Per-player button maps: which Switch buttons press each Xbox 360 button; "" = the default. A comma-separated list
+# of: A B X Y L R ZL ZR PLUS MINUS LSTICK RSTICK UP DOWN LEFT RIGHT SL SR, or NONE. Example: a = "B, ZR".
+# Player 1's map also serves players 3 and 4. Read at start. Keep these two sections at the END of the file: in a
+# toml every line after a [section] header belongs to that section.
+[input_p1]
+a = ""
+b = ""
+x = ""
+y = ""
+lb = ""
+rb = ""
+lt = ""
+rt = ""
+start = ""
+back = ""
+ls = ""
+rs = ""
+up = ""
+down = ""
+left = ""
+right = ""
+
+[input_p2]
+a = ""
+b = ""
+x = ""
+y = ""
+lb = ""
+rb = ""
+lt = ""
+rt = ""
+start = ""
+back = ""
+ls = ""
+rs = ""
+up = ""
+down = ""
+left = ""
+right = ""
