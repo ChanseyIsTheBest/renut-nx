@@ -41,7 +41,6 @@
 #include <rex/banjo_switch_default.h>  // banjo-nx (2026-11-01)
 #if REX_PLATFORM_SWITCH
 #include "threading_switch.h"
-// banjo-nx (2026-11-01): ui/switch_crash_hooks.c, stderr to logs/rex/rex_stderr.log.
 #endif
 
 #ifdef __SWITCH__
@@ -578,14 +577,10 @@ void InitLogging(const LogConfig& config) {
   }
 
   // File sink (rotating) with sequential naming fallback
-  // banjo-nx (2026-11-01, the public build): none when the level is off (no empty log file each start), and on the
-  // Switch stderr goes to rex_stderr.log only when logging is on.
-  const bool logging_off = config.default_level == spdlog::level::off;
-  // banjo-nx (2026-11-19, the rebase): its RexSwitchRedirectStderr (stderr to a file only with logging on) is port
-  // 183's RexSwitchStderrToFile below now, which also keeps stderr in memory for a crash report.
+  // banjo-nx (2026-11-19, the rebase): its own "no log file with the level off" and stderr redirect are left behind:
+  // the base's every_level_off (below) and port 183's RexSwitchStderrToFile do both.
   std::string resolved_path;
-  if (logging_off) {
-  } else if (config.log_file) {
+  if (config.log_file) {
     resolved_path = config.log_file;
   } else if (!config.app_name.empty()) {
     auto log_dir = config.log_dir.empty() ? std::filesystem::current_path() / "logs"

@@ -86,11 +86,6 @@ extern "C" char *fake_heap_end;  // banjo-nx (2026-10-28): libnx: the end of the
 #endif
 #endif
 
-// banjo-nx (2026-10-31, diagnostic): the pipelines of one pixel shader write no colour, so its draws vanish from the
-// picture (which draws a shader makes, on the PC where there is no GPU profile by shader).
-REXCVAR_DEFINE_STRING(banjo_renut_diag_skip_ps, "", "Banjo/Diagnostics",
-                      "Diagnostic: a pixel shader hash (16 hex digits); its pipelines write no colour")
-    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_STRING(renut_pipeline_list, "pipeline_list.bin", "Nuts&Bolts/Graphics",
                       "The pipelines the renderer has built, which it builds ahead of use at the "
                       "next start (delete it to start over)");
@@ -410,11 +405,6 @@ std::unique_ptr<plume::RenderPipeline> Build(const PipelineKey &key, const Pipel
   for (uint32_t i = 0; i < key.color_count; ++i) {
     desc.renderTargetFormat[i] = key.color_formats[i];
     desc.renderTargetBlend[i] = BlendDesc(key.blend_control[i], key.color_mask >> (i * 4));
-  }
-  static const uint64_t skip_ps = std::strtoull(REXCVAR_GET(banjo_renut_diag_skip_ps).c_str(), nullptr, 16);
-  if (skip_ps && key.pixel_shader && static_cast<const ShaderCacheEntry *>(key.pixel_shader)->hash == skip_ps) {
-    for (uint32_t i = 0; i < key.color_count; ++i)
-      desc.renderTargetBlend[i].renderTargetWriteMask = 0;
   }
   desc.multisampling = plume::RenderMultisampling(plume::RenderSampleCounts(key.samples));
   // banjo-nx (banjo_renut_alpha_to_mask_test, 2026-10-18): not on a single-sample target, where the draw's shared

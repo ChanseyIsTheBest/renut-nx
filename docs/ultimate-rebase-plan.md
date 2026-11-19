@@ -23,7 +23,7 @@ banjo-nx never committed (tools it took from other ports).
 
 ## The inventory
 
-### Banjo's own layer (what the base does not have): came back
+### (a) Banjo's layer, grafted (what the base does not have, for this game alone)
 
 | Piece | Files | How |
 |---|---|---|
@@ -39,19 +39,38 @@ banjo-nx never committed (tools it took from other ports).
 | Tomls and package | dist/switch/banjo-nx (renut.toml, renut_play / _ab and the configs), dist/switch/configs | banjo-nx's |
 | Icon, NRO name, version | tools/switch/icon/banjo_icon.jpg, app/icon/app.ico, app/CMakeLists.txt (NAME, AUTHOR, VERSION 1.0.2) | banjo-nx's |
 | Docs | docs/ (renut-nx's method docs) | banjo-nx's; the base's pages in docs/ultimate/ |
+| The game menu's N&B rows (2026-11-19, the user) | app/src/banjo_menu.cpp, through the base's menu's game hook (SetGameMenuRows, a handoff) | new: every key of 1.0.2's renut.toml on the Settings tab, in the menu's 12 languages |
+| N&B's own scripts for this branch | tools/run_pc.ps1 / run_ryujinx*.ps1 at N&B's folders, dist/switch/renut-nx | new |
 
-### banjo-nx's work after 2026-10-29: what the base already had
+(The table above is list **(a)**: Banjo's layer, grafted. Lists (b) and (c) follow. The method, as the user restated it
+on 2026-11-19 through the base's session: a full rebase, the base's tree first; from banjo-nx only what the game needs
+and the base has in no form; where the base has its own form, the base's wins; nothing grafted because it was there.)
 
-| banjo-nx | In the base? | Outcome |
+### (b) General work the base already has: banjo-nx's form left behind
+
+| banjo-nx's | The base's form (port) | What stays of banjo-nx |
 |---|---|---|
-| 1.0.0 public build: logs off on the Switch | port 183 does stderr more thoroughly | the base's crash hooks (port 183); banjo-nx's log_level default (off on the Switch) kept |
-| 1.0.0: the web installer's shader package beside the NRO | Katamari's version 1 (deko3d_glsl.bin, table in the NRO) | both: the base's version-1 reader plus banjo-nx's version 2 (OpenInstalled, the shader table in the file) |
-| 1.0.0: Sphaira's forwarder ids | yes (blur-nx took banjo-nx's) | the base's |
-| 1.0.0: draw variants, GLSL unpacked on demand (the OOM fix), memory report | urgent variants only (Katamari's copy) | banjo-nx's draw variants and GLSL loader merged into plume and pipeline.cpp; the base's later code moved to the loader's `text` |
-| 1.0.0: the water fetch spec (banjo_gpu_fetch_spec) | yes (vivapinata-nx's copy, extended to every draw; its A/B is 83, banjo-nx's was 69) | the base's; banjo-nx's duplicate pass_fetchspec dropped |
-| 1.0.1: the language key | Katamari's XGetLanguage reads user_language (compatible) | banjo-nx's title_update's ApplyLanguage, the base's XGetLanguage |
-| 1.0.2: game memory and the NRO's code on 2 MB blocks | yes (katamari-nx's 1.0.1, which kameo-nx's and banjo-nx's are copies of) | the base's, with renut.toml as the file the code-block switch reads |
-| stick moves in input_script ('LSx/y/duration') | the base has Katamari's axis pushes (another form) | both |
+| 1.0.0: stderr to a file only with logging on (switch_crash_hooks.c RexSwitchRedirectStderr) | port 183 (blur-nx: stderr kept in memory, rex_stderr.log only when something is logged) | nothing; only N&B's default `log_level` = "off" on the Switch (layer a) |
+| 1.0.0: no log file when the level is off (logging.cpp `logging_off`) | katamari-nx's `every_level_off` (logging.cpp, 2026-11-02) | nothing (taken out 2026-11-19, after the first merge had kept both) |
+| 1.0.0: Sphaira's forwarder ids, the forwarder's NPDM | in the base through blur-nx (threading_switch.cpp, with blur-nx's game-menu four-core switch) | nothing; N&B's forwarder id default is the same |
+| 1.0.0: the release shader package beside the NRO (OpenInstalled, the shader table in the file, version 2) | the base has banjo-nx's own reader (it was in the fork) and Katamari's version 1 | the base's |
+| 1.0.0: urgent variants (a fetch-specialised pipeline's variants compiled at once) | katamari-nx's copy of banjo-nx's | the base's |
+| 2026-10-31: the water fetch spec (banjo_gpu_fetch_spec, deko3d_glsl_opt.py pass fetchspec, the pipeline key's fetch_types) | vivapinata-nx's copy, extended to every draw (A/B 83; banjo-nx's was 69) | the base's (deko3d_glsl_opt.py the base's file: banjo-nx's duplicate pass and its vertex-only stage entry left behind; the pass changes no pixel shader) |
+| 1.0.1: the language query | katamari-nx's XGetLanguage reading user_language | the base's; N&B's language key (title_update.cpp) is layer a |
+| 1.0.2: game memory and the NRO's code on 2 MB blocks | katamari-nx's 1.0.1 (kameo-nx's and banjo-nx's are copies of it) | the base's, reading renut.toml (layer a) |
+| 2026-10-31: stick moves in input_script ('LSx/y/duration') | katamari-nx's axis pushes ('LSUP@2.5' ...) and input_script_sticks | nothing (input_system.cpp the base's file, 2026-11-19) |
+| 2026-10-31: a pixel shader's pipelines without colour writes (banjo_renut_diag_skip_ps) | none, but a diagnostic the game runs without | nothing (left behind: not needed) |
+| the profiler's frame boundary at N&B's appMainDraw | the base's at Present / Swap (port 156's game frames) | N&B's (layer a): N&B's hooks count frames and cap them in appMainDraw; port 156's count left out to count once |
+
+### (c) General work the base lacks: grafted (with a handoff) or left behind
+
+| banjo-nx's | Why N&B needs it | Grafted? |
+|---|---|---|
+| 1.0.0: the GLSL not kept with a shader (plume `Deko3DGlslSource`, `Deko3DShaderSetGlslLoader`; the loader unpacks it again for a new variant) and the memory report's shader and pipeline counts | the console's out-of-memory crash after level loads in 1.0.0 (docs/deko3d-renderer.md) | yes (plume_deko3d.*, banjo_renut_deko3d.cpp, memory_report.cpp); a handoff |
+| 1.0.0: the web installer's raw package compressed once with its dictionary (CompressInstalledPackage, deko3d_glsl.dict) | banjo-nx-installer writes raw frames (its page has no zstd compressor); players' installs depend on it | yes; tied to banjo-nx-installer (the base's installer makes its own package) |
+| 2026-10-31: draw variants (a pipeline a draw waits for queued ahead, its variants as a draw's) | 1.0.2's behaviour for its specialised pipelines (the water); the base has only the urgent half | yes (plume, pipeline.cpp); a handoff |
+| 1.0.0: rex_profile.log only with logging on (switch_perf.cpp) | the public build writes no log; the base's switch_perf writes it at every start | yes; a handoff |
+| 1.0.0: deko3d.log only with logging on | the base has katamari-nx's same check | the base's (b) |
 
 ### The base's Katamari layer: removed
 
@@ -79,6 +98,13 @@ counted at Swap) is not taken: N&B counts them in its own Swap hook.
 6. **Docs**: banjo-nx's back, the base's under docs/ultimate.
 
 `tools/ult_rebase_apply.py` does steps 2-5 from the classes; `tools/ult_resolve.py` resolves a diff3 block by side.
+
+**A correction (2026-11-19 afternoon, the user's restatement of the method through the base's session):** step 5's
+three-way merge brought every banjo-nx change since the fork into the shared files, including banjo-nx forms of things
+the base has its own form of. Audited against lists (b) and (c) above: logging.cpp's `logging_off`, input_system.cpp's
+stick moves and deko3d_glsl_opt.py's duplicate fetchspec pass went back to the base's form, and one banjo-nx diagnostic
+(banjo_renut_diag_skip_ps) was left behind; what stays of banjo-nx in a shared file is list (a)'s defaults and lines,
+or list (c)'s grafts.
 84 conflict blocks in 26 files were resolved by hand (the commits name the decisions). Later base ports come in with
 `tools/ult_port_sync.py` (docs/ultimate-sync.md).
 
