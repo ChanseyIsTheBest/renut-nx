@@ -189,3 +189,39 @@ Both: the r1 mirror (714.5 / 569.7 million calls), the stack forwards, the gener
 flush-mode flow: 0 differences. **All 40 new copies were reached** (on one route or both); 9 of them only in calls
 that reach a function outside the copy (the guard compared their stores up to that call). Open: route B's 4 not-
 comparable calls whose stores before the stop differed (no difference line; a thread race is the usual cause).
+
+## The console regression (2026-11-20)
+
+The user's console (handheld, stock clocks CPU 1020 / GPU 460.8 / RAM 1600, four-core forwarder) ran this branch's
+NRO (fe622e97) slower than renut-nx 1.0.2. Runs, all on the console:
+
+| Run | Build | Scene | fps | Render thread | GPU |
+|---|---|---|---|---|---|
+| the user's, logs on (2.5 min) | this branch | Showdown Town, about 5,000 draws a frame | 10-12 | 15-19 us a draw (core 1 saturated) | 14-16 us a draw |
+| 1.0.2's of 30 Oct (memory) | 1.0.2 era | the same | 17.6-19.6 | 7.5-8.1 us a draw | about 8 us a draw |
+| block 1 (8.5 min, 1 ms stack sampling) | this branch | the title's attract loop | 11-27 | 17-21 us a draw | 27-46 us a draw: GPU-bound |
+| block 2 (1 ms stack sampling) | 1.0.2 (62ab5e4c) | the same loop | 30-40 (8 windows, then froze) | | |
+
+**The GPU: the generic variants.** This tree's translator puts much more behind specialization constants: the generic
+form of each shader (all constants at their defaults) is far bigger than 1.0.2's (tools/deko3d_glsl_compare.py, the
+same uam on both: pixel shaders 2.52 M -> 6.67 M instructions over 3,834 shaders, +164 %, mean GPRs 24.5 -> 37.9;
+vertex shaders +24 %). The console drew with the generic variants for good: 20,221 stages given the generic one at
+the start, then only 148 read from the DKSH cache and 43 swapped in over 8.5 minutes, compiles about one every 6 s
+(throttled). The cache holds the pipeline lists' variants (52,975 of the new list's 53,130), so the run-time keys are
+not the ones tools/deko3d_variant_cache.py derives from the lists. 1.0.x had as many generic stages (27,713 in a
+6-minute session), but its generic forms cost about what its specialised ones did.
+
+**The CPU side:** the render thread's functions are the same mix in both builds (FastDrawLocked, memmove,
+FillTextures, PushFloatConstants, Replay, ConvertVertices, PagesClean ...: tools/profile_threads.py); one new cost,
+census::On() (1.7 %, now inline). Core 3 was saturated (0.7-1.7 % idle against 25-36 % in 1.0.x: the compiles), the
+ring cleaner there fell behind and the render thread cleaned the upload ring itself (sasrt_ring_cleaner_take_over:
+375 ranges, 1.0.x 0). This NRO had no PGO and no LTO (1.0.2's had both).
+
+**The fixes in progress:** plume logs every variant it falls back for (banjo_deko3d_log_misses), a Ryujinx run
+collects them (the renderer's keys are the same there), the DKSH cache gets them (--runtime-log); PGO and LTO for
+every library but uam (the user's: uam stays -O2; the function registration file stays -O0: it runs once at boot and
+optimising it costs 20 minutes a build).
+
+**The console tools:** the virtual pad (sys-botbase) did not reach the game's title in handheld mode (only the Home
+menu); the attract loop needs no input. 1 ms stack sampling froze 1.0.2 after two minutes (and sys-botbase with it:
+the console needed the user); prefer no sampling or a longer interval for the next console runs.
