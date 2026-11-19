@@ -6,6 +6,10 @@ base's ports and the not-exact forms cleared on N&B (docs/banjo-near-exact.md).
 
 ## What is in it (out/package_ultimate_2026-11-19/)
 
+Built 2026-11-19 21:41 from commit beb56743 (branch ultimate): renut-nx.nro md5 fe622e97bfec57152af032f72d3fdf45, 110,227,174 bytes;
+the ELF beside it (`renut-nx.elf`, unstripped, for crash addresses); `source_beb56743.zip` (`git archive` of that
+commit: no generated code, no game data); `README-test.md` (this page); the handoff note and patch.
+
 | File | Where it goes | What it is |
 |---|---|---|
 | `switch/renut-nx/renut-nx.nro` | sdmc:/switch/renut-nx/ | the Switch NRO (deko3d) with the game's shaders inside (4,916, made from the user's own files with the base's translator): for the user's own card only, never published |

@@ -61,3 +61,15 @@ Times AEST. One line per step; the details are in docs/banjo-ultimate-notes.md, 
   207 MB; read through its index on demand, not held in memory).
 - 18:55 The cache to the user's card (sys-ftpd, /switch/renut-nx/deko3d_shaders.bin; sasrt-nx's session had freed
   the card) and to the banjo-ult emulator SD; the 1.0.2 reference run in Ryujinx (ref102, banjo-ult-ref, 480 s).
+- 19:03-19:23 The Switch build with the cleared forms (a full rebuild: the near-exact defines); text -1.34 % (generated)
+  / -1.47 % (copies). 19:29-19:35 the stereo check (audio1 / audio2: N&B mixes five channels whatever it is told). The
+  keys decided from the log: sasrt_gpu_skip_inert_draws false and banjo_renut_tags_check 256 on the Switch (cc9fb22d).
+- 19:45 new1 (Ryujinx, the rebased NRO): the same picture as ref102 (1.0.2) in every shared scene; the cache used (4
+  compiles); the forms self-check reported near-exact #2's NaN results: fixed (2ed2e120). 19:54 prof1 (Ryujinx,
+  stack sampling, 600 s).
+- 20:08-21:25 The hot-function round: 40 functions from prof1 added, 59 small copies out (the base's rule); code
+  generation; banjo_hot_bulk_lines (a line per reached bulk copy); the final PC verify on two routes (the save; a new
+  game): 0 differences, all 40 new copies reached.
+- 21:27-21:41 The final Switch build (md5 fe622e97bfec); 21:42 new2 (Ryujinx): gameplay on foot at 382 s, the
+  self-check 45,134 of 45,134, 4 compiles. renut_ab.toml without target 150 (its off half needs variants the cache
+  lacks). 21:50 the package (out/package_ultimate_2026-11-19) and the final NRO to the user's card.
