@@ -2645,6 +2645,35 @@ namespace plume {
         return true;
     }
 
+    // banjo-nx (2026-11-20, logMisses): a variant the draw got the generic one for, once per key, as the compile log's
+    // "run-time variant" line: its kind, the stage, the variant text's size, the base text's size and FNV-1a 64 (the GLSL
+    // file tools/deko3d_variant_cache.py --runtime-log matches it to) and its constants ("ID VALUEu;").
+    static void logMissedVariant(uint64_t key, uint32_t stage, const std::string &glsl, const std::string &defines,
+                                 size_t sourceSize) {
+        static std::mutex mutex;
+        static std::unordered_set<uint64_t> seen;
+        static constexpr size_t kCap = 60000;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (seen.size() >= kCap || !seen.insert(key).second)
+                return;
+        }
+        static const char *kDefine = "#define SPIRV_CROSS_CONSTANT_ID_";
+        std::string list;
+        size_t at = 0;
+        while ((at = defines.find(kDefine, at)) != std::string::npos) {
+            at += strlen(kDefine);
+            const size_t end = defines.find('\n', at);
+            list.append(defines, at, (end == std::string::npos ? defines.size() : end) - at);
+            list += ';';
+            if (end == std::string::npos)
+                break;
+            at = end + 1;
+        }
+        logf("uam: missed (generic meanwhile) run-time variant (stage %u, %zu bytes, base %zu bytes %016" PRIx64 "): %s",
+             stage, sourceSize, glsl.size(), fnv1a64(glsl.data(), glsl.size()), list.c_str());
+    }
+
     const DkShader *Deko3DDevice::loadVariant(const Deko3DShader *base, const RenderSpecConstant *specConstants, uint32_t specConstantsCount,
                                               Deko3DVariantRequest *pending, bool noCompile) {
         if (pending)
@@ -2768,6 +2797,8 @@ namespace plume {
                 pending->stage = shader->stage;
                 pending->name = shader->name;
                 queueAsync(*pending, t_backgroundThread && !t_drawVariants);  // no room: the draw that needs it queues it (refresh)
+                if (g_deko3dOptions.logMisses)  // banjo-nx (2026-11-20)
+                    logMissedVariant(key, uint32_t(shader->stage), glsl, defines, source.size());
                 return generic();
             }
             if (!have && noCompile)

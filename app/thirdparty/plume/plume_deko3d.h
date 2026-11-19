@@ -1164,6 +1164,10 @@ namespace plume {
         // uam's banjo-nx codegen passes (uam_api.h setBanjoFlags): 1 PRMT byte moves, 2 storage buffer offsets in the
         // load, 4 shift distribution, 8 + 16 the input interpolation cache where it pays.
         unsigned uamFlags = 447;
+        // banjo-nx (2026-11-20): every variant a draw got the generic one for (not loaded, not in the cache file) logged
+        // once, as the compile log's "run-time variant" lines (tools/deko3d_variant_cache.py --runtime-log reads both):
+        // the variants a DKSH cache made from pipeline lists still lacks. A diagnostic: off by default.
+        bool logMisses = false;
         // The uam thread's core (-1: any) and priority (Horizon: a higher number is a lower priority; 0: unchanged).
         // A thread that waits for a compile lends its priority to the uam thread while it waits.
         int compileCore = -1;

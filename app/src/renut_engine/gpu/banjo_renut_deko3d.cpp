@@ -39,6 +39,12 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_log_writer, true, "Banjo/Enhancements",
                     "line written and flushed where it is said, as before")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // Port 161 (from fnxf_xiii, its note of 2026-10-30): plume_deko3d.h beforeBufferCopy.
+// banjo-nx (2026-11-20, the rebase's console runs: 20,000 stages on the generic variant): plume's logMisses.
+REXCVAR_DEFINE_BOOL(banjo_deko3d_log_misses, false, "Banjo/Diagnostics",
+                    "deko3d renderer: every shader variant a draw got the generic one for (neither loaded nor in "
+                    "deko3d_shaders.bin) is logged once to deko3d.log as a \"run-time variant\" line, for "
+                    "tools/deko3d_variant_cache.py --runtime-log: the variants a cache made from the pipeline lists lacks")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_deko3d_copy_run_barriers, true, "Banjo/Enhancements",
                     "deko3d: no barrier between back-to-back buffer copies once a full one has run (the copy engine "
                     "runs them one at a time; each full barrier is 2 GPU submission entries). false: a barrier before "
@@ -737,6 +743,7 @@ void InstallShaderCache() {
   options.stripRestart = Deko3DStripRestartOn();
   options.vsOutputs = Deko3DVsOutputsOn();
   options.uamFlags = Deko3DUamFlags();
+  options.logMisses = REXCVAR_GET(banjo_deko3d_log_misses);  // banjo-nx (2026-11-20)
   options.mergeBarriers = Deko3DBarrierMergeOn();  // banjo-nx (2026-10-19, GPU)
   options.leanBarriers = Deko3DBarrierLeanOn();
   options.copyRunBarriers = REXCVAR_GET(banjo_deko3d_copy_run_barriers);  // port 161 (from fnxf_xiii)

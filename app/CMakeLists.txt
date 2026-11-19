@@ -782,6 +782,19 @@ if(REXGLUE_PLATFORM_SWITCH)
             "${CMAKE_CURRENT_SOURCE_DIR}/../sdk/src/core/exception_handler_switch.cpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/../sdk/src/core/fiber_switch.cpp")
     endif()
+    # banjo-nx (2026-11-20, the user: "everything including the SDK gets -O3, PGO and LTO"; uam stays at its own -O2 at
+    # the user's word, and outside LTO since plume links it as one object with its symbols made local): the remaining
+    # libraries of the NRO. rexglue_switch_startup (the start-up code: --wrap'd functions, constructors, weak stubs, the
+    # profiler) gets PGO only: those are the forms LTO drops or renames, and none of it is hot.
+    option(BANJO_SWITCH_ALL_OPT "The NRO's other libraries in the Switch LTO and PGO too (uam excepted)" ON)
+    set(_banjo_rest_lto_targets)
+    set(_banjo_rest_pgo_targets)
+    if(BANJO_SWITCH_ALL_OPT)
+        set(_banjo_rest_lto_targets o1heap renut_zstd renut_xxhash xxhash fmt spdlog imgui renut_smolv mspack aes128
+                                    tiny-aes disasm glslang SPIRV MachineIndependent GenericCodeGen OSDependent
+                                    OGLCompiler rexgpu-xenos)
+        set(_banjo_rest_pgo_targets ${_banjo_rest_lto_targets} rexglue_switch_startup)
+    endif()
     if(BANJO_SWITCH_LTO)
         set(_banjo_lto_compile -flto -fno-fat-lto-objects)
         set(_banjo_lto_link -flto=${BANJO_SWITCH_LTO_JOBS} -flto-partition=balanced -ffp-contract=off
@@ -797,6 +810,12 @@ if(REXGLUE_PLATFORM_SWITCH)
             endif()
         endforeach()
         foreach(target ${_banjo_sdk_opt_targets})  # renut-ultimate (2026-11-07)
+            if(TARGET ${target})
+                target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:${_banjo_lto_compile}>")
+                target_compile_definitions(${target} PRIVATE XXH_FORCE_MEMORY_ACCESS=0)
+            endif()
+        endforeach()
+        foreach(target ${_banjo_rest_lto_targets})  # banjo-nx (2026-11-20)
             if(TARGET ${target})
                 target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:${_banjo_lto_compile}>")
                 target_compile_definitions(${target} PRIVATE XXH_FORCE_MEMORY_ACCESS=0)
@@ -855,7 +874,7 @@ if(REXGLUE_PLATFORM_SWITCH)
                 target_compile_options(${target} PRIVATE ${_banjo_pgo})
             endif()
         endforeach()
-        foreach(target ${_banjo_sdk_opt_targets})  # renut-ultimate (2026-11-07)
+        foreach(target ${_banjo_sdk_opt_targets} ${_banjo_rest_pgo_targets})  # renut-ultimate (2026-11-07); banjo-nx
             if(TARGET ${target})
                 target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:${_banjo_pgo}>")
             endif()
