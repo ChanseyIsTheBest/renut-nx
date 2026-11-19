@@ -1022,9 +1022,7 @@ namespace plume {
     // pipelines; the draw goes on with the generic one): its variants are queued as a draw's (ahead of the background
     // ones). Set before the build, cleared after it.
     void Deko3DSetDrawVariants(bool draw);
-    // banjo-nx (2026-11-01): on such a thread, the pipeline it builds next draws much slower with generic variants (the
-    // water's fetch constants): the variants it lacks are read or compiled now, on this thread, as a compile the
-    // thread waits for (ahead of the background ones; it ends their rest). Set before the build, cleared after it.
+    // banjo-nx (2026-11-01): the pipeline this thread builds draws much slower with its generic variants: compile them now, here.
     void Deko3DSetUrgentVariants(bool urgent);
     // banjo-nx (2026-11-01): the shader's GLSL is unpacked by 'loader' when it is needed instead of being kept (see
     // Deko3DGlslSource). The loader must give the same text every time.

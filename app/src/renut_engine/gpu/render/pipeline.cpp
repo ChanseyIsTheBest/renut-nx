@@ -8,7 +8,6 @@
 #include <atomic>
 #include <bit>
 #include <condition_variable>
-#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -1134,10 +1133,9 @@ void PrebuildWorker() {
     inputs.layout = &job.layout->layout;
     const bool shaders = inputs.vertex_shader && (!job.key.pixel_shader || inputs.pixel_shader);
     const bool for_draw = job.for_draw;
-    // banjo-nx (2026-11-01): a pipeline with the draw's own vertex fetch (banjo_gpu_fetch_spec: the water) is built with
-    // its own variants, compiled now on this thread (plume::Deko3DSetUrgentVariants); the draws use the generic pipeline
-    // meanwhile. Queued in the background, the console's first run never got to it: the uam thread compiles one
-    // variant every 30-40 s there (its rests), behind a backlog, and Nutty Acres' sea stayed at 18-19 ms.
+    // banjo-nx (2026-11-01): a pipeline with the draw's own vertex fetch or patch kind (banjo_gpu_fetch_spec: here the terrain) is
+    // built with its own variants, compiled now on this thread (plume::Deko3DSetUrgentVariants); the draws use the generic
+    // pipeline meanwhile. Queued in the background, a console run might never get to it (banjo-nx: one variant every 30-40 s).
     const bool urgent = FetchSpecialised(job.key);
     const auto build_start = std::chrono::steady_clock::now();
     lock.unlock();

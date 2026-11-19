@@ -19,7 +19,11 @@ OUT = os.path.join('out', 'ultimate_handoff_2026-11-19.patch')
 WHOLE = ['tools/indirect_calls.py', 'tools/indirect_promotions_rekey.py', 'tools/reg_liveness.py',
          'tools/cc_entry_census.py', 'tools/cc_exit_census.py', 'tools/cc_exit_reads.py', 'tools/r1_preserve.py',
          'tools/lr_preserve.py', 'app/src/cpu/banjo_codegen_checks.cpp', 'app/src/game_menu.h',
-         'app/src/game_menu.cpp', 'tools/guest_neighbours.py', 'tools/cvar_default_diff.py']
+         'app/src/game_menu.cpp', 'tools/guest_neighbours.py', 'tools/cvar_default_diff.py',
+         # docs/ultimate-rebase-plan.md list (c): banjo-nx's general work the base lacks, grafted.
+         'app/thirdparty/plume/plume_deko3d.h', 'app/thirdparty/plume/plume_deko3d.cpp',
+         'app/src/renut_engine/gpu/render/pipeline.cpp', 'app/src/renut_engine/gpu/backend/memory_report.cpp',
+         'sdk/src/ui/switch_perf.cpp']
 
 
 def base_text(path):
@@ -54,6 +58,17 @@ PORT87 = [(
     "  const u32 tiles = *reinterpret_cast<const be_u32 *>(device + native::off::TileCount);\n"
     "  if (!(device[native::off::Flags] & 0x20) || tiles < 2 || tiles > 16)")]
 
+# banjo_renut_deko3d.cpp: the GLSL loader (UnpackGlsl, CreateGameShader) is the handoff; CompressInstalledPackage is
+# tied to banjo-nx-installer's raw package (the base's installer makes its own), so it is taken out of the copy.
+def without_installer_compression(text):
+    a = text.index("// renut-nx (2026-11-01, the public build, the user's idea)")
+    b = text.index('InstalledPackage &OpenInstalled() {')
+    text = text[:a] + text[b:]
+    return edit(text, [('#include <chrono>  // renut-nx (2026-11-01)\n', ''),
+                       ("    CompressInstalledPackage(path);  // renut-nx (2026-11-01): the web installer's raw package, once\n",
+                        '')], 'banjo_renut_deko3d.cpp')
+
+
 RUN_PC_QUOTE = [(
     "        @($Extra -split ' ' | Where-Object { $_ })\n$style = ",
     "        @($Extra -split ' ' | Where-Object { $_ })\n"
@@ -83,6 +98,9 @@ def main():
             old = base_text(path)
             put(a, path, old)
             put(b, path, edit(old, pairs, path))
+        path = 'app/src/renut_engine/gpu/banjo_renut_deko3d.cpp'
+        put(a, path, base_text(path))
+        put(b, path, without_installer_compression(open(path, encoding='utf-8').read().replace('\r\n', '\n')))
         r = subprocess.run(['git', 'diff', '--no-index', '--no-color', 'a', 'b'], cwd=tmp, capture_output=True)
         patch = r.stdout.decode('utf-8')
         # The paths as the base's tree has them.

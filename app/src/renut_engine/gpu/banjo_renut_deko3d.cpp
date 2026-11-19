@@ -73,7 +73,6 @@ REXCVAR_DEFINE_BOOL(lo_deko3d_relaxed_descriptor_counters, true, "Banjo/Enhancem
 // one, hence weak.
 extern const uint8_t g_deko3dGlslPackage[] __attribute__((weak));
 extern const size_t g_deko3dGlslPackageSize __attribute__((weak));
-REXCVAR_DECLARE(std::string, log_level);  // banjo-nx (2026-11-01): the SDK's (deko3d.log only with logging on)
 
 REXCVAR_DECLARE(std::string, log_level);  // sdk/src/core/logging.cpp
 

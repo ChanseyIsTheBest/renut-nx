@@ -2255,8 +2255,8 @@ namespace plume {
     // draws with the generic variants meanwhile): its variants are queued as a draw's.
     static thread_local bool t_drawVariants = false;
     // banjo-nx (2026-11-01, Deko3DSetUrgentVariants): the pipeline this thread builds draws much slower with the generic
-    // variant (the water's fetch: 2,494 instructions a vertex against 411): its variants compiled now, on this thread
-    // (a compile it waits for: ahead of the background ones, and it ends their rest), not queued in the background.
+    // variant (banjo_gpu_fetch_spec): its variants compiled now, on this thread (a compile it waits for: ahead of the
+    // background ones), not queued in the background.
     static thread_local bool t_urgentVariants = false;
 
     // banjo-nx (2026-10-23, the user's request, Deko3DOptions::compileWaitBoost): while a drawing thread waits for a
