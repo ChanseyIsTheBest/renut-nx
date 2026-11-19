@@ -148,3 +148,23 @@ RL and RR in every frame (LFE never) with the default speaker configuration, and
 `audio_speaker_config = 1` (analog stereo: "speaker config 00000001" in the line). N&B mixes its five channels
 whatever it is told, so the stereo saving needs a per-game patch (blur-nx's tools/stereo_mix.py): worth it only if the
 console's CPU table puts the mixer near the top (a next step with a console profile).
+
+## Ryujinx: the picture against renut-nx 1.0.2 (step 4; 2026-11-19)
+
+Both runs with out/emu/emu_cmp.toml (1.0.2's shipped settings, logs on, dynamic resolution off, captures every 15 s, A
+presses 135-225 s, the sticks from 330 s), 480 s each: **ref102** (1.0.2's NRO fdd75aa177e5 with its own installed
+package and cache, data folder banjo-ult-ref) and **new1** (this branch's Switch build of 19:39: the cleared not-exact
+forms, the copies in place, the shaders inside, the 53,113-variant cache; data folder banjo-ult). The emulator's save
+starts a new game, so the route is the intro, the title, the menus, the loading screen, the opening story (the sepia
+films, Spiral Mountain, Banjo's house) and gameplay on foot (new1 reached it at 434 s; it loads faster).
+
+Matched scenes side by side (out/emu_runs/cmp_a.jpg, cmp_b.jpg; sheets ref102_sheet.jpg, new1_sheet.jpg): the same
+picture in every one: the loading screen, the films' sepia grain and frame, 1.0.0's dialogue boxes and Andy Bold, the
+fur, the lighting and depth of field, the HUD. The captures are not the same frames (the two builds run at different
+speeds), so the only numerical check is the loading screen: its differences (out/emu_runs/cmp_loading_diff.png) are
+the animated parts alone (the background's pan, the TV glass's bands, the cog); the frame, the text and the layout are
+the same. No difference to take to RenderDoc.
+
+new1's log: the DKSH cache (53,113 variants) used, 4 shader compiles in the whole run, no crash, guest memory 594 MB,
+12,869 pipeline objects. One finding: the forms self-check reported near-exact #2's NaN conversions as differences
+(and wrote banjo_selfcheck_failed.txt next to the NRO): fixed (2ed2e120; a handoff).
