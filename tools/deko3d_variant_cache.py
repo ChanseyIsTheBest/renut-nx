@@ -224,6 +224,21 @@ ALPHA_GUESS = (8, 7, 5)
 GPR_CAP_PS = {'364C9BF8579CE602', 'F646B7A8A3A7218B', '92D1F7E40EBB8E86', '9041AFF62011FC58'}
 
 
+def round_vs_specs(prefix, specs):
+    """banjo-nx (2026-11-20, --round-guess): a vertex shader's variant from a list record made before the GPU rounds as
+    the draws key it now: the memory fetches' byte-order words 937 / 939 (render/draw.cpp SasrtSpecWordsOf) at the two
+    values N&B's console and Ryujinx runs asked for (0x200000 / 0x800 for its vertex buffers, 0x80000000 for both), and
+    the vertex epilogue word 932 at 7 beside --sasrt-guess's 5. A shader that declares none of them keeps one variant."""
+    for s in specs:
+        yield s
+        if ROUND_GUESS and prefix == 'vs' and 937 not in s:
+            for b937, b939 in ((0x200000, 0x800), (0x80000000, 0x80000000)):
+                g = {**s, 937: b937, 939: b939}
+                yield g
+                if g.get(932) == 5:
+                    yield {**g, 932: 7}
+
+
 def sasrt_guess(hashes, spec):
     """sasrt-nx (2026-11-08, --sasrt-guess): a listed pipeline (from a list made before the third round's key words) as a
     race draw keys it now: the vertex epilogue's word 5 (constant 932: no screen-space draw, no depth remap, both items
@@ -579,7 +594,7 @@ def main():
                 continue
             sspec = stage_spec(prefix, spec, vs_shader[0] if vs_shader else None,
                                ps_shader[0] if ps_shader else None, not no_ps)
-            for sspec in config_specs(prefix, shader[1], sspec):
+            for sspec in round_vs_specs(prefix, config_specs(prefix, shader[1], sspec)):
                 defines = variant_defines(shader[1], sspec)
                 if (prefix, h, defines) in seen:
                     continue
