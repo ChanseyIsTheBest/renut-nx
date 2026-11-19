@@ -69,6 +69,27 @@ def without_installer_compression(text):
                         '')], 'banjo_renut_deko3d.cpp')
 
 
+# app/CMakeLists.txt: BANJO_GENERATED_NO_TRAPPING_MATH in blur-nx's form (the FPSCR writers keep -ftrapping-math). The
+# three blocks are taken from this tree's file and put at the same anchors in the base's.
+def notrap_pairs():
+    ours = open('app/CMakeLists.txt', encoding='utf-8').read().replace('\r\n', '\n')
+
+    def span(start, end):
+        a = ours.index(start)
+        return ours[a:ours.index(end, a) + len(end)]
+
+    hot = '    set_property(SOURCE ${BANJO_HOT_SOURCES} APPEND PROPERTY COMPILE_OPTIONS -fno-math-errno)\n'
+    rounds = 'message(STATUS "banjo: sa2-nx\'s CPU rounds: definitions \'${_banjo_round_definitions}\'")\n'
+    return [
+        ('    if(BANJO_GENERATED_NO_TRAPPING_MATH)\n        target_compile_options(renut_recomp PRIVATE -fno-trapping-math)\n'
+         '    endif()\nendif()\n',
+         span("    # banjo-nx (2026-11-19, the rebase; blur-nx's BLUR_NO_TRAPPING_MATH form", 'left off")\nendif()\n')),
+        (hot + 'endif()\n', span(hot, '    endif()\nendif()\n')),
+        (rounds, span(rounds, '        set_property(SOURCE ${BANJO_HOT_SOURCES} APPEND PROPERTY COMPILE_OPTIONS '
+                              '-ftrapping-math)\n    endif()\nendif()\n')),
+    ]
+
+
 RUN_PC_QUOTE = [(
     "        @($Extra -split ' ' | Where-Object { $_ })\n$style = ",
     "        @($Extra -split ' ' | Where-Object { $_ })\n"
@@ -94,7 +115,7 @@ def main():
                 put(a, path, old)
             put(b, path, new)
         for path, pairs in (('app/src/renut_engine/gpu/guest/command_buffers.cpp', PORT87),
-                            ('tools/run_pc.ps1', RUN_PC_QUOTE)):
+                            ('tools/run_pc.ps1', RUN_PC_QUOTE), ('app/CMakeLists.txt', notrap_pairs())):
             old = base_text(path)
             put(a, path, old)
             put(b, path, edit(old, pairs, path))
