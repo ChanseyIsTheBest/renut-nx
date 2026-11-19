@@ -74,9 +74,9 @@ log_level = "info"
 # ---- In-run A/B (the console measurement) ----
 # Each listed target off for 30 s, then on for 30 s, in turn; the 10 s lines give fps and the per-target halves.
 # 1 is the control: banjo_renut_precise_barriers, which does nothing on deko3d (both halves the same build).
-# 83: the fetch spec (Nutty Acres' water), 150: the vertex fetch types for every draw, 86: tiles once (predicated
-# tiling replayed once for every tile).
-banjo_renut_ab_targets = "83,150,86,1"
+# 83: the fetch spec (Nutty Acres' water), 150: the vertex fetch types for every draw. (86, tiles once, merges no
+# tile run in N&B: every tile replays another command buffer, so it is no A/B target here.)
+banjo_renut_ab_targets = "83,150,1"
 banjo_renut_ab_s = 30
 
 # ---- Controls ----

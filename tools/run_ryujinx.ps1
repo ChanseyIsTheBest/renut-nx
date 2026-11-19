@@ -4,12 +4,14 @@
 #   powershell -File tools/run_ryujinx.ps1 -Seconds 300 -Name emu1 [-Toml <a katamari.toml with test keys>]
 # renut-ultimate (2026-11-07): its own data folder (ryu-data\renut-ultimate, made from katamari-nx's), and the NRO of
 # app\out\<-Build> copied to its SD at each run (katamari-nx's folder and NRO are left alone).
-param([int]$Seconds = 240, [string]$Name = "emu", [string]$Toml = "", [double]$MinCommitGB = 12, [string]$Build = "switch")
+param([int]$Seconds = 240, [string]$Name = "emu", [string]$Toml = "", [double]$MinCommitGB = 12, [string]$Build = "switch",
+      [string]$Data = "D:\New folder\ryu-data\banjo-ult", [switch]$KeepNro)
 $root = Split-Path -Parent $PSScriptRoot
 $ryu = "D:\New folder\Ryubing-src\ryubing\build\Ryujinx.exe"
 # banjo-nx (2026-11-19, the rebase): banjo-nx's data folder (ryu-data\banjo-ult, made from banjo2), its SD folder
 # switch\renut-nx with renut-nx.nro and renut.toml, as renut-nx 1.0.2 installs them.
-$data = "D:\New folder\ryu-data\banjo-ult"
+# -Data: another data folder (banjo-ult-ref holds renut-nx 1.0.2 for comparisons); -KeepNro: the SD's own NRO runs.
+$data = $Data
 # Ryujinx starts an NRO without argv: the app then takes REX_SWITCH_FALLBACK_EXE (app/CMakeLists.txt) as its own path.
 $sd = Join-Path $data "sdcard\switch\renut-nx"
 $nro = Join-Path $sd "renut-nx.nro"
@@ -19,8 +21,10 @@ $os = Get-CimInstance Win32_OperatingSystem
 $freeCommit = ($os.TotalVirtualMemorySize - ($os.TotalVirtualMemorySize - $os.FreeVirtualMemory)) / 1MB
 if ($freeCommit -lt $MinCommitGB) { Write-Output ("free commit memory {0:N1} GB < {1} GB: not starting" -f $freeCommit, $MinCommitGB); exit 3 }
 $built = Join-Path $root "app\out\$Build\renut.nro"
-if (-not (Test-Path $built)) { Write-Output "no NRO at $built"; exit 4 }
-Copy-Item $built $nro -Force
+if (-not $KeepNro) {
+  if (-not (Test-Path $built)) { Write-Output "no NRO at $built"; exit 4 }
+  Copy-Item $built $nro -Force
+}
 if ($Toml) { Copy-Item $Toml (Join-Path $sd "renut.toml") -Force }
 # renut-ultimate (2026-11-11, port 78; sasrt-nx's idea 27): an NRO without the copies' guard forms (the everyday and
 # release builds) calls every native copy directly whatever the toml's guard keys say: say so before the run.
