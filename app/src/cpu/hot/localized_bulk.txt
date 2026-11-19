@@ -8,7 +8,6 @@
 # rounds 3/4 city run among them), --min-samples 8: the 363 copies before plus 224 the later runs found hot.
 # Left out by tools/localize_native.py (2026-10-22): 82246E00, 822433D0, 82236790 (a switch body form in their callee
 # sub_82243340 the copy tool does not know).
-
 823ADD80 7075 console samples, 24 instructions, 3 direct callees
 82348A98 828 console samples, 566 instructions, 11 direct callees
 82382290 823 console samples, 312 instructions, 2 direct callees
@@ -122,7 +121,6 @@
 822153D0 43 console samples, 102 instructions, 4 direct callees
 82222BC8 42 console samples, 78 instructions, 6 direct callees
 822169B8 42 console samples, 152 instructions, 3 direct callees
-821E8AA0 42 console samples, 34 instructions, 6 direct callees
 8237D268 42 console samples, 52 instructions, 2 direct callees
 82375928 42 console samples, 194 instructions, 10 direct callees
 82C354A0 41 console samples, 2160 instructions, 20 direct callees
@@ -130,7 +128,6 @@
 821FE498 41 console samples, 50 instructions, 4 direct callees
 829FA350 41 console samples, 92 instructions, 5 direct callees
 821CE958 41 console samples, 118 instructions, 4 direct callees
-829FF110 41 console samples, 38 instructions, 1 direct callees
 829BD8B0 41 console samples, 410 instructions, 2 direct callees
 8238D458 41 console samples, 126 instructions, 3 direct callees
 82BEB798 40 console samples, 314 instructions, 14 direct callees
@@ -140,7 +137,6 @@
 82224670 39 console samples, 500 instructions, 1 direct callees
 822A16E0 39 console samples, 264 instructions, 9 direct callees
 822D9590 39 console samples, 76 instructions, 7 direct callees
-821F4EF8 39 console samples, 34 instructions, 2 direct callees
 8234BB28 38 console samples, 208 instructions, 1 direct callees
 8221B640 38 console samples, 52 instructions, 0 direct callees
 82218D60 38 console samples, 78 instructions, 2 direct callees
@@ -151,7 +147,6 @@
 82200498 37 console samples, 182 instructions, 1 direct callees
 822DA7F0 37 console samples, 110 instructions, 2 direct callees
 821E9998 35 console samples, 52 instructions, 10 direct callees
-8221EEB8 35 console samples, 38 instructions, 1 direct callees
 822E56C0 35 console samples, 466 instructions, 6 direct callees
 824CAED8 35 console samples, 60 instructions, 3 direct callees
 822574F8 34 console samples, 270 instructions, 11 direct callees
@@ -162,28 +157,21 @@
 82205CC0 33 console samples, 804 instructions, 19 direct callees
 822276F0 33 console samples, 266 instructions, 0 direct callees
 822F47E8 32 console samples, 440 instructions, 17 direct callees
-82266D00 32 console samples, 34 instructions, 2 direct callees
-821E9A98 32 console samples, 20 instructions, 2 direct callees
 8237E9F0 32 console samples, 232 instructions, 16 direct callees
 8221AA80 32 console samples, 54 instructions, 4 direct callees
 82378018 31 console samples, 402 instructions, 0 direct callees
 8299E158 31 console samples, 100 instructions, 1 direct callees
-822084C8 30 console samples, 26 instructions, 3 direct callees
 8221A8A0 30 console samples, 120 instructions, 4 direct callees
 823AD928 30 console samples, 134 instructions, 1 direct callees
 8222F8C8 30 console samples, 50 instructions, 1 direct callees
 82309968 30 console samples, 1238 instructions, 35 direct callees
 82220038 29 console samples, 324 instructions, 31 direct callees
 82376128 29 console samples, 118 instructions, 8 direct callees
-82229F50 29 console samples, 6 instructions, 0 direct callees
 82227D40 28 console samples, 122 instructions, 9 direct callees
 8222E0F8 28 console samples, 74 instructions, 0 direct callees
-8221A110 28 console samples, 38 instructions, 1 direct callees
 822299E8 28 console samples, 58 instructions, 10 direct callees
-821F3A98 27 console samples, 30 instructions, 2 direct callees
 82208F90 27 console samples, 154 instructions, 2 direct callees
 8220B1F8 27 console samples, 84 instructions, 17 direct callees
-82376300 26 console samples, 24 instructions, 1 direct callees
 823788C0 26 console samples, 158 instructions, 3 direct callees
 8234BA90 25 console samples, 40 instructions, 1 direct callees
 82218850 25 console samples, 82 instructions, 1 direct callees
@@ -221,13 +209,9 @@
 823776A0 19 console samples, 104 instructions, 1 direct callees
 822100E8 19 console samples, 266 instructions, 10 direct callees
 8222A568 19 console samples, 212 instructions, 19 direct callees
-8221C240 19 console samples, 22 instructions, 2 direct callees
 82209700 19 console samples, 90 instructions, 0 direct callees
-82216C18 19 console samples, 24 instructions, 1 direct callees
 82219FD8 19 console samples, 78 instructions, 3 direct callees
-82BE4018 19 console samples, 38 instructions, 1 direct callees
 82C86980 19 console samples, 50 instructions, 1 direct callees
-82216218 19 console samples, 24 instructions, 2 direct callees
 8240A980 19 console samples, 432 instructions, 18 direct callees
 822095A8 18 console samples, 86 instructions, 1 direct callees
 82257428 18 console samples, 54 instructions, 4 direct callees
@@ -245,17 +229,13 @@
 82875FD0 18 console samples, 7566 instructions, 122 direct callees
 82228C88 18 console samples, 80 instructions, 3 direct callees
 8223C178 18 console samples, 74 instructions, 4 direct callees
-8227D980 18 console samples, 36 instructions, 0 direct callees
 82373EB8 17 console samples, 46 instructions, 6 direct callees
 82374A08 17 console samples, 48 instructions, 8 direct callees
 822A8A38 17 console samples, 262 instructions, 10 direct callees
-8220B0B8 17 console samples, 24 instructions, 5 direct callees
 829BD4F0 17 console samples, 74 instructions, 1 direct callees
 825E3D10 16 console samples, 194 instructions, 6 direct callees
-8222E538 16 console samples, 2 instructions, 1 direct callees
 822154F8 16 console samples, 148 instructions, 7 direct callees
 822A82C8 16 console samples, 468 instructions, 7 direct callees
-821E20F8 16 console samples, 8 instructions, 0 direct callees
 82218E98 16 console samples, 58 instructions, 2 direct callees
 82208530 16 console samples, 40 instructions, 1 direct callees
 82343DB8 16 console samples, 160 instructions, 1 direct callees
@@ -270,11 +250,9 @@
 8220B938 15 console samples, 1104 instructions, 61 direct callees
 82244490 15 console samples, 398 instructions, 6 direct callees
 8220CC48 15 console samples, 152 instructions, 13 direct callees
-8220DA48 15 console samples, 30 instructions, 2 direct callees
 8222BC70 15 console samples, 42 instructions, 2 direct callees
 82227060 15 console samples, 290 instructions, 11 direct callees
 8232F7C8 15 console samples, 78 instructions, 3 direct callees
-82235260 15 console samples, 6 instructions, 0 direct callees
 82232400 14 console samples, 68 instructions, 1 direct callees
 829C6D20 14 console samples, 286 instructions, 0 direct callees
 8234C890 14 console samples, 72 instructions, 2 direct callees
@@ -284,7 +262,6 @@
 82375638 14 console samples, 82 instructions, 0 direct callees
 82378B10 14 console samples, 44 instructions, 2 direct callees
 82318B68 14 console samples, 72 instructions, 3 direct callees
-821F4D38 14 console samples, 38 instructions, 1 direct callees
 821E05B8 14 console samples, 334 instructions, 20 direct callees
 82205AF0 14 console samples, 58 instructions, 5 direct callees
 822ACBD8 14 console samples, 150 instructions, 5 direct callees
@@ -295,9 +272,7 @@
 8220D520 13 console samples, 140 instructions, 8 direct callees
 82223AF8 13 console samples, 82 instructions, 6 direct callees
 822117F8 13 console samples, 146 instructions, 3 direct callees
-82A07970 13 console samples, 22 instructions, 2 direct callees
 82319720 13 console samples, 218 instructions, 5 direct callees
-82222DF0 13 console samples, 32 instructions, 1 direct callees
 8221EFE8 13 console samples, 52 instructions, 2 direct callees
 8222B950 13 console samples, 130 instructions, 4 direct callees
 822089F0 13 console samples, 62 instructions, 6 direct callees
@@ -313,21 +288,16 @@
 82382CC0 13 console samples, 124 instructions, 4 direct callees
 821E2970 13 console samples, 72 instructions, 2 direct callees
 829C7758 13 console samples, 56 instructions, 1 direct callees
-82B891D0 13 console samples, 34 instructions, 1 direct callees
 821BA060 12 console samples, 128 instructions, 10 direct callees
 82205448 12 console samples, 46 instructions, 4 direct callees
 8247C4E0 12 console samples, 336 instructions, 14 direct callees
-82236A30 12 console samples, 6 instructions, 0 direct callees
 8237CE80 12 console samples, 128 instructions, 0 direct callees
 8221D918 12 console samples, 336 instructions, 11 direct callees
 82236A90 12 console samples, 366 instructions, 5 direct callees
 822105C0 12 console samples, 82 instructions, 4 direct callees
 82200770 12 console samples, 156 instructions, 1 direct callees
 821E5050 12 console samples, 106 instructions, 9 direct callees
-822059B8 12 console samples, 20 instructions, 2 direct callees
-8222B0B8 12 console samples, 10 instructions, 0 direct callees
 822283D8 12 console samples, 306 instructions, 16 direct callees
-82228F88 12 console samples, 34 instructions, 0 direct callees
 8237A6E0 12 console samples, 366 instructions, 13 direct callees
 823AC310 12 console samples, 54 instructions, 0 direct callees
 82205708 12 console samples, 146 instructions, 12 direct callees
@@ -338,7 +308,6 @@
 82219CA0 12 console samples, 56 instructions, 1 direct callees
 821E3F30 11 console samples, 124 instructions, 1 direct callees
 82218288 11 console samples, 66 instructions, 0 direct callees
-82205348 11 console samples, 22 instructions, 4 direct callees
 82211450 11 console samples, 48 instructions, 3 direct callees
 82202F88 11 console samples, 46 instructions, 5 direct callees
 82224090 11 console samples, 388 instructions, 13 direct callees
@@ -348,39 +317,31 @@
 82A4F478 11 console samples, 620 instructions, 15 direct callees
 8234D548 11 console samples, 122 instructions, 1 direct callees
 82207E50 11 console samples, 176 instructions, 8 direct callees
-821CF2F8 11 console samples, 24 instructions, 3 direct callees
 82230428 11 console samples, 198 instructions, 2 direct callees
 8222B7D0 11 console samples, 96 instructions, 0 direct callees
 82C87A38 11 console samples, 94 instructions, 1 direct callees
 8224D778 11 console samples, 558 instructions, 9 direct callees
 8238AE50 11 console samples, 64 instructions, 0 direct callees
-82208AE8 11 console samples, 26 instructions, 1 direct callees
 82246EE8 11 console samples, 532 instructions, 36 direct callees
 82213438 11 console samples, 442 instructions, 19 direct callees
 82203428 11 console samples, 74 instructions, 5 direct callees
 82C50790 11 console samples, 278 instructions, 5 direct callees
-822179F0 11 console samples, 24 instructions, 1 direct callees
 823F94A0 11 console samples, 336 instructions, 11 direct callees
 8222CAE0 11 console samples, 272 instructions, 1 direct callees
 82CC1368 11 console samples, 186 instructions, 7 direct callees
 822C0448 11 console samples, 406 instructions, 11 direct callees
 827E3560 11 console samples, 190 instructions, 4 direct callees
-822031C0 10 console samples, 32 instructions, 1 direct callees
 8221CB58 10 console samples, 162 instructions, 8 direct callees
-822235C8 10 console samples, 34 instructions, 3 direct callees
 8234D870 10 console samples, 206 instructions, 5 direct callees
-82212020 10 console samples, 28 instructions, 2 direct callees
 82228A88 10 console samples, 96 instructions, 6 direct callees
 8220AF98 10 console samples, 72 instructions, 5 direct callees
 8237E250 10 console samples, 134 instructions, 10 direct callees
 822706C0 10 console samples, 184 instructions, 2 direct callees
-821F54A0 10 console samples, 20 instructions, 2 direct callees
 821EE1E8 10 console samples, 58 instructions, 5 direct callees
 82342B90 10 console samples, 102 instructions, 0 direct callees
 82376368 10 console samples, 58 instructions, 5 direct callees
 822012A8 10 console samples, 42 instructions, 1 direct callees
 8220A178 10 console samples, 338 instructions, 3 direct callees
-8222A298 10 console samples, 2 instructions, 1 direct callees
 82239C18 10 console samples, 66 instructions, 0 direct callees
 822A6750 10 console samples, 206 instructions, 10 direct callees
 822E4EE0 10 console samples, 46 instructions, 3 direct callees
@@ -390,14 +351,12 @@
 822C4390 10 console samples, 602 instructions, 17 direct callees
 8221FB18 10 console samples, 330 instructions, 28 direct callees
 821FF250 10 console samples, 426 instructions, 23 direct callees
-82228F48 10 console samples, 16 instructions, 0 direct callees
 8223CB80 10 console samples, 102 instructions, 12 direct callees
 822EAA00 10 console samples, 558 instructions, 17 direct callees
 821EEE28 10 console samples, 104 instructions, 4 direct callees
 82283918 10 console samples, 168 instructions, 11 direct callees
 8229A920 10 console samples, 94 instructions, 5 direct callees
 829BD410 10 console samples, 56 instructions, 1 direct callees
-82229F48 10 console samples, 2 instructions, 1 direct callees
 821F4BC0 10 console samples, 94 instructions, 4 direct callees
 82C88090 10 console samples, 162 instructions, 2 direct callees
 829D51F8 10 console samples, 130 instructions, 3 direct callees
@@ -407,17 +366,12 @@
 82340CC8 9 console samples, 660 instructions, 7 direct callees
 82232A08 9 console samples, 336 instructions, 15 direct callees
 82212B40 9 console samples, 118 instructions, 4 direct callees
-82222D88 9 console samples, 30 instructions, 5 direct callees
-8222AFF8 9 console samples, 38 instructions, 5 direct callees
-8234C6A0 9 console samples, 24 instructions, 0 direct callees
 825E2460 9 console samples, 594 instructions, 1 direct callees
 823B7FB8 9 console samples, 48 instructions, 4 direct callees
 821F3368 9 console samples, 212 instructions, 9 direct callees
 821FE748 9 console samples, 676 instructions, 14 direct callees
 8245A1F8 9 console samples, 662 instructions, 34 direct callees
-82217A50 9 console samples, 30 instructions, 1 direct callees
 8237DEE0 9 console samples, 142 instructions, 8 direct callees
-82223CC0 9 console samples, 20 instructions, 2 direct callees
 82BD5658 9 console samples, 258 instructions, 1 direct callees
 825DDED8 9 console samples, 176 instructions, 5 direct callees
 821E8CD0 9 console samples, 906 instructions, 3 direct callees
@@ -459,12 +413,8 @@
 8237D3E0 8 console samples, 252 instructions, 6 direct callees
 82218390 8 console samples, 108 instructions, 2 direct callees
 82253E18 8 console samples, 174 instructions, 1 direct callees
-8220D2A0 8 console samples, 36 instructions, 4 direct callees
 826D4D38 8 console samples, 216 instructions, 3 direct callees
-821DC950 8 console samples, 30 instructions, 1 direct callees
-821FE1E0 8 console samples, 20 instructions, 1 direct callees
 82A024C8 8 console samples, 48 instructions, 1 direct callees
-8222D2D0 8 console samples, 30 instructions, 2 direct callees
 822412B8 8 console samples, 270 instructions, 31 direct callees
 821EC7E8 8 console samples, 57 instructions, 1 direct callees
 82394AD8 8 console samples, 148 instructions, 4 direct callees
@@ -473,9 +423,7 @@
 822C57D8 8 console samples, 612 instructions, 10 direct callees
 82377DC0 8 console samples, 50 instructions, 0 direct callees
 821CF670 8 console samples, 68 instructions, 10 direct callees
-82205950 8 console samples, 28 instructions, 2 direct callees
 8221D6D8 8 console samples, 62 instructions, 1 direct callees
-82215A50 8 console samples, 38 instructions, 4 direct callees
 82212090 8 console samples, 98 instructions, 2 direct callees
 8236F250 8 console samples, 96 instructions, 0 direct callees
 822521D0 8 console samples, 70 instructions, 0 direct callees
@@ -484,7 +432,6 @@
 822AE098 8 console samples, 958 instructions, 16 direct callees
 82C0FA10 8 console samples, 48 instructions, 1 direct callees
 822A31F0 8 console samples, 554 instructions, 5 direct callees
-821EF518 8 console samples, 34 instructions, 0 direct callees
 822A7FD0 8 console samples, 180 instructions, 7 direct callees
 821F9D10 8 console samples, 48 instructions, 4 direct callees
 82241AC0 8 console samples, 92 instructions, 2 direct callees
@@ -495,25 +442,58 @@
 822A7700 8 console samples, 562 instructions, 10 direct callees
 8233FA80 8 console samples, 144 instructions, 2 direct callees
 821CAAB8 8 console samples, 118 instructions, 3 direct callees
-821C28D8 8 console samples, 30 instructions, 1 direct callees
 822C2B30 8 console samples, 694 instructions, 20 direct callees
 8247D1A8 8 console samples, 112 instructions, 2 direct callees
 823A7700 8 console samples, 44 instructions, 2 direct callees
 821D3190 8 console samples, 102 instructions, 2 direct callees
 82218998 8 console samples, 76 instructions, 4 direct callees
-822237D0 8 console samples, 30 instructions, 1 direct callees
 8262A9D0 8 console samples, 310 instructions, 3 direct callees
 82212D80 8 console samples, 424 instructions, 9 direct callees
-821C8368 8 console samples, 36 instructions, 0 direct callees
 82226508 8 console samples, 62 instructions, 0 direct callees
 8239F790 8 console samples, 50 instructions, 4 direct callees
-82207100 8 console samples, 14 instructions, 0 direct callees
 82316528 8 console samples, 170 instructions, 3 direct callees
-8221B5E8 8 console samples, 22 instructions, 0 direct callees
-823A8910 8 console samples, 36 instructions, 3 direct callees
 829BC608 8 console samples, 54 instructions, 0 direct callees
-82206908 8 console samples, 16 instructions, 3 direct callees
 8220B370 8 console samples, 160 instructions, 2 direct callees
 82405370 8 console samples, 600 instructions, 10 direct callees
 82BDB780 8 console samples, 80 instructions, 8 direct callees
 82835418 8 console samples, 152 instructions, 3 direct callees
+8220F460 67 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 40 instructions, 3 direct callees
+82D1AAF8 51 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 232 instructions, 4 direct callees
+82670EC0 40 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 42 instructions, 0 direct callees
+8220EF68 36 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 82 instructions, 4 direct callees
+82994148 26 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 44 instructions, 1 direct callees
+82D1EA70 18 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 74 instructions, 1 direct callees
+82229DB0 17 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 100 instructions, 1 direct callees
+8222E5C8 16 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 72 instructions, 5 direct callees
+8292DFD8 16 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 44 instructions, 0 direct callees
+82229F68 16 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 84 instructions, 1 direct callees
+8297EF48 15 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 774 instructions, 7 direct callees
+82993958 15 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 448 instructions, 2 direct callees
+8220F138 12 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 42 instructions, 2 direct callees
+82934F30 12 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 104 instructions, 0 direct callees
+82AF9FB0 11 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 168 instructions, 0 direct callees
+82C2DB60 11 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 46 instructions, 1 direct callees
+82245B20 11 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 470 instructions, 0 direct callees
+8299BDD8 10 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 126 instructions, 1 direct callees
+821B0128 8 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 54 instructions, 1 direct callees
+82376630 8 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 78 instructions, 8 direct callees
+8229EF18 8 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 106 instructions, 2 direct callees
+829934D0 8 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 172 instructions, 1 direct callees
+82B5CCD0 7 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 42 instructions, 0 direct callees
+829350D0 6 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 128 instructions, 0 direct callees
+829851B0 6 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 172 instructions, 18 direct callees
+82A322E8 5 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 70 instructions, 6 direct callees
+82969348 5 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 92 instructions, 2 direct callees
+8297FB60 4 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 62 instructions, 1 direct callees
+8299F528 4 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 76 instructions, 1 direct callees
+8292D740 4 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 260 instructions, 3 direct callees
+82229BE8 4 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 42 instructions, 0 direct callees
+8296FFF0 4 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 660 instructions, 3 direct callees
+8295ACE8 4 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 208 instructions, 4 direct callees
+8291ADE0 4 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 70 instructions, 0 direct callees
+821DCFB8 3 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 118 instructions, 0 direct callees
+8291B3E0 3 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 52 instructions, 0 direct callees
+821BE148 3 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 92 instructions, 1 direct callees
+822091F8 3 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 86 instructions, 1 direct callees
+822DACE0 3 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 64 instructions, 5 direct callees
+82936F20 3 Ryujinx samples (banjo-nx-ult prof1, 2026-11-19: the intro, the menus, the opening story, gameplay on foot), 328 instructions, 3 direct callees
