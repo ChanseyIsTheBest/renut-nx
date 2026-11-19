@@ -92,6 +92,26 @@ def notrap_pairs():
     ]
 
 
+# app/src/cpu/banjo_hot_guest.cpp: banjo_hot_bulk_lines (the file also holds Banjo's own lines: the change alone, taken
+# from this tree's file and put at the same anchors in the base's).
+def bulk_lines_pairs():
+    ours = open('app/src/cpu/banjo_hot_guest.cpp', encoding='utf-8').read().replace('\r\n', '\n')
+
+    def span(start, end):
+        a = ours.index(start)
+        return ours[a:ours.index(end, a) + len(end)]
+
+    count = 'REXCVAR_DEFINE_BOOL(banjo_hot_count, false, "Banjo/Enhancements",\n'
+    tally = '  uint32_t reached = 0, on = 0, direct = 0, bulk_total = 0, bulk_reached = 0, bulk_on = 0;\n'
+    diff_line = ('      if (d)\n        REXLOG_INFO("[hot] {} (bulk) off after {} difference(s); {} calls compared before", '
+                 'h->name, d,\n                    h->compared.load(std::memory_order_relaxed));\n')
+    return [
+        (count, span('REXCVAR_DEFINE_BOOL(banjo_hot_bulk_lines', count)),
+        (tally, span(tally, '(report_number++ % 6) == 0;\n')),
+        (diff_line, span(diff_line, 'h->not_comparable.load(std::memory_order_relaxed));\n')),
+    ]
+
+
 RUN_PC_QUOTE = [(
     "        @($Extra -split ' ' | Where-Object { $_ })\n$style = ",
     "        @($Extra -split ' ' | Where-Object { $_ })\n"
@@ -117,7 +137,8 @@ def main():
                 put(a, path, old)
             put(b, path, new)
         for path, pairs in (('app/src/renut_engine/gpu/guest/command_buffers.cpp', PORT87),
-                            ('tools/run_pc.ps1', RUN_PC_QUOTE), ('app/CMakeLists.txt', notrap_pairs())):
+                            ('tools/run_pc.ps1', RUN_PC_QUOTE), ('app/CMakeLists.txt', notrap_pairs()),
+                            ('app/src/cpu/banjo_hot_guest.cpp', bulk_lines_pairs())):
             old = base_text(path)
             put(a, path, old)
             put(b, path, edit(old, pairs, path))
