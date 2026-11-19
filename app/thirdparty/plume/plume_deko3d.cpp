@@ -2233,7 +2233,8 @@ namespace plume {
                     const uint64_t now = armTicksToNs(armGetSystemTick());
                     const uint64_t rest = (now - t0) * uint64_t(100 - share) / uint64_t(share);
                     std::lock_guard<std::mutex> lock(compileMutex);
-                    compileRestUntilNs = std::min(std::max(compileRestUntilNs, now) + rest, now + 60000000000ull);
+                    compileRestUntilNs = std::min<uint64_t>(std::max<uint64_t>(compileRestUntilNs, now) + rest,
+                                                            now + uint64_t(60000000000ull));
                 }
             }
             if (job->async) {
