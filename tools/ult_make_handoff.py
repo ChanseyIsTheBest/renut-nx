@@ -23,7 +23,9 @@ WHOLE = ['tools/indirect_calls.py', 'tools/indirect_promotions_rekey.py', 'tools
          # docs/ultimate-rebase-plan.md list (c): banjo-nx's general work the base lacks, grafted.
          'app/thirdparty/plume/plume_deko3d.h', 'app/thirdparty/plume/plume_deko3d.cpp',
          'app/src/renut_engine/gpu/render/pipeline.cpp', 'app/src/renut_engine/gpu/backend/memory_report.cpp',
-         'sdk/src/ui/switch_perf.cpp']
+         'sdk/src/ui/switch_perf.cpp',
+         # The forms self-check under near-exact #2 (found in N&B's Ryujinx run).
+         'app/src/cpu/banjo_forms_selfcheck.cpp']
 
 
 def base_text(path):
