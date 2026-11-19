@@ -790,17 +790,6 @@ struct Job {
   bool for_draw = false;
 };
 
-// banjo-nx (2026-11-01): a key with the draw's own vertex fetch words or patch kind (banjo_gpu_fetch_spec).
-bool FetchSpecialised(const PipelineKey &key) {
-  if (key.tess_kind)
-    return true;
-  for (const uint32_t w : key.fetch_types) {
-    if (w)
-      return true;
-  }
-  return false;
-}
-
 // banjo-nx (2026-10-28, the heap): the shared block for a layout, by its fields as the record has them.
 std::shared_ptr<const JobLayout> JobLayoutFor(const std::string &bytes, std::unique_ptr<JobLayout> fresh) {
   static std::mutex mutex;

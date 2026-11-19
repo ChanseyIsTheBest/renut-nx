@@ -1102,7 +1102,6 @@ const char *AbName(int target) {
   case 65: return "host draw packets (banjo_renut_host_packets: made and taken)";  // 2026-10-28
   case 66: return "resolve host levels made at their first read (banjo_renut_lazy_resolve_mips, from sa2-nx)";  // 2026-10-28
   case 67: return "whole clears of a target holding that clear already not sent (banjo_renut_clear_repeat, from sa2-nx)";
-  case 69: return "tessellated draws' vertex fetch types and patch kind as constants (banjo_gpu_fetch_spec)";  // 2026-10-31
   case 68: return "no pipeline read for the provisional check while none is provisional (banjo_deko3d_provisional_count)";
   // katamari-nx (2026-10-30): the base's CPU items. banjo-nx (2026-11-19, the rebase): 69 was Katamari's hand natives,
   // not in this port (banjo-nx's own fetch spec, its 69 before, is the base's 83).

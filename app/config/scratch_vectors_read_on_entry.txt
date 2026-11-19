@@ -1,0 +1,6 @@
+# Scratch vector registers (v0, v32-v63) that a function reached through a pointer reads on entry in this game
+# (tools/cc_entry_census.py). tools/reg_liveness.py keeps each one live at every indirect call, so the machine copies
+# hand it over as the generated code does (banjo-nx, 2026-11-19; docs/banjo-ultimate-notes.md).
+v0   # sub_82402910, a message handler (a switch on the message word at 0(r4)): at 0x82402D60 it stores v0 at
+     # +2784(r31), and the path through 0x82402D48 (bge: the halfword at 0(r11) is 3 or more) does not load v0 first,
+     # so it stores what its caller left in v0
