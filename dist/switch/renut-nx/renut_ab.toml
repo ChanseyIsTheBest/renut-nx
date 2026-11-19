@@ -74,9 +74,12 @@ log_level = "info"
 # ---- In-run A/B (the console measurement) ----
 # Each listed target off for 30 s, then on for 30 s, in turn; the 10 s lines give fps and the per-target halves.
 # 1 is the control: banjo_renut_precise_barriers, which does nothing on deko3d (both halves the same build).
-# 83: the fetch spec (Nutty Acres' water), 150: the vertex fetch types for every draw. (86, tiles once, merges no
-# tile run in N&B: every tile replays another command buffer, so it is no A/B target here.)
-banjo_renut_ab_targets = "83,150,1"
+# 83: the fetch spec (Nutty Acres' water). (86, tiles once, merges no tile run in N&B: every tile replays another
+# command buffer, so it is no A/B target here. 150, the shader round (vivapinata_shader_round: constant 975 and the
+# fetch types for every draw), is left out: its off half needs every pixel variant with 975 = 0, which this package's
+# DKSH cache does not hold (tools/deko3d_variant_cache.py --round-ab makes them), so the console would compile them in
+# the off halves and the A/B would measure the compiles.)
+banjo_renut_ab_targets = "83,1"
 banjo_renut_ab_s = 30
 
 # ---- Controls ----

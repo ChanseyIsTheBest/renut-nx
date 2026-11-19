@@ -15,7 +15,7 @@ No `deko3d_glsl.bin` goes with it: the NRO uses an installed package before its 
 does not fit this build's translator, so 1.0.2's must be renamed away (step 1 below).
 | `switch/renut-nx/renut.toml` | the same folder | 1.0.2's shipped settings with `log_level = "info"` (the 10 s reports) |
 | `switch/renut-nx/renut_play.toml` | rename to renut.toml to play | 1.0.2's shipped settings exactly (logs off) |
-| `switch/renut-nx/renut_ab.toml` | rename to renut.toml for the A/B | the in-run A/B (targets 83, 150, control 1; 30 s halves) |
+| `switch/renut-nx/renut_ab.toml` | rename to renut.toml for the A/B | the in-run A/B (target 83, control 1; 30 s halves; 150 left out: its off half needs variants the cache lacks) |
 | `renut-nx.elf` | not on the card | the ELF with symbols, for crash reports |
 | `source/` | not on the card | the source snapshot (`git archive` of the commit; no game data) |
 
