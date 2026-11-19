@@ -262,3 +262,10 @@ nothing; 1.0.2's same shaders 11,938. So the early alpha test is the 10 %: about
 quads it discards early. Per game by the base's rule (off-by-default.md section 4): the console decides, A/B 151 in
 renut_ab.toml (the 2026-11-20 cache holds both halves, --noearly-ab); off half faster: vivapinata_shader_noearly =
 true.
+
+**The console, 2026-11-20 07:56 (block 3: the PGO + LTO NRO 84a50b1d, cache v3, no sampling, the title loop, 10
+minutes).** Most windows 25-30 fps (1.0.2's block 2, sampled: 25-30), the render thread 12.6-13.7 us a draw early and
+14-17 later (block 1, last night's build: 17-21), the GPU 18-31 us a draw (block 1: 27-46). Left: 86 compiles in 10
+minutes (4.55 s each; 53 named misses with the 3D fetch words 934-936, which no guess makes), core 3 still 0.5-0.9 %
+idle, and the slower later windows. The run's deko3d.log and renut log went into the next cache (--runtime-log). A fair
+CPU comparison needs 1.0.2 without sampling on the same loop.
