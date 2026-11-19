@@ -126,7 +126,7 @@ as mismatched. The tree builds both steps as docs/pgo-lto.md says; for this bran
    Switch folder, so the instrumented and the optimised build compile the same code.
 2. Play it (the console, or Ryujinx with the banjo-ult data folder: the counts are code paths, not timing): the
    title, the menus, Showdown Town on foot and in the vehicle, a challenge. Then `python tools/pgo_merge.py <the pgo
-   folder of streams> pgo-inplace --gen-build app\out\switch-pgo-gen\renut.elf` (one stream unless `--all`).
+   folder of streams> pgo-inplace --gen-build app\out\switch-pgo-gen\renut.nro` (one stream unless `--all`).
 3. `tools\build_switch_release.bat`: app\out\switch-pgo-use\renut.nro (LTO, the profile, no game shader inside: it
    reads deko3d_glsl.bin beside itself, as the installer's package). Its log must have no "mismatch" line.
 
