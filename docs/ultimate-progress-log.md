@@ -73,3 +73,16 @@ Times AEST. One line per step; the details are in docs/banjo-ultimate-notes.md, 
 - 21:27-21:41 The final Switch build (md5 fe622e97bfec); 21:42 new2 (Ryujinx): gameplay on foot at 382 s, the
   self-check 45,134 of 45,134, 4 compiles. renut_ab.toml without target 150 (its off half needs variants the cache
   lacks). 21:50 the package (out/package_ultimate_2026-11-19) and the final NRO to the user's card.
+
+### 2026-11-20 (the user's 12 hours: the console regression)
+
+- 01:22 the user's console run with logs on (2.5 min): 10-12 fps in Showdown Town, render thread 15-19 us a draw, GPU
+  14-16 (1.0.2 era: 7.5-8.1 and about 8). 01:44-01:53 console block 1 (this branch, the title loop, 1 ms sampling:
+  11-27 fps, GPU-bound); 01:54 block 2 (1.0.2: 30-40 fps, then froze after two minutes; sys-botbase went with it).
+- 02:15 tools/deko3d_glsl_compare.py: this tree's generic pixel shaders 2.6 times 1.0.2's; specialised (the console's
+  run-time constants) about 10 % over. The cache missed the run-time keys (0.2 % of a run's misses derivable).
+- 02:38-03:04 the instrumented NRO (every library but uam); 03:05 and 03:30 two Ryujinx training runs (the title loop;
+  the menus, the story and gameplay with 1 s presses): 663 .gcda in pgo-inplace; 1,365 and 1,221 missed variants.
+- 03:56-04:19 the PGO + LTO NRO (118 MB); 04:22 Ryujinx check: the same route, the self-check 45,134 of 45,134.
+- 04:00 --round-guess: 72.6 % / 73.7 % of the runs' misses derivable (97,334 variants); 04:33 the cache build with
+  it and the four run-time logs.
