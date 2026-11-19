@@ -5,9 +5,12 @@
 #include <rex/cvar.h>
 
 #include "cpu/banjo_enhancements.h"
+#include "banjo_switch_default.h"  // banjo-nx (2026-11-19): the shipped Switch defaults
 #include "renut_engine/gpu/ultimate.h"  // sasrt-nx (2026-11-11, port 82; its GPU list's row 4; UNTESTED): CullBothOn
 
-REXCVAR_DEFINE_BOOL(sasrt_gpu_skip_inert_draws, true, "SASRT/GPU",
+// banjo-nx (2026-11-19, the rebase; the base porting prompt's keys decided from the log): 0 inert draws in every
+// gameplay window of N&B (cg13_town2, verify_ne): off on the Switch (its check is work); the PC keeps it on.
+REXCVAR_DEFINE_BOOL(sasrt_gpu_skip_inert_draws, BANJO_SWITCH_DEFAULT(false, true), "SASRT/GPU",
                     "Renut's renderer (GPU round of 2026-11-08, item 0, A/B 90): a draw that can write nothing (no colour "
                     "channel in its colour mask, no depth write, no stencil operation, no memory export in either "
                     "shader) is not drawn, and its targets are not bound for it. The race's two draws a frame into the "

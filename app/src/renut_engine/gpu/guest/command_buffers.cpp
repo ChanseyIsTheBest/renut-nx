@@ -4,6 +4,7 @@
 #include "renut_engine/gpu/guest/command_buffers.h"
 #include "renut_engine/gpu/stage_census.h"  // blur-nx (2026-11-17, the Renut audit's census)
 #include "renut_engine/gpu/host_batch.h"  // blur-nx (2026-11-18, the Renut host batch)
+#include "banjo_switch_default.h"  // banjo-nx (2026-11-19): the shipped Switch defaults
 
 #include <algorithm>
 #include <array>
@@ -114,7 +115,9 @@ REXCVAR_DEFINE_BOOL(banjo_renut_diag_packet_census, false, "Banjo/Diagnostics",
                     "by the draw's whole device state (not the float constants) would answer, and how many of those "
                     "re-derive state today. Hashes 3 KB a draw: diagnostics only")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(banjo_renut_tags_check, 32, "Banjo/Enhancements",
+// banjo-nx (2026-11-19, the rebase; the base porting prompt's keys decided from the log): N&B's gameplay logs show 0
+// chunks changed without a mark over whole sessions (cg13_town2, verify_ne): 256 on the Switch; the PC keeps 32.
+REXCVAR_DEFINE_INT32(banjo_renut_tags_check, BANJO_SWITCH_DEFAULT(256, 32), "Banjo/Enhancements",
                      "Renut's renderer (banjo_renut_tags): every Nth op of a recording device also compares every "
                      "chunk; one changed without a mark (a write the setters do not see) goes into the op, is logged, "
                      "and the marks are not used again. 1: the verify form, every op checked, the marks kept, every "

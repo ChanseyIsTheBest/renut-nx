@@ -25,6 +25,12 @@ until the user decides, with its sites below.
 | The link register's elision in the bulk copies | `SASRT_HOT_LR_ELIDE` (CMake; the 12 bulk shards) | the guard (verify_ne, with it on): **2 differences**, both the link register's save slot (r1 at entry - 8) of a copy: sub_822C4390 (0x43 against 0x00) and sub_8229A920 (0xBF against 0x00): the original stores the stale ctx.lr word (0), the copy leaves the frame's old content (sasrt-nx's and vivapinata-nx's finding, base port 84) | sub_822C4390, sub_8229A920 | counts: off | off |
 | No trapping math | `BANJO_GENERATED_NO_TRAPPING_MATH` (CMake; the Switch's GCC only: clang on the PC assumes no traps already) | not a run: a code census. app/generated/fp_env_files.txt lists the 5 files that write the guest FPSCR: `_ctrlfp`, `_set_fsr`, `_FPreset`, `_set_statfp`, `JumpToContinuation` (the CRT's; cg13_town1 counted 34 writes, 10 to a mode other than nearest); they keep -ftrapping-math (the CMake form grafted from blur-nx: the base's switch put the option on every file, the writers too). The 5 readers (`loadFromHost`: `_get_fsr` and the same CRT functions) return the rounding mode only, never the host's exception flags, and no game code enables a host trap; under CG-13 there is no flush-mode switch left for an operation to move across | the 5 writers | cleared (exact under CG-13: what it lets GCC move changes no value the guest sees) | on in the Switch build (text size below) |
 
+**The Switch build with the cleared forms (2026-11-19 19:23, app/out/switch):** CG-13, the near-exact set (#1, #2, #17,
+#5, #19), #9 r1 assume, ABI trust and no trapping math (the 5 FPSCR writers kept), the copies in place. Against the
+build before them (14:45: CG-13 only), the text of the 200 generated files is 42,352,799 -> 41,785,448 bytes (-1.34 %)
+and of the 13 copy files 5,225,053 -> 5,148,261 (-1.47 %) (aarch64-none-elf-size, out/census/text_*.txt). Fewer
+instructions, not a speed figure: the console measures it (an in-run A/B or ABBA against 1.0.2, the user's word).
+
 ## Runs
 
 ### verify_ne (2026-11-19 17:11, PC, 600 s: the census route, the not-exact codegen)

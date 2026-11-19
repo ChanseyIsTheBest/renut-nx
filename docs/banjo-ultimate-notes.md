@@ -131,3 +131,20 @@ as mismatched. The tree builds both steps as docs/pgo-lto.md says; for this bran
    reads deko3d_glsl.bin beside itself, as the installer's package). Its log must have no "mismatch" line.
 
 The everyday NRO of this package is app\out\switch (no PGO, no LTO, the shaders inside).
+
+## The keys decided from the log, and the stereo check (step 4; 2026-11-19)
+
+From N&B's own PC logs in gameplay windows (cg13_town2, 60 windows; verify_ne, 58: Showdown Town in the vehicle and
+on foot), as the base's porting prompt (step 5) says:
+
+| Key (base default) | The line | N&B | Set |
+|---|---|---|---|
+| `sasrt_gpu_skip_inert_draws` (true) | "[sasrt gpu] GPU round ..., in the last 10 s: sasrt_gpu_skip_inert_draws N" | 0 in every window of both runs | false in N&B's toml |
+| `banjo_renut_tags_check` (32) | "[renut] recording from marks ..., N whole checks, M chunks changed without a mark" | M = 0 over both whole sessions (5,120 whole checks in one) | 256 in N&B's toml |
+| `ultimate_renut_replay_inherit_same` (true) | "[renut] replays with the inherited words as recorded ...: N of M" | never printed: the line counts replays with inherited words, and `banjo_renut_replay_inherits` is off (off-by-default.md section 1), so the key is never read | the default (inert) |
+
+**The stereo check** (audio_channel_census, PC, the same route, 330 s; audio1 and audio2): the game fills FL, FR, C,
+RL and RR in every frame (LFE never) with the default speaker configuration, and the same with
+`audio_speaker_config = 1` (analog stereo: "speaker config 00000001" in the line). N&B mixes its five channels
+whatever it is told, so the stereo saving needs a per-game patch (blur-nx's tools/stereo_mix.py): worth it only if the
+console's CPU table puts the mixer near the top (a next step with a console profile).
