@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "banjo-nx-installer",
+      "runtimeExecutable": "C:/Python314/python.exe",
+      "runtimeArgs": ["D:/Banjo kazooie port/banjo-nx-installer/serve.py", "8193", "D:/Banjo kazooie port/banjo-nx-installer",
+                      "--test-files", "D:/Banjo kazooie port/game"],
+      "port": 8193
+    }
+  ]
+}
