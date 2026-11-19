@@ -56,3 +56,8 @@ Times AEST. One line per step; the details are in docs/banjo-ultimate-notes.md, 
   and 300.4 million guard compares); the LR elision 2 differences at the LR save slot (off); sub_8221BFA0's f6 (a
   single denormal against 0, the class of sub_82C41318) turned off. The two cleared switches on by default in
   post_codegen.py; code generation again for the list change.
+- 18:13-18:52 Code generation again (962 of 975 files unchanged); the Switch defaults set to the cleared set and no
+  trapping math (5a4cc626); notes for steps 6 and 7. 18:52 the DKSH cache: 53,113 variants, 0 failed, 782 MB (1.0.2's
+  207 MB; read through its index on demand, not held in memory).
+- 18:55 The cache to the user's card (sys-ftpd, /switch/renut-nx/deko3d_shaders.bin; sasrt-nx's session had freed
+  the card) and to the banjo-ult emulator SD; the 1.0.2 reference run in Ryujinx (ref102, banjo-ult-ref, 480 s).
