@@ -557,6 +557,90 @@ REXCVAR_DEFINE_BOOL(sasrt_rt_cached_export_seeds, true, "SASRT/RenderThread",
                     "buffer (readbacks go through a GPU copy). For games with memory exports")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+// banjo-nx (2026-11-20): sasrt-nx's render-thread rounds 2-4 (the header's second table): its keys as it defines them.
+REXCVAR_DEFINE_BOOL(sasrt_rt2_slot_index, true, "SASRT/RenderThread",
+                    "Render thread (second round, 2026-11-20; docs/render-thread-ideas-1120.md): FindHostTextureBySlotLocked (the copy-back checks of the post passes, about 13 a frame in the 4-player race, each a walk of every texture: 3.4 % of the render thread in rex_profile_307) remembers an answer per slot in a 256-entry table, each checked by the fields the walk tests (a slot has one live owner), instead of one last answer")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt2_spec_memo, true, "SASRT/RenderThread",
+                    "Render thread (second round, 2026-11-20; docs/render-thread-ideas-1120.md): A fast draw's FetchSpecWords, SasrtPlainFetchMask, SasrtClipBit and SasrtSpecWordsOf are the draw before's when none of the shared constants' lines was written since (g_sc_dirty, which the push trusts too), the shaders, the vertex shader's record, the targets and their colour words, the instancing and the A/B half are the same, and the vertex shader exports nothing (its words read its float constants)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt2_drop_throttle, true, "SASRT/RenderThread",
+                    "Render thread (second round, 2026-11-20; docs/render-thread-ideas-1120.md): DropReplacedRanges' pass while the stream cache is over its limit every 4th frame, not every frame (kameo-nx's rule for 3 fps; the 4-player race sat at 135.7 MB of 128 and walked both caches every frame, and a whole entry among the drops staled every mesh object). Memory only: what a draw reads does not change")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt2_pages_tail, true, "SASRT/RenderThread",
+                    "Render thread (second round, 2026-11-20; docs/render-thread-ideas-1120.md): PagesClean's last 1-7 pages of a range (most vertex ranges are that short) tested in one masked NEON block when none of their four views' cards is written, as the 8- and 16-page blocks do; else page by page as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt2_color_alias_memo, true, "SASRT/RenderThread",
+                    "Render thread (second round, 2026-11-20; docs/render-thread-ideas-1120.md): ColorAliasesLocked (two scans of every target per colour resolve, about 118 a frame in the 4-player race) answers from a per-surface list kept until a target is made or retired (the target table's epoch)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt2_repeat_recorded_index, true, "SASRT/RenderThread",
+                    "Render thread (second round, 2026-11-20; docs/render-thread-ideas-1120.md): WholeRepeatHit compares the replay's recorded index buffer (ReplayIndexBuffer, as WholeGeometryTry reads it) instead of the live guest header the game may have moved on since; and ReplayIndexBuffer reads the live header for its diagnostic count at one call in 64, not at every indexed replayed draw")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt2_held_export_bitmap, true, "SASRT/RenderThread",
+                    "Render thread (second round, 2026-11-20; docs/render-thread-ideas-1120.md): GetStreamSource looks in the kept exports' map (about 257 a frame in the 4-player race, a std::map walk per stream) only when a 64 KB granule bitmap of the kept exports' ranges says one may lie at the stream's address")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt2_place_wait_unlocked, true, "SASRT/RenderThread",
+                    "Render thread (second round, 2026-11-20; docs/render-thread-ideas-1120.md): The render thread's wait at a same-frame place (about 1.5 ms, four a frame in the 4-player race) does not hold State().mutex (the game thread's shader and declaration destroys waited behind it): it spins briefly, then waits on the place in slices")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt2_ring_prefetch, true, "SASRT/RenderThread",
+                    "Render thread (second round, 2026-11-20; docs/render-thread-ideas-1120.md): The render thread prefetches the next ring item's narrowed device delta to six lines, not four (it averages ~360 bytes in the 4-player race). Prefetches only")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt2_readable_memo, true, "SASRT/RenderThread",
+                    "Render thread (second round, 2026-11-20; docs/render-thread-ideas-1120.md): The vertex fills' check that their guest bytes are committed (dishonored_renut_vertex_readable_check: each a heap's recursive mutex, which the game's allocations hold too, and a page-table walk) keeps the ranges it found readable, 64 of them, while no page anywhere has lost read access since (rex::memory::g_page_access_generation, raised at every decommit, release, protect, reset and restore)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt2_bind_layout_narrow, true, "SASRT/RenderThread",
+                    "Render thread (second round, 2026-11-20; docs/render-thread-ideas-1120.md): A fast draw after a layout change anywhere (g_layout_epoch moves at every transition) binds its targets again only when one of its own is not in the layout BindTargets would leave it in (colour write; depth write, or read for a draw that writes no depth with banjo_deko3d_depth_read_layout), holds a hand-over or a pending restore copy, or the GPU profile is timing; else BindTargets would change nothing")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt2_texture_memo_two_way, true, "SASRT/RenderThread",
+                    "Render thread (second round, 2026-11-20; docs/render-thread-ideas-1120.md): FillTextures' texture slot memo (4,096 entries by texture address and fetch words) as 2,048 sets of two ways: a texture's entry kept while another hashes to its set, the way bound in an earlier frame replaced (the four-player race missed ~1,950 binds a second to another entry, each a whole BindTextureLocked). Every hit checks the entry's words as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt2_repeat_ring, true, "SASRT/RenderThread",
+                    "Render thread (second round, 2026-11-20; docs/render-thread-ideas-1120.md): WholeGeometryTry's repeat answer (blur_renut_whole_repeat: a draw whose streams, index buffer, shader and layout are an earlier draw's of the same kick takes its copies without the probes) kept for the last four such answers, not the last one: draws that take turns between a few meshes")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt3_words_owner_table, true, "SASRT/RenderThread",
+                    "Render thread (third round, 2026-11-20; docs/render-thread-ideas-1120.md): SasrtWordsViewOwnerLocked (the restore copy's words view owner) remembers an answer per slot in a 256-entry table, each checked as before, not one last answer: four views' restore copies took turns on it, each miss a walk of every texture")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt3_surface_memo_256, true, "SASRT/RenderThread",
+                    "Render thread (third round, 2026-11-20; docs/render-thread-ideas-1120.md): GetHostSurfaceLocked's memo (a surface's target by its address, header words and the surface epoch) has 256 entries, not 64: the four views' targets, resolves, EDRAM views and stack headers conflicted in 64")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt3_depth_bias_fields, true, "SASRT/RenderThread",
+                    "Render thread (third round, 2026-11-20; docs/render-thread-ideas-1120.md): A fast draw does not call SetDrawDepthBias when the bias set is still bound and none of the packets it reads (the view packets' mode control, the point packet's bias words, the destination packet's depth info) changed since the draw before in the chain")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt3_place_spin, true, "SASRT/RenderThread",
+                    "Render thread (third round, 2026-11-20; docs/render-thread-ideas-1120.md): The render thread spins on a same-frame place's flag for sasrt_rt3_place_spin_us before it sleeps (the render thread has core 1 to itself): a recording that ends within it is taken without the kernel's sleep and wake")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt3_host_packets_split, true, "SASRT/RenderThread",
+                    "Render thread (third round, 2026-11-20; docs/render-thread-ideas-1120.md): Host packets (banjo_renut_host_packets: a replayed draw's derived state kept by its device words) while the screen is split (two to four views replay the same state words), whatever banjo_renut_host_packets says; one player as the key says. The recording makes the packet keys always with this key on")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt4_push_runs_merged, true, "SASRT/RenderThread",
+                    "Render thread (fourth round, 2026-11-20; docs/render-thread-ideas-1120.md): PushFloatConstants pushes two runs of constant groups that one or two groups separate as one run, the groups between them with the device's current bytes (they become valid); never across a group with a literal register of this shader or of the buffer: one dkCmdBufPushConstants call instead of two")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt4_state_id_crc, true, "SASRT/RenderThread",
+                    "Render thread (fourth round, 2026-11-20; docs/render-thread-ideas-1120.md): RenderStateIdLocked (the render-state number by content) finds its table slot by a CRC32C of the 20 render-state words and the targets' words (the A57's crc32cx, 8 bytes an instruction) instead of 27 dependent multiplies; a hit compares the words as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt4_pipeline_four_way, false, "SASRT/RenderThread",
+                    "Render thread (fourth round, 2026-11-20; docs/render-thread-ideas-1120.md): The fast draw's pipeline cache looks in the four entries of the index's aligned group, not two: an answering entry, else the way made from this draw's inputs, an empty one, or the one used longest ago (the 4P race had 4,516 conflicts a 10 s with two ways, each a MakeKey and pipeline lookup)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt4_spec_key_skip, true, "SASRT/RenderThread",
+                    "Render thread (fourth round, 2026-11-20; docs/render-thread-ideas-1120.md): A fast draw whose spec answers are the spec memo's (sasrt_rt2_spec_memo hit) does not compare them with the kept pipeline key's fields (the 80 spec words, fetch pad, clip bit, fetch spec types) when that key was last checked against the same memo answers and no pipeline key has been written since (a count of every key write)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt4_stream_memo_two_way, false, "SASRT/RenderThread",
+                    "Render thread (fourth round, 2026-11-20; docs/render-thread-ideas-1120.md): The stream and index caches' entry memos (EntryMemo, 16,384 slots) look in a slot and its pair (two ways, the most recently used first: a hit in the second swaps them, a new entry pushes the first into the second) instead of one: four views' thousands of stream and index keys a frame conflicted in the direct-mapped slots, each conflict a map lookup")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt4_ring_lock_once, true, "SASRT/RenderThread",
+                    "Render thread (fourth round, 2026-11-20; docs/render-thread-ideas-1120.md): The render thread keeps State().mutex from one queued draw (QueuePrefetched's items) into the next when that one is published already, at most 8 in a row and never past the ring run's end: a lock and an unlock fewer a draw. Place waits and every other item take it on their own as before (holding it across those deadlocked in 2026-10-19's proposal 19)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt4_inert_keeps_chain, true, "SASRT/RenderThread",
+                    "Render thread (fourth round, 2026-11-20; docs/render-thread-ideas-1120.md): A draw left out before the fast path (sasrt_gpu_skip_inert_draws, sasrt_gpu_skip_cull_both) keeps the fast path's chain: the fast state takes its number and its changed fields are carried into the next draw's, instead of the next draw finding a chain break and taking the full path")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt4_export_reads_fast, true, "SASRT/RenderThread",
+                    "Render thread (fourth round, 2026-11-20; docs/render-thread-ideas-1120.md): A draw whose only reads of pending memexport results are vertex streams the host layout reads from windows FindExportedStream finds on the GPU stays on the fast path: ConvertExportedStreamsLocked converts them there (as DrawStateLocked does) and BindStreams binds the converted streams; whole-buffer geometry and fetch, index and texture reads of exports take the full path as before (the 4P race: 93 'export read' draws a frame to the full path)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(sasrt_rt3_place_spin_us, 400, "SASRT/RenderThread",
+                     "Render thread (third round, 2026-11-20): microseconds the render thread spins on a same-frame "
+                     "place's flag before it sleeps (sasrt_rt3_place_spin)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 #if defined(PLUME_DEKO3D)
 #include <plume_deko3d.h>
 #endif
@@ -574,6 +658,9 @@ void LatchNow() {
 #define SASRT_GPU_ROUND_LATCH(name, key, what) l.on[name] = EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(key));
   SASRT_GPU_ROUND_ITEMS(SASRT_GPU_ROUND_LATCH)
 #undef SASRT_GPU_ROUND_LATCH
+#define SASRT_RT_ROUND_LATCH(name, key, what) g_rt_latched[name] = EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(key));
+  SASRT_RT_ROUND_ITEMS(SASRT_RT_ROUND_LATCH)  // banjo-nx (2026-11-20): sasrt-nx's rounds 2-4
+#undef SASRT_RT_ROUND_LATCH
   g_latched = l;
   g_latched_ready.store(true, std::memory_order_release);
   RefreshEffective();
@@ -581,11 +668,21 @@ void LatchNow() {
 
 // banjo-nx (2026-11-20): On()'s answers (see the header): the latched key, and not this item's A/B "off" half.
 std::atomic<uint8_t> g_effective[kCount] = {};  // constant-initialised to 0: not latched
+bool g_rt_latched[kRtItemCount] = {};
+std::atomic<uint8_t> g_rt_effective[kRtItemCount] = {};
+std::atomic<uint64_t> g_rt_counts[kRtItemCount][2] = {};
 void RefreshEffective() {
   const int ab = banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed);
   for (int i = 0; i < kCount; ++i) {
     const bool on = g_latched.on[i] && ab != kAbBase + i && !(ab == kAbRtGroup && i >= kRtRestoreCandidates);
     g_effective[i].store(on ? 2 : 1, std::memory_order_relaxed);
+  }
+  // banjo-nx (2026-11-20): sasrt-nx's rounds 2-4, as its On(): the item's own number, or its round's group.
+  for (int i = 0; i < kRtItemCount; ++i) {
+    const bool on = g_rt_latched[i] && ab != kRtAbBase + i && !(ab == kAbRt2Group && i >= SASRT_GPU_ROUND_RT2_FIRST &&
+                    i < SASRT_GPU_ROUND_RT3_FIRST) && !(ab == kAbRt3Group && i >= SASRT_GPU_ROUND_RT3_FIRST &&
+                    i < SASRT_GPU_ROUND_RT4_FIRST) && !(ab == kAbRt4Group && i >= SASRT_GPU_ROUND_RT4_FIRST);
+    g_rt_effective[i].store(on ? 2 : 1, std::memory_order_relaxed);
   }
 }
 
@@ -623,6 +720,20 @@ const char *AbName(int target) {
   };
   if (target == kAbRtGroup)  // sasrt-nx (2026-11-09; port 54)
     return "the render-thread round's items, all at once (sasrt_rt_*, A/B 200)";
+  // banjo-nx (2026-11-20): sasrt-nx's rounds 2-4
+  static const char *const kRtNames[] = {
+#define SASRT_RT_ROUND_NAME(name, key, what) what " (" #key ")",
+      SASRT_RT_ROUND_ITEMS(SASRT_RT_ROUND_NAME)
+#undef SASRT_RT_ROUND_NAME
+  };
+  if (target == kAbRt2Group)
+    return "sasrt-nx's second render-thread round's items, all at once (sasrt_rt2_*, A/B 401)";
+  if (target == kAbRt3Group)
+    return "sasrt-nx's third render-thread round's items, all at once (sasrt_rt3_*, A/B 402)";
+  if (target == kAbRt4Group)
+    return "sasrt-nx's fourth render-thread round's items, all at once (sasrt_rt4_*, A/B 403)";
+  if (target >= kRtAbBase && target < kRtAbBase + kRtItemCount)
+    return kRtNames[target - kRtAbBase];
   const int i = target - kAbBase;
   return i >= 0 && i < kCount ? kNames[i] : nullptr;
 }
@@ -654,6 +765,19 @@ std::string Report() {
     const uint64_t b = g_counts[i][1].exchange(0, std::memory_order_relaxed);
     text += fmt::format(" {} {}{}{}", kKeys[i], g_latched.on[i] ? "" : "(off) ", a, b ? fmt::format("/{}", b) : "");
     text += i + 1 < kCount ? ',' : '.';
+  }
+  // banjo-nx (2026-11-20): sasrt-nx's rounds 2-4, their counts after the first table's
+  static const char *const kRtKeys[] = {
+#define SASRT_RT_ROUND_KEY(name, key, what) #key,
+      SASRT_RT_ROUND_ITEMS(SASRT_RT_ROUND_KEY)
+#undef SASRT_RT_ROUND_KEY
+  };
+  text += " Render-thread rounds 2-4:";
+  for (int i = 0; i < kRtItemCount; ++i) {
+    const uint64_t a = g_rt_counts[i][0].exchange(0, std::memory_order_relaxed);
+    const uint64_t b = g_rt_counts[i][1].exchange(0, std::memory_order_relaxed);
+    text += fmt::format(" {} {}{}{}", kRtKeys[i], g_rt_latched[i] ? "" : "(off) ", a, b ? fmt::format("/{}", b) : "");
+    text += i + 1 < kRtItemCount ? ',' : '.';
   }
   return text;
 }

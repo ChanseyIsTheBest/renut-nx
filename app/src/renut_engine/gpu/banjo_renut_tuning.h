@@ -273,15 +273,29 @@ void CountDepthOnly();
 [[gnu::always_inline]] inline bool DepthWordsViewOn() { return Latch().depth_words_view && g_ab_off_plain != 13; }
 // banjo_renut_record_worker's half of the in-run A/B (target 14), read when a command list is opened.
 bool RecordWorkerAbOn();
-void CountDepthWords(bool viewed);
+// banjo-nx (2026-11-20, render-thread batch #31): inline (a call into this file at ~1 draw in 1 in Showdown Town, from
+// every texture path's memo answers) and skipped with log_level "off" (the 10 s line is all that reads it).
+extern std::atomic<uint64_t> g_words_viewed, g_words_copied;
+[[gnu::always_inline]] inline void CountDepthWords(bool viewed) {
+  if (!Latch().counts)
+    return;
+  std::atomic<uint64_t> &c = viewed ? g_words_viewed : g_words_copied;
+  c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+}
 // vivapinata-nx (2026-11-12, vivapinata_depth_resolve_skip_unread, A/B 156; port 115): left out (0), drawn late from an
 // unchanged source (1), drawn late from newer content or not at all (2).
 bool DepthResolveSkipUnreadOn();
 void CountDepthResolveSkip(int what);
 // banjo_deko3d_draw_resolves (2026-10-18): colour resolves drawn instead of copied on deko3d.
 [[gnu::always_inline]] inline bool DrawResolvesOn() { return Latch().draw_resolves; }
-// 2026-10-18, a census: binds of a depth resolve's float (R32F) target, not its words.
-void CountDepthFloatSampled();
+// 2026-10-18, a census: binds of a depth resolve's float (R32F) target, not its words. banjo-nx (2026-11-20, batch #31):
+// inline and skipped with log_level "off", as CountDepthWords (1.0 million calls a 10 s in the city: a draw's).
+extern std::atomic<uint64_t> g_depth_float_sampled;
+[[gnu::always_inline]] inline void CountDepthFloatSampled() {
+  if (!Latch().counts)
+    return;
+  g_depth_float_sampled.store(g_depth_float_sampled.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+}
 // banjo_deko3d_depth_compression / banjo_deko3d_zcull (2026-10-18): read before the deko3d device is made.
 bool Deko3DDepthCompressionOn();
 bool Deko3DZcullOn();

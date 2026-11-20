@@ -1882,9 +1882,7 @@ int Deko3DBackgroundCompileShare() {
 }
 
 
-void CountDepthFloatSampled() {
-  Bump(g_depth_float_sampled, 1);
-}
+// (CountDepthFloatSampled: inline in the header since 2026-11-20)
 
 void CountDrawSource(int source, uint64_t draws) {
   g_draw_source[source].store(g_draw_source[source].load(std::memory_order_relaxed) + draws, std::memory_order_relaxed);
@@ -2052,9 +2050,7 @@ void CountSkippedResolve(bool depth) {
   Bump(g_resolves_skipped[depth ? 1 : 0], 1);
 }
 
-void CountDepthWords(bool viewed) {
-  Bump(viewed ? g_words_viewed : g_words_copied, 1);
-}
+// (CountDepthWords: inline in the header since 2026-11-20)
 
 
 

@@ -125,6 +125,68 @@ extern std::atomic<uint64_t> g_counts[kCount][2];
   c.store(c.load(std::memory_order_relaxed) + n, std::memory_order_relaxed);
 }
 
+// banjo-nx (2026-11-20, the user: "all of sasrt's ... in the one batch"): sasrt-nx's render-thread rounds 2-4 (its
+// handoff docs/handoff/rt_rounds_1120, "for Banjo"), with sasrt-nx's keys, defaults and A/B numbers (339 + i; 401, 402,
+// 403: a round at once), in a table of their own: the first table keeps the base's numbers (90 + i), and sasrt-nx's own
+// numbering (256 + i) would move them. On() and Count() for these take an RtItem.
+#define SASRT_RT_ROUND_ITEMS(X)                                                                                          \
+  X(kRt2SlotIndex, sasrt_rt2_slot_index, "render thread: FindHostTextureBySlotLocked's memo a 256-entry table by slot (each answer checked as before), not one entry") \
+  X(kRt2SpecMemo, sasrt_rt2_spec_memo, "render thread: a fast draw's fetch-spec, plain-fetch, clip and spec words kept from the draw before when no shared-constant line, shader, target or A/B half changed") \
+  X(kRt2DropThrottle, sasrt_rt2_drop_throttle, "render thread: DropReplacedRanges' pass over the stream cache's limit every 4th frame, not every frame (memory only)") \
+  X(kRt2PagesTail, sasrt_rt2_pages_tail, "render thread: PagesClean's last 1-7 pages of a range in one masked NEON block when none of their cards is written") \
+  X(kRt2ColorAliasMemo, sasrt_rt2_color_alias_memo, "render thread: ColorAliasesLocked's answer kept per surface until a target is made or retired") \
+  X(kRt2RepeatRecordedIndex, sasrt_rt2_repeat_recorded_index, "render thread: WholeRepeatHit reads the replay's recorded index buffer, as WholeGeometryTry does (a correctness fix too)") \
+  X(kRt2HeldExportBitmap, sasrt_rt2_held_export_bitmap, "render thread: GetStreamSource looks up the kept exports only where a 64 KB granule bitmap says one may lie") \
+  X(kRt2PlaceWaitFree, sasrt_rt2_place_wait_unlocked, "render thread: a same-frame place's wait without State().mutex held (spin, then a timed wait)") \
+  X(kRt2RingPrefetch, sasrt_rt2_ring_prefetch, "render thread: the next ring item's narrowed device delta prefetched to six lines, not four") \
+  X(kRt2ReadableMemo, sasrt_rt2_readable_memo, "render thread: the vertex fills' guest readability answers kept while no page has lost read access (no heap mutex, no page walk)") \
+  X(kRt2BindLayoutNarrow, sasrt_rt2_bind_layout_narrow, "render thread: a layout change elsewhere binds the fast draw's targets again only when its own targets are not in their bind layouts") \
+  X(kRt2TextureMemoTwoWay, sasrt_rt2_texture_memo_two_way, "render thread: the texture slot memo two-way (2,048 sets of two), the way of an earlier frame replaced") \
+  X(kRt2RepeatRing, sasrt_rt2_repeat_ring, "render thread: WholeGeometryTry's repeat answer kept for the last four meshes of a kick, not one") \
+  X(kRt3WordsOwnerTable, sasrt_rt3_words_owner_table, "render thread: the depth-words view owner a 256-entry table by slot, not one entry") \
+  X(kRt3SurfaceMemo256, sasrt_rt3_surface_memo_256, "render thread: GetHostSurfaceLocked's memo 256 entries, not 64") \
+  X(kRt3DepthBiasFields, sasrt_rt3_depth_bias_fields, "render thread: the fast draw's depth bias not set again when its packets are unchanged since the draw before") \
+  X(kRt3PlaceSpin, sasrt_rt3_place_spin, "render thread: a same-frame place's wait spins on the slot's flag first (sasrt_rt3_place_spin_us), then sleeps") \
+  X(kRt3HostPacketsSplit, sasrt_rt3_host_packets_split, "render thread: host packets (banjo_renut_host_packets) while the screen is split, whatever the key") \
+  X(kRt4PushRunsMerged, sasrt_rt4_push_runs_merged, "render thread: two runs of pushed constant groups with one or two groups between them pushed as one run (the gap's current device bytes too; never over a literal register)") \
+  X(kRt4StateIdCrc, sasrt_rt4_state_id_crc, "render thread: RenderStateIdLocked's table index by CRC32C of the words (14 crc32cx), not 27 dependent multiplies") \
+  X(kRt4PipelineFourWay, sasrt_rt4_pipeline_four_way, "render thread: the fast pipeline cache four-way (the index's aligned group of four), not two") \
+  X(kRt4SpecKeySkip, sasrt_rt4_spec_key_skip, "render thread: a fast draw with the spec memo's answers skips comparing them with the kept key when it was checked against them and no key was written since") \
+  X(kRt4StreamMemoTwoWay, sasrt_rt4_stream_memo_two_way, "render thread: the stream and index caches' memos two-way (a slot and its pair, the most recent first), not direct-mapped") \
+  X(kRt4RingLockOnce, sasrt_rt4_ring_lock_once, "render thread: State().mutex kept from one draw item into the next published draw item (at most 8 in a row), not taken and let go at each") \
+  X(kRt4InertKeepsChain, sasrt_rt4_inert_keeps_chain, "render thread: a draw left out as inert or culled both ways keeps the fast path's chain (its changed fields carried into the next draw)") \
+  X(kRt4ExportReadsFast, sasrt_rt4_export_reads_fast, "render thread: a draw whose only memexport reads are host-layout vertex streams found on the GPU stays on the fast path (the streams converted there as the full path does)")
+
+enum RtItem : int {
+#define SASRT_RT_ROUND_ENUM(name, key, what) name,
+  SASRT_RT_ROUND_ITEMS(SASRT_RT_ROUND_ENUM)
+#undef SASRT_RT_ROUND_ENUM
+  kRtItemCount
+};
+#define SASRT_GPU_ROUND_RT2_FIRST kRt2SlotIndex
+#define SASRT_GPU_ROUND_RT3_FIRST kRt3WordsOwnerTable
+#define SASRT_GPU_ROUND_RT4_FIRST kRt4PushRunsMerged
+constexpr int kRtAbBase = 339;     // sasrt-nx's numbers for these (its kAbBase 256 + 83)
+constexpr int kAbRt2Group = 401;   // the second round's items at once (sasrt-nx's)
+constexpr int kAbRt3Group = 402;   // the third round's
+constexpr int kAbRt4Group = 403;   // the fourth round's
+static_assert(kRtAbBase + kRtItemCount <= kAbRt2Group && kAbRt4Group < 512, "banjo_renut_ab_targets takes up to 511");
+extern bool g_rt_latched[kRtItemCount];
+extern std::atomic<uint8_t> g_rt_effective[kRtItemCount];  // as g_effective: 0 not latched, 1 off, 2 on
+[[gnu::always_inline]] inline bool On(RtItem i) {
+  uint8_t v = g_rt_effective[i].load(std::memory_order_relaxed);
+  if (v == 0) [[unlikely]] {
+    LatchNow();
+    v = g_rt_effective[i].load(std::memory_order_relaxed);
+  }
+  return v == 2;
+}
+extern std::atomic<uint64_t> g_rt_counts[kRtItemCount][2];
+[[gnu::always_inline]] inline void Count(RtItem i, uint64_t n = 1, int which = 0) {
+  std::atomic<uint64_t> &c = g_rt_counts[i][which];
+  c.store(c.load(std::memory_order_relaxed) + n, std::memory_order_relaxed);
+}
+
 const char *AbName(int target);  // nullptr: not one of these
 // The items that live in plume's deko3d back end, set from the keys and the A/B half (at start-up and at each A/B
 // switch, on the render thread).
