@@ -365,7 +365,11 @@ REXCVAR_DEFINE_BOOL(dishonored_renut_zero_level_recheck, true, "Banjo/Enhancemen
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 // dishonored-nx (2026-10-30; port 101): vertex fills and fetch data copies read only committed guest memory.
-REXCVAR_DEFINE_BOOL(dishonored_renut_vertex_readable_check, true, "Banjo/Enhancements",
+// banjo-nx (2026-11-20, the user: "turn off the dishonored check"): OFF for N&B. A heap lookup and page-table walk
+// under the heap's lock for every vertex stream fill and fetch data copy at each kick (about 0.05 us of render thread a
+// draw, block 7's profile); N&B never read past its committed memory (renut-nx 1.0.2 had no such check). Per game: on
+// where a stream's range runs past the game's allocation (dishonored-nx).
+REXCVAR_DEFINE_BOOL(dishonored_renut_vertex_readable_check, false, "Banjo/Enhancements",
                     "From dishonored-nx: a vertex stream fill or fetch data copy whose range runs past the guest memory "
                     "the game committed converts the committed part and zeros the rest, where the read faulted the render "
                     "thread before (the Xbox 360's GPU reads whatever is there). Each fill asks the heap's page table (its "
