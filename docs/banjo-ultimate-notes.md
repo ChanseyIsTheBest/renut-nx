@@ -304,9 +304,22 @@ and block 4's deko3d.log and renut log: 197,486 variants (1,917 compiled, 0 fail
 out/deko3d_shaders/deko3d_shaders_v6.bin.
 
 The 3D title scene's lines (800 draws a frame or more) of the console runs: 84a50b1d (blocks 3 and 4) 13.3-13.9 us of
-render thread a draw and 23.4-24.8 us of GPU; 1.0.2 sampled at 1 ms (block 2) 11.8 and 22.3. The unsampled 1.0.2
-block (5, 2026-11-20 10:06) waits on the card: sys-botbase went down at 10:19 after screenshot requests (pixelPeek)
-with 1.0.2 in the foreground, and the game holds its log open until the user closes it.
+render thread a draw and 23.4-24.8 us of GPU; 1.0.2 sampled at 1 ms (block 2) 11.8 and 22.3.
+
+**Block 5 (renut-nx 1.0.2, logs on, no sampling, 2026-11-20 10:07): the GPU hung after 111 s**, in the 3D title scene
+("[deko3d] a fence has not signalled after 2 s ... 16 s" from 10:09:24; only the audio threads logged after it). The
+display froze, sys-botbase died on the next screenshot requests, and the user restarted the console at 11:57. Block 2
+(1.0.2 with 1 ms sampling) froze the same way about 2 minutes in, so the sampling was not the cause. Both runs had
+log_level "info", which 1.0.2 does not ship with (the user plays it with logs off without trouble): likely a
+logs-only path of 1.0.2 (unproven). The ultimate build ran 12 minutes twice with logs on. No more 1.0.2 console runs
+with logs on.
+
+The 50 s of 1.0.2's 3D scene before the hang are the unsampled reference (out/card/c5_102): render thread 11.0-12.8
+us a draw (median 11.2), GPU 20.2-26.3; the ultimate build 13.3-13.9 and 23.4-24.8. Per thread over the first 3D
+stretch of each run (1.0.2 60-110 s, block 4 160-270 s): total 209 % and 212 %, the render thread 43.5 % and 49.9 %,
+Main 44.7 % and 37.8 %, the game threads 79.6 % and 79.7 %, a core-2 helper (priority 0x3B) 0.8 % and 6.5 %. So
+the total is level; the render thread is about 15 % heavier a draw, which a sampled run of the current build (5 ms,
+out/card/renut_prof5.toml) is to break down.
 
 tools/profile_per_draw.py (second version) lines the profile's windows up with the renut log's lines by the clock (the
 first version counted lines, and its draws were the "specialised bools: N draws" count at each line's end). On the
