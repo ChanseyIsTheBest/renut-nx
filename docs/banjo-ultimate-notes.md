@@ -479,3 +479,18 @@ CAUSE (log): item 22, sasrt_ring_cleaner_take_over false: the render thread clea
 before) and WAITED instead (done_cv_) for the cleaner thread, which runs at the lowest priority on the system core.
 The audit's "waits instead of re-cleaning" was wrong: the clean is cheap, the wait is not. Test: the same NRO with the
 key true (out/card/renut_city_takeover.toml).
+
+Follow-up the same night: c19 (the batch NRO with the take-over back on through the toml): the render thread cleaned
+515 ranges itself again, but 9.10 us a draw (from 9.17): the take-over was a small part. Draws a frame rise as fps falls
+in every build measured (1.0.2 26.5 fps 4,854; 5d1c60e9 23-24 fps 4,842-5,047; d5cffbfb 20.8 fps 5,207; the batch
+19-20 fps 5,256-5,627; 72e4bafd 17.7 fps 5,549): replayed draws only (immediate, full-path, fur, clears the same), so the
+game keeps something alive by frames; more draws a frame are a result of a slower frame, not its cause.
+c20 (the batch, 1 ms stacks, against c15 = 5d1c60e9 sampled; tools/profile_inline.py --from 260): 9.17 against 8.89 us
+a draw. Gains as meant: DrawStateLocked -0.11, FastExportReads -0.13, WholeGeometryTry -0.09, PagesClean -0.09 (its
+NEON part shows as vld1_u8 +0.09), int atomic loads -0.07. New costs: SasrtSpecAnswersOf +0.12 (the spec memo hit 22 %;
+SasrtSpecWordsOf 0.083 in both), byte atomic loads +0.10 (the second table's On() checks), memset +0.05 (a GpuStreams
+zeroed every fast draw for export_reads_fast), FastDrawLocked +0.13, bindVertexInput +0.08 (not explained),
+SetShared<u32> +0.06, Latch +0.04 (the counts checks, logs on). Also LTO kept one 14 KB BindStreams (5d1c60e9 had a
+6 KB specialised copy for the fast path) since the fast path passed the export streams at its one call.
+Round 2 (08b1a669): take-over on, spec memo + spec key skip + ring lock off by default for N&B, GpuStreams only when
+used, BindStreams' constant call split off, On() answers plain bytes.
