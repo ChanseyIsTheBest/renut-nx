@@ -24,6 +24,10 @@ option(BANJO_SWITCH_EARLY_RA "Leave GCC's AArch64 early register allocation pass
 # console profile's samples fall. -g does not change the generated code: an ELF built with this ON has every function
 # at the address of the same sources built with it OFF, so it names the samples of a run of the normal NRO.
 option(BANJO_SWITCH_RENDERER_LINES "Switch: line tables for the hot native renderer files (profiling aid)" OFF)
+# banjo-nx (2026-11-20, the render thread against renut-nx 1.0.2): full debug info (-g, with the inlined functions)
+# for Renut's renderer and plume, so a console profile's samples can be named by the source function they fall in
+# even where PGO and LTO inlined it (1.0.2's ELF had it; the ultimate build's had none). -g does not change the code.
+option(BANJO_SWITCH_RENUT_DEBUG_INFO "Switch: -g for Renut's renderer and plume (profiling aid)" OFF)
 if(REXGLUE_PLATFORM_SWITCH AND NOT BANJO_SWITCH_EARLY_RA)
     add_compile_options(-mearly-ra=none)
     add_link_options(-mearly-ra=none)
@@ -980,6 +984,12 @@ endif()
 if(WIN32)
     target_compile_options(renut PRIVATE -gline-tables-only -gcodeview)
     target_link_options(renut PRIVATE "LINKER:/DEBUG:FULL")
+endif()
+
+if(REXGLUE_PLATFORM_SWITCH AND BANJO_SWITCH_RENUT_DEBUG_INFO)
+    target_compile_options(banjo_renut_gpu PRIVATE -g)
+    target_compile_options(plume PRIVATE -g)
+    target_link_options(renut PRIVATE -g)  # LTO: the link writes the late debug info of the units compiled with -g
 endif()
 
 if(REXGLUE_PLATFORM_SWITCH AND BANJO_SWITCH_RENDERER_LINES)
