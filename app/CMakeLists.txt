@@ -1002,6 +1002,15 @@ if(REXGLUE_PLATFORM_SWITCH AND BANJO_SWITCH_RENUT_DEBUG_INFO)
     target_compile_options(plume PRIVATE -g)
     target_link_options(renut PRIVATE -g)  # LTO: the link writes the late debug info of the units compiled with -g
 endif()
+# banjo-nx (2026-11-21, the render thread to 33 ms): Renut's renderer and plume without the x29 frame chain too, as the
+# game code is (BANJO_SWITCH_OMIT_FRAME_POINTER): one more register and no frame record setup in the many small calls
+# a draw makes. The 1 ms profiler's stacks then stop at the renderer's frames; its PC samples (the per-line tools) are as
+# before. PGO's profile stays valid (the frame layout is decided after the profile is read).
+option(BANJO_SWITCH_RENUT_OMIT_FRAME_POINTER "Switch: Renut's renderer and plume with -fomit-frame-pointer" OFF)
+if(REXGLUE_PLATFORM_SWITCH AND BANJO_SWITCH_RENUT_OMIT_FRAME_POINTER)
+    target_compile_options(banjo_renut_gpu PRIVATE -fomit-frame-pointer)
+    target_compile_options(plume PRIVATE -fomit-frame-pointer)
+endif()
 
 if(REXGLUE_PLATFORM_SWITCH AND BANJO_SWITCH_RENDERER_LINES)
     set_source_files_properties(src/me/me_native_system.cpp src/me/masseffect/masseffect_native_draws.cpp
