@@ -466,6 +466,14 @@ namespace plume {
         // submission before it begins it again, as Vulkan requires).
         std::vector<std::pair<DkMemBlock, uint32_t>> memory;
         size_t memoryUsed = 0;
+        // banjo-nx (2026-11-21, Deko3DOptions::cachedCommands): a list begun with the option on writes its commands into
+        // CPU-cached blocks of its own (memoryCached), and end() cleans what it wrote of each (cachedWritten: from a
+        // block's start to deko3d's write position when it left the block, or at the list's end).
+        std::vector<std::pair<DkMemBlock, uint32_t>> memoryCached;
+        size_t memoryCachedUsed = 0;
+        bool cachedList = false;
+        uint8_t *cachedChunk = nullptr;
+        std::vector<std::pair<uint8_t *, uint8_t *>> cachedWritten;
         // Transient data (compute push constants): a linear area per list, reset at begin().
         std::vector<std::pair<DkMemBlock, uint32_t>> transient;
         size_t transientBlock = 0;
@@ -1284,6 +1292,13 @@ namespace plume {
         // fragments for it (DkBarrier_Tiles / _Fragments), its fences flush it; a full barrier (the copy engine next)
         // gets a tiled cache flush ahead of it here. Off: a list starts with it off when it was ever on (the in-run A/B).
         bool tiledCache = false;
+        // banjo-nx (2026-11-21, banjo_deko3d_cached_commands, A/B 173; the render thread to 33 ms): command memory CPU-cached
+        // (deko3d's own advice is uncached: every command word and every pushed constant went to the bus a store at a time,
+        // and the profile's memcpy, 4.6 % of the render thread, ran its long loop at about 0.9 GB/s). The list's written
+        // ranges are cleaned (dc cvac) after its FinishList, before any submission reads them; the GPU never writes
+        // command memory. The same words reach the GPU. Read at each begin(); off when deko3d's command buffer layout is
+        // not the one this was written against (checked at every block fed).
+        bool cachedCommands = false;
         // sasrt-nx (2026-11-08, sasrt_gpu_lazy_depth_resolve; off by default, for the console to judge): with depthResolve
         // and preciseDepthResolve, a written compressed depth target (one layer, one level) is not decompressed when it
         // leaves the bind point or at a list's end, but right before something reads it (a texture barrier into a read

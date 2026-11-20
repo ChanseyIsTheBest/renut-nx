@@ -7655,7 +7655,8 @@ FetchSpec FetchSpecWords(const SharedConstants &sc, const ShaderRecord &vs, bool
   return s;
 }
 bool FetchSpecDiffers(const PipelineKey &key, const FetchSpec &s) {
-  return key.tess_kind != s.kind || std::memcmp(key.fetch_types, s.types, sizeof(s.types)) != 0;
+  // banjo-nx (2026-11-21): inline (a memcmp call at every fast draw before)
+  return key.tess_kind != s.kind || !SameBytes<sizeof(s.types)>(key.fetch_types, s.types);
 }
 
 // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec; the second GPU round): PipelineKey::reserved bit 3, set when the draw's
@@ -11847,7 +11848,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   const u32 clip_bit = sk.clip;  // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec)
   const SasrtSpecWords &spec_words = sk.words;  // sasrt-nx (third round)
   const bool key_inputs = f.key_rs_epoch != f.rs_epoch || !f.pipeline || !f.kp || depth_only != f.depth_only ||
-                          std::memcmp(f.kp->sasrt_words, spec_words.w, sizeof(spec_words.w)) != 0 ||  // sasrt-nx
+                          !SameBytes<sizeof(spec_words.w)>(f.kp->sasrt_words, spec_words.w) ||  // sasrt-nx; inline
                           misc != f.key_misc || f.prebuild_epoch != prebuild_epoch ||
                           f.kp->fetch_pad != (f.kp->pixel_shader ? plain_fetches : 0u) ||
                           (f.kp->reserved & 8u) != clip_bit ||  // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec)
@@ -11867,7 +11868,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
              e.layout_hash == declaration->layout_hash && e.misc == misc &&
              e.key.fetch_pad == (e.key.pixel_shader ? plain_fetches : 0u) &&  // sasrt-nx
              (e.key.reserved & 8u) == clip_bit &&  // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec)
-             std::memcmp(e.key.sasrt_words, spec_words.w, sizeof(spec_words.w)) == 0 &&  // sasrt-nx (the third round)
+             SameBytes<sizeof(spec_words.w)>(e.key.sasrt_words, spec_words.w) &&  // sasrt-nx (the third round); inline
              !FetchSpecDiffers(e.key, fetch_spec);  // banjo_gpu_fetch_spec; vivapinata-nx (2026-11-12): every draw
     };
     // banjo-nx (2026-10-28, per-draw night, A/B 63): the prebuild epoch only for a provisional answer.

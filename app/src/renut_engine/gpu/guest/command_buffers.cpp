@@ -3183,7 +3183,8 @@ void CensusPacket(const u8 *state, const OpCall &call, u32 fields) {
     // banjo-nx (2026-11-20, render-thread batch #16): a stage whose word is the last such op's (the other stage changed)
     // is skipped: its record, cache entry and declaration were read by that op's draw (one record line read and up to
     // five prefetches a stage; the c15 city profile's PrefetchShaderBehind 0.18 us a draw). Prefetches only.
-    if (stream && op.kind == OpKind::Draw && (op.fields & kFieldShaders)) {
+    // banjo-nx (2026-11-21, A/B 174's off half: none of it; prefetches only).
+    if (stream && op.kind == OpKind::Draw && (op.fields & kFieldShaders) && banjo::renut_gpu::g_ab_off_plain != 174) {
       static u32 behind_vs = 0, behind_ps = 0;  // render thread
       const bool all = banjo::renut_gpu::g_ab_off_plain == 171;
       if (all || op.call.vs_word != behind_vs)
@@ -3238,7 +3239,9 @@ void CensusPacket(const u8 *state, const OpCall &call, u32 fields) {
     else if (op.plain_dirty & ((uint64_t(1) << kFetchChunks) - 1))
       extents.mask &= ~SlotsOfFetchChunks(op.plain_dirty);  // (recorded with the key off: not known)
     if (op.resources != kNoResources) {
-      ApplyResources(resources, buffer.arena.data() + op.resources, op.kind == OpKind::Draw, stream && op_index > 0);
+      // banjo-nx (2026-11-21, A/B 175's off half: the answers' lines, not the copies' and cards; prefetches only).
+      ApplyResources(resources, buffer.arena.data() + op.resources, op.kind == OpKind::Draw,
+                     stream && op_index > 0 && banjo::renut_gpu::g_ab_off_plain != 175);
     } else {  // nothing recorded: a draw has no index words of its own; slots it changed (key off) are not known
       if (op.kind == OpKind::Draw) {
         resources.ib_valid = false;

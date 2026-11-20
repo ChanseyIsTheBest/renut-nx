@@ -593,8 +593,19 @@ void RefreshEffective() {
   }
 }
 
+// banjo-nx (2026-11-21, the render thread to 33 ms; A/B 173): plume's Deko3DOptions::cachedCommands (see there).
+REXCVAR_DEFINE_BOOL(banjo_deko3d_cached_commands, false, "Banjo/Enhancements",
+                    "deko3d renderer (2026-11-21, A/B 173): command memory CPU-cached, each list's written ranges cleaned "
+                    "to memory at its end (uncached before: every command word a store to the bus). The same commands")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 void ApplyPlume() {
 #if defined(PLUME_DEKO3D)
+  {
+    static const bool cached = REXCVAR_GET(banjo_deko3d_cached_commands);
+    plume::g_deko3dOptions.cachedCommands =
+        cached && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 173;  // banjo-nx (2026-11-21)
+  }
   plume::g_deko3dCounts = banjo::renut_gpu::Latch().counts;  // banjo-nx (2026-11-20): plume's stats bumps
   plume::g_deko3dOptions.preciseDepthResolve = On(kPreciseDepth);
   plume::g_deko3dOptions.decompressMerge = On(kDecompressMerge);

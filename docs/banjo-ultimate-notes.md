@@ -562,3 +562,23 @@ Method from now: note day/night (a screenshot at ~300 s) and compare runs of the
 Daytime 5d1c60e9 (c33, screenshot: late-afternoon light): 22.87 fps, 5,242 draws a frame, 8.30 us a draw. Daytime
 lean / lean2: 8.24, 8.26, 8.58 us; full batch b44: 9.17, 9.10. So the lean batch equals 5d1c60e9 by day and by night,
 and sasrt-nx's full rounds 2-4 set cost ~10 % a draw in N&B. Against 1.0.2 (night 7.55) the lean build is +12.6 %.
+
+## The render thread to ~33 ms (the user's 24 hours, from 2026-11-21 08:00)
+
+Target: Showdown Town's render thread ~33 ms a frame (night ~4,850 draws: ~6.8 us a draw; lean2 is 8.50, 1.0.2 7.55).
+
+What the c27 profile (lean, 1 ms sampled, by source line, scratchpad fn_lines.py "*") puts where, % of the render
+thread: memcpy + memcmp 6.2 (memcpy's long loop, copies over 128 bytes, at ~0.9 GB/s; callers: deko3d's
+dkCmdBufPushConstants and dkCmdBufBindTextures into command memory, the fetch copies, plume's handle copies; the
+renderer's hot memcmp calls are the 80-byte spec-word compares, which GCC did not inline); the geometry proofs
+(GeometryObjectsHit + ProveCopyRange) 5.0; Replay's prefetch helpers ~7-9 together (ApplyResources' copy prefetch
+4.0, PrefetchResourceObjects 2.9, PrefetchShaderBehind 1.9, the next op's state lines 1.0); the spec words 2.35.
+The 44 batch's hot code is 45 KB of 64-byte lines against the lean build's 43 KB (300-600 s): its loss was work, not
+the instruction cache. Command buffers are recorded anew every frame (1.14M ops a 10 s, one an op a draw): there is no
+recording to keep across frames.
+
+Cycle 1 (cc0cc81a, 8d9cb5c5, 3d554cc0): the spec answers kept while their inputs hold (A/B 172; the line marks, then
+the words they read, masked to the bits read); sasrt_gpu_vs_input_mask off for N&B; the renderer and plume with
+-fomit-frame-pointer (BANJO_SWITCH_RENUT_OMIT_FRAME_POINTER, out/switch_pgo_use_fp.bat). Ryujinx verify run (11 min,
+banjo_renut_fast_draw_verify): 0 kept answers differ; kept 40 % of the fast draws (a fifth of those by the word
+check). The rest change shaders (the pipeline changes at ~60 % of the draws), which a last-draw keep cannot answer.
