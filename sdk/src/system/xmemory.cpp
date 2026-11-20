@@ -1393,13 +1393,7 @@ bool BaseHeap::Save(stream::ByteStream* stream) {
   return true;
 }
 
-// sasrt-nx (2026-11-20, sasrt_rt2_readable_memo): raised at the start of every heap operation that can take read access
-// from a page (Decommit, Release, Protect, Reset, Restore, a commit without read): the renderer's readable answers hold
-// while it is unchanged (declared in render/draw.cpp, not in xmemory.h).
-std::atomic<uint64_t> g_page_access_generation{1};
-
 bool BaseHeap::Restore(stream::ByteStream* stream) {
-  g_page_access_generation.fetch_add(1, std::memory_order_acq_rel);  // sasrt-nx (2026-11-20)
   REXSYS_DEBUG("Heap {:08X}-{:08X}", heap_base_, heap_base_ + (heap_size_ - 1));
 
   const uint32_t host_page_size = memory_->system_page_size_;
@@ -1477,7 +1471,6 @@ bool BaseHeap::Restore(stream::ByteStream* stream) {
 }
 
 void BaseHeap::Reset() {
-  g_page_access_generation.fetch_add(1, std::memory_order_acq_rel);  // sasrt-nx (2026-11-20)
   // TODO(DrChat): protect pages.
   std::memset(page_table_.data(), 0, sizeof(PageEntry) * page_table_.size());
   // TODO(Triang3l): Remove access callbacks from pages if this is a physical
@@ -1523,10 +1516,6 @@ bool BaseHeap::AllocSystemHeap(uint32_t size, uint32_t alignment, uint32_t alloc
 
 bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignment,
                           uint32_t allocation_type, uint32_t protect) {
-  // sasrt-nx (2026-11-20, sasrt_rt2_readable_memo): a commit over pages already committed sets their protection (it
-  // can take read access away): the readable answers go when the new one has no read.
-  if (!(protect & memory::kMemoryProtectRead))
-    g_page_access_generation.fetch_add(1, std::memory_order_acq_rel);
   alignment = rex::round_up(alignment, page_size_);
   if (base_address % alignment != 0) {
     if (base_address % page_size_ != 0) {
@@ -1816,7 +1805,6 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t 
 }
 
 bool BaseHeap::Decommit(uint32_t address, uint32_t size) {
-  g_page_access_generation.fetch_add(1, std::memory_order_acq_rel);  // sasrt-nx (2026-11-20)
   uint32_t page_count = get_page_count(size, page_size_, page_size_shift_);
   uint32_t start_page_number = (address - heap_base_) >> page_size_shift_;
   uint32_t end_page_number = start_page_number + page_count - 1;
@@ -1853,7 +1841,6 @@ bool BaseHeap::Decommit(uint32_t address, uint32_t size) {
 }
 
 bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
-  g_page_access_generation.fetch_add(1, std::memory_order_acq_rel);  // sasrt-nx (2026-11-20)
   // Global critical region before heap_mutex_ - see
   // AcquireHostPageReconcileLock for why the order matters.
   auto global_lock = AcquireHostPageReconcileLock();
@@ -1916,7 +1903,6 @@ bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
 }
 
 bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect, uint32_t* old_protect) {
-  g_page_access_generation.fetch_add(1, std::memory_order_acq_rel);  // sasrt-nx (2026-11-20)
   if (!size) {
     REXSYS_ERROR("BaseHeap::Protect failed due to zero size");
     return false;

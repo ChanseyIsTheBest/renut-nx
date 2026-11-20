@@ -56,12 +56,6 @@ extern "C" char *fake_heap_end;  // libnx: the end of the malloc heap
 #include "renut_engine/gpu/backend/video_internal.h"
 #include "renut_engine/gpu/banjo_renut_tuning.h"
 #include "renut_engine/gpu/sasrt_gpu_round.h"  // sasrt-nx (2026-11-08): the GPU round
-namespace rex::memory {
-// sasrt-nx (2026-11-20, sasrt_rt2_readable_memo): raised by every heap operation that can take read access from a page
-// (sdk/src/system/xmemory.cpp: Decommit, Release, Protect, Reset, Restore, a commit without read); declared here, not
-// in xmemory.h (every file of the game's code includes that header).
-extern std::atomic<uint64_t> g_page_access_generation;
-}  // namespace rex::memory
 #include "renut_engine/gpu/ultimate.h"
 // renut-ultimate: the host shaders this file makes itself (sasrt-nx's 16-bit fixed-point resolve).
 #include "host_shaders/resolve_clamp_ps.spirv.h"
@@ -1185,20 +1179,6 @@ struct HeldExport {
   bool overwritten = false;
 };
 std::map<u32, HeldExport> g_held_exports;
-// banjo-nx (2026-11-20, sasrt-nx's sasrt_rt2_held_export_bitmap, render-thread batch #7; always on): the 64 KB granules of
-// the 512 MB physical space a kept export's bytes may lie in (a superset: set at every hold, made again from the map
-// when the frame's start drops some), so GetStreamSource searches the map only where an export may be.
-uint64_t g_held_granules[8192 / 64] = {};
-inline void HeldGranulesMark(u32 base, u32 size) {
-  const u32 first = (base & 0x1FFFFFFFu) >> 16;
-  const u32 last = std::min<u32>(((base & 0x1FFFFFFFu) + size - 1u) >> 16, 8191u);
-  for (u32 g = first; g <= last; ++g)
-    g_held_granules[g >> 6] |= 1ull << (g & 63u);
-}
-[[gnu::always_inline]] inline bool HeldGranuleMayHold(u32 phys) {
-  const u32 g = (phys & 0x1FFFFFFFu) >> 16;
-  return (g_held_granules[g >> 6] >> (g & 63u)) & 1u;
-}
 std::vector<std::shared_ptr<std::vector<u8>>> g_held_retired;
 // sasrt-nx (2026-11-12, batch C/D, item D2; port 93): retired buffers nothing points into any more (the flush), for the
 // next holds.
@@ -1220,7 +1200,6 @@ void HoldExport(u32 base, const u8 *data, u32 size, uint64_t frame) {
     it = g_held_exports.erase(it);
   }
   HeldExport &h = g_held_exports[base];
-  HeldGranulesMark(base, size);  // banjo-nx (2026-11-20, batch #7)
   if (!g_held_pool.empty()) {  // sasrt-nx (2026-11-12, batch C/D, item D2; port 93): a pooled buffer, the same bytes
     h.data = std::move(g_held_pool.back());
     g_held_pool.pop_back();
@@ -1499,30 +1478,9 @@ public:
   // node, whose line the draw reads next for the entry's fields anyway (libstdc++ keeps the key at the node's start).
   // Slots of 16 bytes rather than a key each: four times as many in less memory. The city's 5,000 draws a frame missed
   // the 4,096 / 2,048 slots of before often enough to spend 2.5 % of the console's render thread in the maps' buckets.
-  // sasrt-nx (2026-11-20, sasrt_rt4_stream_memo_two_way; the third table's #16): two ways, the slot and its pair (the
-  // same line): the most recently used kept in the first (a hit in the second swaps them; a new entry pushes the first
-  // into the second). Four views' streams and indices (thousands of keys a frame) conflicted in the direct-mapped slots,
-  // each conflict a map lookup (the bucket's and the node's lines).
-  static bool TwoWay() { return sasrt::gpu_round::On(sasrt::gpu_round::kRt4StreamMemoTwoWay); }
   Entry *Find(const typename Map::key_type &key, size_t hash) const {
-    const u32 i = Index(hash);
-    const Slot &slot = slots_[i];
-    if (slot.hash == hash && slot.entry && slot.entry->first == key)
-      return slot.entry;
-    if (!TwoWay())
-      return nullptr;
-    Slot &other = const_cast<Slot &>(slots_[i ^ 1u]);
-    if (other.hash == hash && other.entry && other.entry->first == key) {
-      std::swap(const_cast<Slot &>(slot), other);
-      return slots_[i].entry;
-    }
-    return nullptr;
-  }
-  void Place(size_t hash, Entry *entry) {
-    const u32 i = Index(hash);
-    if (TwoWay() && slots_[i].entry && slots_[i].entry != entry)
-      slots_[i ^ 1u] = slots_[i];
-    slots_[i] = {hash, entry};
+    const Slot &slot = slots_[Index(hash)];
+    return slot.hash == hash && slot.entry && slot.entry->first == key ? slot.entry : nullptr;
   }
 
   // The map's entry for 'key', made if 'make' (else null when it has none).
@@ -1537,13 +1495,13 @@ public:
         return nullptr;
       it = map.try_emplace(key).first;
     }
-    Place(hash, &*it);
+    slots_[Index(hash)] = {hash, &*it};
     return &*it;
   }
   // bangaio-nx (2026-10-29): a new entry for a key Get(.., false) just found none for.
   Entry *Make(Map &map, const typename Map::key_type &key, size_t hash) {
     Entry *entry = &*map.try_emplace(key).first;
-    Place(hash, entry);
+    slots_[Index(hash)] = {hash, entry};
     return entry;
   }
   // bangaio-nx (2026-10-29, v5): the slot of an entry about to be erased, if it names it (one entry, not Clear()).
@@ -1551,9 +1509,6 @@ public:
     Slot &slot = slots_[Index(hash)];
     if (slot.entry == entry)
       slot = Slot{};
-    Slot &other = slots_[Index(hash) ^ 1u];  // sasrt-nx (2026-11-20): either way (the key may have been on or off since)
-    if (other.entry == entry)
-      other = Slot{};
   }
 
   void Clear() { std::fill(std::begin(slots_), std::end(slots_), Slot{}); }
@@ -1564,11 +1519,9 @@ public:
   void PrefetchEntry(const typename Map::key_type &key) const {
     const size_t hash = Hash{}(key);
     const Slot &slot = slots_[Index(hash)];
-    const Slot &other = slots_[Index(hash) ^ 1u];  // sasrt-nx (2026-11-20): the pair, on the same line
-    const Slot *s = slot.hash == hash && slot.entry ? &slot : other.hash == hash && other.entry ? &other : nullptr;
-    if (s) {
-      __builtin_prefetch(s->entry);
-      __builtin_prefetch(reinterpret_cast<const char *>(s->entry) + 64);
+    if (slot.hash == hash && slot.entry) {
+      __builtin_prefetch(slot.entry);
+      __builtin_prefetch(reinterpret_cast<const char *>(slot.entry) + 64);
     }
   }
 
@@ -1819,31 +1772,6 @@ bool PagesClean(const u8 *data, size_t bytes, uint64_t proven) {
         if (vmaxvq_u32(newer) != 0)
           clean = false;
         page += 7;  // the loop's ++page makes 8
-        continue;
-      }
-    }
-    // sasrt-nx (2026-11-20, sasrt_rt2_pages_tail; the second render-thread round): a range's last 1-7 pages (most vertex
-    // ranges are that short) in one block the same way, the lanes past the range masked: their cards read as written-
-    // never and their serials as old. Loads stay inside the card table and g_page_serial (page + 8 <= 0x20000).
-    if (!diag && page != 0 && last - page < 7 && page + 8 <= 0x20000u && (page + 8 <= 0x1000u || page >= 0x1000u) &&
-        sasrt::gpu_round::On(sasrt::gpu_round::kRt2PagesTail)) {
-      static const uint8_t kLanes8[8] = {0, 1, 2, 3, 4, 5, 6, 7};
-      static const uint32_t kLanes32[8] = {0, 1, 2, 3, 4, 5, 6, 7};
-      const u32 n = last - page + 1;
-      const uint8x8_t outside = vcge_u8(vld1_u8(kLanes8), vdup_n_u8(u8(n)));
-      const uint8x8_t ca = vld1_u8(cards + 0xA0000u + page), cc = vld1_u8(cards + 0xC0000u + page);
-      const uint8x8_t ce = vld1_u8(cards + 0xE0000u + page - 1);
-      const uint8x8_t cf = page < 0x1000u ? vld1_u8(cards + 0x7F000u + page) : ca;
-      if (vminv_u8(vorr_u8(vmin_u8(vmin_u8(ca, cc), vmin_u8(ce, cf)), outside)) != 0) {
-        const uint32x4_t nn = vdupq_n_u32(n), p = vdupq_n_u32(u32(proven));
-        const u32 *serials = g_page_serial + page;
-        const uint32x4_t newer =
-            vorrq_u32(vandq_u32(vcgeq_u32(vld1q_u32(serials), p), vcltq_u32(vld1q_u32(kLanes32), nn)),
-                      vandq_u32(vcgeq_u32(vld1q_u32(serials + 4), p), vcltq_u32(vld1q_u32(kLanes32 + 4), nn)));
-        if (vmaxvq_u32(newer) != 0)
-          clean = false;
-        sasrt::gpu_round::Count(sasrt::gpu_round::kRt2PagesTail);
-        page += n - 1;  // the loop's ++page makes n
         continue;
       }
     }
@@ -3721,33 +3649,6 @@ inline void DiagPushLines(u32 first, u32 run) {
     if (diff)
       push |= uint64_t(1) << bit;
   }
-  // sasrt-nx (2026-11-20, sasrt_rt4_push_runs_merged; the third table's #26): two runs of groups to push that one or two
-  // groups separate are pushed as one: the groups between them go too, with the device's current bytes (the loop below
-  // copies all four registers of a group and makes them valid, as for any group it pushes), so one dkCmdBufPushConstants
-  // call instead of two. Never across a group holding a literal register (this shader's or the buffer's): the device's
-  // bytes would overwrite the literal.
-  if (push && sasrt::gpu_round::On(sasrt::gpu_round::kRt4PushRunsMerged)) {
-    uint64_t gaps = 0;
-    for (uint64_t rest = push; rest;) {
-      const u32 first = u32(std::countl_zero(rest));          // the lowest group left (group g is bit 63 - g)
-      const u32 end = first + u32(std::countl_one(rest << first));  // the group after its run
-      rest = end >= 64 ? 0 : rest & (~uint64_t(0) >> end);    // the groups from 'end' on
-      if (!rest)
-        break;
-      const u32 next = u32(std::countl_zero(rest));
-      if (next - end > 2)
-        continue;
-      bool free = true;
-      for (u32 g = end; g < next && free; ++g)
-        free = !(((own_literals ? own_literals[g / 8] : 0u) | last.literal_regs[g / 8]) >> (g % 8 * 4) & 0xFu);
-      for (u32 g = end; free && g < next; ++g)
-        gaps |= uint64_t(1) << (63 - g);
-    }
-    if (gaps) {
-      push |= gaps;
-      sasrt::gpu_round::Count(sasrt::gpu_round::kRt4PushRunsMerged, uint64_t(std::popcount(gaps)));
-    }
-  }
   // The updates, a run of consecutive groups at a time.
   uint64_t pushed_bytes = 0;
   bool overwrote_literal = false;
@@ -3926,9 +3827,6 @@ constexpr u32 kSharedLines = (u32(sizeof(SharedConstants)) + 63) / 64;
 constexpr u32 kAllSharedLines = (1u << kSharedLines) - 1;
 static_assert(kSharedLines == 25);  // halo3-nx: 22 before the loop constants (24); renut-ultimate: the clip planes; the tail, bit 24, is still 16 bytes
 u32 g_sc_dirty = kAllSharedLines;
-// banjo-nx (2026-11-20, sasrt-nx's sasrt_rt2_spec_memo): the lines of g_draw_sc pushed (so written) since the spec memo
-// was taken; with g_sc_dirty (written since the last push) every line written since.
-u32 g_sc_dirty_seen = ~0u;
 // banjo-nx (2026-10-28, per-draw night): the lines from the first to the last as one mask (a loop a line before, run at
 // every mark the compiler could not fold: FillTextures' slot words, the fields of a block passed by reference).
 constexpr u32 SharedLinesOf(size_t offset, size_t size) {
@@ -4011,8 +3909,6 @@ void PushSharedConstants(plume::RenderCommandList *cmd, const SharedConstants &s
   // banjo-nx (2026-10-26, API-level stage 1): the persistent block's lines are known: those written with a new value
   // since its last push (g_sc_dirty), the held copy being the block in every other line.
   const bool tracked = &sc == &g_draw_sc;
-  if (tracked)
-    g_sc_dirty_seen |= g_sc_dirty;  // banjo-nx (2026-11-20, the spec memo): the lines written since the memo
   if (!g_bound.pushed_shared_valid) {
     DiagPushLines(0, kSharedLines);  // banjo-nx (2026-10-28, diagnostic)
     plume::Deko3DPushUniform(cmd, ubo, kSize, 0, now, kSize);
@@ -4252,20 +4148,7 @@ TextureSlotMemo g_texture_slot_memo[kTextureMemoEntries];
 
 inline TextureSlotMemo &TextureMemoSlot(u32 texture_va, const TextureFetch &fetch) {
   static_assert(kTextureMemoEntries == 1u << 12);
-  const u32 h = (texture_va ^ (fetch.dword[0] * 0x85EBCA6Bu) ^ fetch.dword[1]) * 0x9E3779B1u;
-  // sasrt-nx (2026-11-20, sasrt_rt2_texture_memo_two_way; the second render-thread round's #2): 2,048 sets of two (the
-  // same 4,096 entries): the entry of this texture and fetch words when either way holds it, else the way bound in an
-  // earlier frame (the four-player race missed ~1,950 a second by "another entry", each a whole BindTextureLocked). Every
-  // use checks the entry's words as before, so an entry stored under the other mapping (the A/B's other half) is only
-  // a miss.
-  if (sasrt::gpu_round::On(sasrt::gpu_round::kRt2TextureMemoTwoWay)) {
-    TextureSlotMemo *const set = &g_texture_slot_memo[(h >> 21) << 1];
-    for (u32 w = 0; w < 2; ++w)
-      if (set[w].va == texture_va && SameBytes<24>(set[w].device, fetch.dword))
-        return set[w];
-    return set[0].frame <= set[1].frame ? set[0] : set[1];
-  }
-  return g_texture_slot_memo[h >> 20];
+  return g_texture_slot_memo[((texture_va ^ (fetch.dword[0] * 0x85EBCA6Bu) ^ fetch.dword[1]) * 0x9E3779B1u) >> 20];
 }
 
 // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_chain_reuse): 'slot_fx' (32 entries, or null) receives each bound slot's effects (its
@@ -5869,8 +5752,7 @@ StreamSource GetStreamSource(const GuestDevice &device, const DrawCall &call,
     }
   }
   // sasrt-nx (2026-10-21, sasrt_renut_exports_held): inside a written-back export: its results as the GPU made them.
-  if (gpu_address && !g_held_exports.empty() && banjo::renut_gpu::ExportsHeldOn() &&
-      (HeldGranuleMayHold(gpu_address) || !sasrt::gpu_round::On(sasrt::gpu_round::kRt2HeldExportBitmap))) {
+  if (gpu_address && !g_held_exports.empty() && banjo::renut_gpu::ExportsHeldOn()) {
     const u32 phys = gpu_address & 0x1FFFFFFFu;
     auto it = g_held_exports.upper_bound(phys);
     if (it != g_held_exports.begin()) {
@@ -6760,10 +6642,7 @@ struct WholeRepeat {
   CachedIndices *ci = nullptr;
   CachedStream *copies[kMaxVertexStreams] = {};
 };
-// sasrt-nx (2026-11-20, sasrt_rt2_repeat_ring; the second render-thread round's #41): the last four answers, not one
-// (draws that take turns between a few meshes of one kick: a kart's body and wheels, a view's props); [0] alone off.
-WholeRepeat g_whole_repeats[4];
-u32 g_whole_repeat_next = 0;
+WholeRepeat g_whole_repeat;
 [[gnu::always_inline]] inline void WholeRepeatWords(const GuestDevice &device, u32 stream, u32 w[4]) {
   const u32 fetch_index = d3d::kFirstVertexFetchIndex + d3d::StreamFetchIndex(stream);
   w[0] = device.VertexFetchWord(fetch_index, 0);
@@ -6774,20 +6653,11 @@ u32 g_whole_repeat_next = 0;
 bool WholeRepeatHit(const GuestDevice &device, const DrawCall &call, const ShaderRecord &vs, const u32 *strides,
                     const HostVertexLayout &layout, uint64_t layout_hash, int64_t base, Geometry &g,
                     CachedStream *copies[kMaxVertexStreams]) {
-  const bool ring = sasrt::gpu_round::On(sasrt::gpu_round::kRt2RepeatRing);
-  const WholeRepeat *found = nullptr;
-  for (u32 i = 0; i < (ring ? 4u : 1u); ++i) {
-    const WholeRepeat &c = g_whole_repeats[i];
-    if (c.valid && c.vs == &vs && c.strides == strides && c.layout == &layout && c.layout_hash == layout_hash &&
-        c.flush == g_flush_serial && c.frame == g_stream_cache_frame && c.mesh_gen == g_mesh_gen &&
-        c.indexed == call.indexed && uint64_t(base) < c.min_vertices) {
-      found = &c;
-      break;
-    }
-  }
-  if (!found)
+  const WholeRepeat &r = g_whole_repeat;
+  if (!r.valid || r.vs != &vs || r.strides != strides || r.layout != &layout || r.layout_hash != layout_hash ||
+      r.flush != g_flush_serial || r.frame != g_stream_cache_frame || r.mesh_gen != g_mesh_gen ||
+      r.indexed != call.indexed || uint64_t(base) >= r.min_vertices)
     return false;
-  const WholeRepeat &r = *found;
   for (u32 left = r.used; left; left &= left - 1) {
     const u32 s = u32(std::countr_zero(left));
     u32 w[4];
@@ -7044,8 +6914,7 @@ bool WholeGeometryTry(const GuestDevice &device, const DrawCall &call, const Sha
     MeshObjectKeep(call, probe, layout, layout_hash, vs, shader_strides, u32(base), keys, copies, ci, index_key);
   // blur-nx (2026-11-18, #4): this answer for the next draws of the kick (WholeRepeat).
   if (repeat_on) {
-    const bool ring = sasrt::gpu_round::On(sasrt::gpu_round::kRt2RepeatRing);
-    WholeRepeat &r = g_whole_repeats[ring ? (g_whole_repeat_next++ & 3u) : 0u];
+    WholeRepeat &r = g_whole_repeat;
     r.valid = true;
     r.vs = &vs;
     r.strides = shader_strides;
@@ -7996,107 +7865,6 @@ static_assert(sizeof(SasrtSpecWords::w) == sizeof(PipelineKey::sasrt_words));
     }
   }
   return s;
-}
-
-// banjo-nx (2026-11-20, sasrt-nx's sasrt_rt2_spec_memo, render-thread batch #1; always on): a fast draw's four spec answers
-// (FetchSpecWords, SasrtPlainFetchMask, SasrtClipBit, SasrtSpecWordsOf) are the draw before's when nothing they read can
-// have changed: no line of the persistent shared constants written since (g_sc_dirty_seen | g_sc_dirty, the marks the
-// push trusts too), the same vertex shader record and entries, instancing, A/B halves and targets with their colour
-// words. A vertex shader that exports reads its float constants (SasrtExportFormatWords): always computed. In N&B's
-// city these four were 0.135 us of the render thread's 8.9 a draw (1 ms sampling, 2026-11-20).
-struct SasrtSpecAnswers {
-  FetchSpec fetch;
-  u32 plain = 0, clip = 0;
-  SasrtSpecWords words;
-};
-struct SasrtSpecMemo {
-  bool valid = false;
-  bool per_instance = false;
-  int ab = 0, ab_now = 0;
-  const ShaderRecord *vs = nullptr;
-  const ShaderCacheEntry *vs_entry = nullptr, *ps_entry = nullptr;
-  u32 color_count = 0;
-  const HostSurface *colors[4] = {};
-  u32 color_info[4] = {};
-  SasrtSpecAnswers a;
-};
-SasrtSpecMemo g_spec_memo;
-// sasrt-nx (2026-11-20, sasrt_rt4_spec_key_skip; the third table's #27): the memo's answers' generation (one more at each
-// store) and whether the last call's answers are the memo's (a hit).
-uint64_t g_spec_memo_gen = 1;
-bool g_spec_memo_hit = false, g_spec_memo_stored = false;
-// A count of every pipeline key written where the fast path keeps a pointer to one (the cache's entries, FastState::key).
-uint64_t g_sasrt_key_writes = 0;
-[[gnu::always_inline]] inline void SasrtSpecAnswersOf(const SharedConstants &sc, const ShaderRecord &vs,
-                                                      const ShaderCacheEntry *ps_entry, bool per_instance, int ab_off,
-                                                      const FloatConstants &vsc, const Targets &targets,
-                                                      SasrtSpecAnswers &out) {
-  const int ab_now = banjo::renut_gpu::g_ab_off_plain;
-  const u32 colors = std::min<u32>(targets.color_count, 4u);
-  const bool memo = &sc == &g_draw_sc && targets.color_count <= 4 && !(vs.entry && vs.entry->memExportConstants[0]) &&
-                    sasrt::gpu_round::On(sasrt::gpu_round::kRt2SpecMemo);
-  SasrtSpecMemo &m = g_spec_memo;
-  g_spec_memo_hit = g_spec_memo_stored = false;
-  if (memo && m.valid && (g_sc_dirty_seen | g_sc_dirty) == 0 && m.vs == &vs && m.vs_entry == vs.entry &&
-      m.ps_entry == ps_entry && m.per_instance == per_instance && m.ab == ab_off && m.ab_now == ab_now &&
-      m.color_count == targets.color_count) {
-    bool same = true;
-    for (u32 i = 0; i < colors; ++i)
-      same &= m.colors[i] == targets.colors[i] &&
-              m.color_info[i] == (targets.colors[i] ? targets.colors[i]->color_info_word : 0u);
-    if (same) {
-      out = m.a;
-      sasrt::gpu_round::Count(sasrt::gpu_round::kRt2SpecMemo);
-      // banjo_renut_fast_draw_verify: the kept answers against fresh ones.
-      static const bool verify = REXCVAR_GET(banjo_renut_fast_draw_verify);
-      if (verify) [[unlikely]] {
-        const FetchSpec fetch = FetchSpecWords(sc, vs, per_instance, ab_off);
-        const u32 plain = SasrtPlainFetchMask(sc, ps_entry, vs.entry);
-        const u32 clip = SasrtClipBit(sc);
-        const SasrtSpecWords words = SasrtSpecWordsOf(sc, vs.entry, ps_entry, &vsc, &targets);
-        if (std::memcmp(&fetch, &out.fetch, sizeof(fetch)) != 0 || plain != out.plain || clip != out.clip ||
-            std::memcmp(&words, &out.words, sizeof(words)) != 0) {
-          static uint32_t logged = 0;
-          if (logged++ < 16)
-            RGPU_WARN("spec memo (banjo_renut_fast_draw_verify): the kept spec answers differ (fetch {} plain "
-                      "{:08X}/{:08X} clip {}/{} words {}; VS {:016X})",
-                      std::memcmp(&fetch, &out.fetch, sizeof(fetch)) != 0, out.plain, plain, out.clip, clip,
-                      std::memcmp(&words, &out.words, sizeof(words)) != 0, vs.hash);
-          out.fetch = fetch;
-          out.plain = plain;
-          out.clip = clip;
-          out.words = words;
-          m.a = out;
-          ++g_spec_memo_gen;
-        }
-      }
-      g_spec_memo_hit = true;
-      return;
-    }
-  }
-  out.fetch = FetchSpecWords(sc, vs, per_instance, ab_off);
-  out.plain = SasrtPlainFetchMask(sc, ps_entry, vs.entry);
-  out.clip = SasrtClipBit(sc);
-  out.words = SasrtSpecWordsOf(sc, vs.entry, ps_entry, &vsc, &targets);
-  if (memo) {
-    ++g_spec_memo_gen;
-    g_spec_memo_stored = true;
-    m.valid = true;
-    m.per_instance = per_instance;
-    m.ab = ab_off;
-    m.ab_now = ab_now;
-    m.vs = &vs;
-    m.vs_entry = vs.entry;
-    m.ps_entry = ps_entry;
-    m.color_count = targets.color_count;
-    for (u32 i = 0; i < 4; ++i) {
-      m.colors[i] = i < colors ? targets.colors[i] : nullptr;
-      m.color_info[i] = i < colors && targets.colors[i] ? targets.colors[i]->color_info_word : 0u;
-    }
-    m.a = out;
-    g_sc_dirty_seen = 0;
-    sasrt::gpu_round::Count(sasrt::gpu_round::kRt2SpecMemo, 1, 1);  // computed (the 10 s line's /n)
-  }
 }
 
 PipelineKey MakeKey(const GuestDevice &device, const ShaderRecord *vs, const ShaderRecord *ps,
@@ -10000,35 +9768,8 @@ static bool GuestBytesReadable(const u8 *p, size_t len) {
   }
   if (!heap || address + len - 1 > 0xFFFFFFFFull)
     return false;
-  // sasrt-nx (2026-11-20, sasrt_rt2_readable_memo; the second render-thread round's #29): ranges found readable, 64 of
-  // them by their first 64 KB, kept while no page anywhere has lost read access since (g_page_access_generation: each
-  // query takes the heap's recursive mutex, which the game's allocations hold too, and walks the page table). Two
-  // readable ranges that touch are one.
-  struct ReadableMemo {
-    const rex::memory::BaseHeap *heap = nullptr;
-    uint32_t lo = 0, hi = 0;
-    uint64_t generation = 0;
-  };
-  static ReadableMemo memo[64];
-  const uint32_t lo = uint32_t(address), hi = uint32_t(address + len - 1);
-  const bool memo_on = sasrt::gpu_round::On(sasrt::gpu_round::kRt2ReadableMemo);
-  const uint64_t generation = rex::memory::g_page_access_generation.load(std::memory_order_acquire);
-  ReadableMemo &m = memo[(lo >> 16) & 63u];
-  if (memo_on && m.heap == heap && m.generation == generation && m.lo <= lo && hi <= m.hi) {
-    sasrt::gpu_round::Count(sasrt::gpu_round::kRt2ReadableMemo);
-    return true;
-  }
-  const bool readable = uint32_t(heap->QueryRangeAccess(lo, hi)) & uint32_t(rex::memory::PageAccess::kReadOnly);
-  if (memo_on && readable) {
-    sasrt::gpu_round::Count(sasrt::gpu_round::kRt2ReadableMemo, 1, 1);  // queried (the 10 s line's /n)
-    if (m.heap == heap && m.generation == generation && lo <= uint64_t(m.hi) + 1 && uint64_t(hi) + 1 >= m.lo) {
-      m.lo = std::min(m.lo, lo);
-      m.hi = std::max(m.hi, hi);
-    } else {
-      m = {heap, lo, hi, generation};
-    }
-  }
-  return readable;
+  return uint32_t(heap->QueryRangeAccess(uint32_t(address), uint32_t(address + len - 1))) &
+         uint32_t(rex::memory::PageAccess::kReadOnly);
 #endif
 }
 
@@ -10673,10 +10414,6 @@ struct FastState {
   // made here: the full path's, a verify's): not copied out of the cache at every key change (about 200 bytes), and
   // whether its blend controls read the blend constant (DrawBlendConstant's loop only when they do).
   const PipelineKey *kp = nullptr;
-  // sasrt-nx (2026-11-20, sasrt_rt4_spec_key_skip): kp as last checked against the spec memo's answers of generation
-  // spec_ok_gen, with g_sasrt_key_writes then.
-  const PipelineKey *spec_ok_kp = nullptr;
-  uint64_t spec_ok_gen = 0, spec_ok_writes = 0;
   KeyHot kp_hot;  // banjo-nx (2026-10-28): KeyHot::Of(*kp)
   bool blend_used = true;
   uint64_t key_rs_epoch = 0;  // the render-state epoch and the rest (FastDrawLocked's misc) the key was made for
@@ -10738,35 +10475,12 @@ uint64_t RenderStateIdLocked(const u32 rs[20], const Targets &t) {
   sig[5] = t.depth ? u32(t.depth->format) : u32(plume::RenderFormat::UNKNOWN);
   const HostSurface *first = t.color_count ? t.colors[0] : t.depth;
   sig[6] = first ? u32(first->samples) : 0u;
-  u32 slot;
-#if defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)
-  // sasrt-nx (2026-11-20, sasrt_rt4_state_id_crc; the third table's #25, the first's #42): the table's index from a
-  // CRC32C of the words, 8 bytes an instruction (14, 3 cycles each on the A57), not 27 dependent multiplies; a hit
-  // compares the words either way, so only the slots the states land in change.
-  if (sasrt::gpu_round::On(sasrt::gpu_round::kRt4StateIdCrc)) {
-    uint32_t c = 0xFFFFFFFFu;
-    for (u32 i = 0; i < 20; i += 2) {
-      uint64_t w;
-      std::memcpy(&w, rs + i, 8);
-      c = __builtin_aarch64_crc32cx(c, w);
-    }
-    for (u32 i = 0; i < 8; i += 2) {
-      uint64_t w;
-      std::memcpy(&w, sig + i, 8);
-      c = __builtin_aarch64_crc32cx(c, w);
-    }
-    slot = (c ^ (c >> 8) ^ (c >> 16) ^ (c >> 24)) & 0xFFu;
-  } else
-#endif
-  {
-    uint64_t h = 0x9E3779B97F4A7C15ull;
-    for (u32 i = 0; i < 20; ++i)
-      h = (h ^ rs[i]) * 0xFF51AFD7ED558CCDull;
-    for (u32 i = 0; i < 7; ++i)
-      h = (h ^ sig[i]) * 0xC4CEB9FE1A85EC53ull;
-    slot = u32(h >> 56);
-  }
-  RenderStateIdEntry &e = g_rs_ids[slot];
+  uint64_t h = 0x9E3779B97F4A7C15ull;
+  for (u32 i = 0; i < 20; ++i)
+    h = (h ^ rs[i]) * 0xFF51AFD7ED558CCDull;
+  for (u32 i = 0; i < 7; ++i)
+    h = (h ^ sig[i]) * 0xC4CEB9FE1A85EC53ull;
+  RenderStateIdEntry &e = g_rs_ids[u32(h >> 56)];
   if (e.id && SameBytes<sizeof(e.rs)>(e.rs, rs) && SameBytes<sizeof(sig)>(e.targets, sig)) {
     ++g_rs_id_hits;
     return e.id;
@@ -10907,21 +10621,6 @@ enum FastWhy : u32 {
 inline int FastMiss(u32 why) {
   ++g_fast_why[why];
   return 0;
-}
-
-// sasrt-nx (2026-11-20, sasrt_rt4_inert_keeps_chain; the third table's #28, the first's #15): a draw left out before the
-// fast path (sasrt_gpu_skip_inert_draws, sasrt_gpu_skip_cull_both: it writes nothing) keeps the chain: the fast state
-// takes its number and its changed fields are carried into the next draw's (the union of the two steps' changes covers
-// the change from the last drawn one). The 4P race left out ~240 draws a second, each a chain break for the next.
-u32 g_chain_carry_fields = 0;
-inline void SasrtKeepChainOverSkipped() {
-  FastState &f = g_fast;
-  const ChainHint &chain = g_chain_hint;
-  if (f.valid && chain.seq && chain.seq == f.seq + 1 && sasrt::gpu_round::On(sasrt::gpu_round::kRt4InertKeepsChain)) {
-    f.seq = chain.seq;
-    g_chain_carry_fields |= chain.fields;
-    sasrt::gpu_round::Count(sasrt::gpu_round::kRt4InertKeepsChain);
-  }
 }
 
 }  // namespace
@@ -11238,15 +10937,12 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   const ChainHint &chain = g_chain_hint;
   if (!chain.seq || chain.seq != f.seq + 1)
     return FastMiss(kFastBreak);
-  // sasrt-nx (2026-11-20, sasrt_rt4_inert_keeps_chain): the fields of draws left out since the last drawn one.
-  const u32 carried_fields = g_chain_carry_fields;
-  g_chain_carry_fields = 0;
   // (Stage 2: Draw*UP, Begin*Vertices, range geometry and rectangle lists are the executor's too.)
   // bangaio-nx (2026-10-29, banjo_renut_point_fast_draw / A/B 69): point lists too (their point state set below).
   const bool point = call.primitive == kPointList;
   if (call.tessellation || (point && !PointFastDrawOn()))
     return FastMiss(kFastCall);
-  const u32 fields = chain.fields | carried_fields;
+  const u32 fields = chain.fields;
   // banjo-nx (2026-10-28, per-draw night): the predication is one of the viewport's inputs below (the viewport is all
   // that reads it); A/B 61's off half sends the draw the full way as before.
   if ((fields & kFieldPredication) && ab == 61)
@@ -11559,14 +11255,15 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   }
   // Pending memexport results: the draw may read none of their windows (DrawNeedsExportFlush's "none, and no read met
   // a window"), each kind of read kept while its inputs and the pending exports are the same (round 4).
-  // sasrt-nx (2026-11-20, sasrt_rt4_export_reads_fast; the third table's #34): with the key, the stream reads asked
-  // apart: a draw whose only export reads are vertex streams the host layout reads from windows found on the GPU (the
-  // 4P race's "export read" draws, 93 a frame to the full path) has them converted here as DrawStateLocked does
-  // (ConvertExportedStreamsLocked before the streams are bound); not for whole-buffer geometry (WholeGeometryLocked
-  // took copies: the full path does not convert those either). Fetch, index and texture reads go the full way as before.
+  // sasrt-nx (2026-11-20, sasrt_rt4_export_reads_fast; the third table's #34): the stream reads asked apart: a draw whose
+  // only export reads are vertex streams the host layout reads from windows found on the GPU has them converted here as
+  // DrawStateLocked does (ConvertExportedStreamsLocked before the streams are bound); not for whole-buffer geometry.
+  // Fetch, index and texture reads go the full way as before. banjo-nx (2026-11-21, the lean batch): A/B 305 (its off
+  // half as before); in the city it took ~6,300 draws a 10 s off the full path (FastExportReads and DrawStateLocked
+  // -0.24 us a draw in the c20 profile).
   bool export_streams = false;
   if (check_streams || check_fetch || check_index || check_textures) {
-    if (!sasrt::gpu_round::On(sasrt::gpu_round::kRt4ExportReadsFast)) {
+    if (banjo::renut_gpu::g_ab_off_plain == 305) {
       if (FastExportReads(device, call, *vs, *declaration, fetches, texture_mask, check_streams, check_fetch,
                           check_index, check_textures))
         return FastMiss(kFastExportRead);
@@ -11591,15 +11288,13 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
 #endif
   // sasrt-nx (2026-11-20, sasrt_rt4_export_reads_fast): the export windows' streams converted (their compute work and
   // barriers recorded now; the bound pipeline and framebuffer are forgotten by it, so the binds below are made again).
-  // banjo-nx (2026-11-21): one object on the render thread, set only for a draw with export streams (the only one that
-  // reads it, BindStreams' export call below): a GpuStreams a draw was ~320 bytes zeroed at every fast draw (the c20
-  // profile's memset +0.05 us a draw).
+  // banjo-nx (2026-11-21): one render-thread object, set only for a draw with export streams (a GpuStreams a draw was
+  // ~320 bytes zeroed at every fast draw).
   static GpuStreams export_gpu_streams;
   if (export_streams) {
     export_gpu_streams = GpuStreams{};
     if (!ConvertExportedStreamsLocked(s, device, call, *vs, shader_strides, *declaration, geometry, export_gpu_streams))
       return FastMiss(kFastExportRead);
-    sasrt::gpu_round::Count(sasrt::gpu_round::kRt4ExportReadsFast);
   }
   // From here the draw is the fast path's: the state below is this draw's.
   ++g_trace_draws;
@@ -11996,36 +11691,23 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
                                                                   : RenderStateIdLocked(f.rs, targets);
   const uint64_t prebuild_epoch = PrebuildEpochLocked();
   const u32 misc = call.primitive | u32(geometry.per_instance) << 8 | alpha_test_func << 9 | u32(ab_off) << 16;
+  const FetchSpec fetch_spec = FetchSpecWords(sc, *vs, geometry.per_instance, ab_off);  // banjo-nx (banjo_gpu_fetch_spec)
   const ShaderCacheEntry *const ps_entry = ps ? ps->entry : nullptr;
   // banjo-nx (2026-10-27, shadow sort): the key reads the shaders through their cache entries and the declaration
   // through its layout hash (MakeKey, BoolSpecMask), so another shader object of the same contents (N&B makes one per
   // mesh: a new address at 69 % of the shadow draws) keeps the key and the pipeline; compared with the key's own.
-  // banjo-nx (2026-11-20, batch #1, sasrt-nx's spec memo): the fetch spec (banjo_gpu_fetch_spec), the plain fetches
-  // (sasrt-nx; vivapinata-nx: vs), the clip bit (sasrt_gpu_clip_spec) and the third round's spec words, the draw
-  // before's when nothing they read changed (SasrtSpecAnswersOf).
-  SasrtSpecAnswers spec_answers;
-  SasrtSpecAnswersOf(sc, *vs, ps_entry, geometry.per_instance, ab_off, vs_constants, targets, spec_answers);
-  const FetchSpec &fetch_spec = spec_answers.fetch;
-  const u32 plain_fetches = spec_answers.plain;
-  const u32 clip_bit = spec_answers.clip;
-  const SasrtSpecWords &spec_words = spec_answers.words;
-  // sasrt-nx (2026-11-20, sasrt_rt4_spec_key_skip; the third table's #27): the spec answers are the memo's of the
-  // generation the kept key was last checked against, and no key was written since: its spec fields match them still.
-  const bool spec_known = g_spec_memo_hit && f.kp && f.kp == f.spec_ok_kp && f.spec_ok_gen == g_spec_memo_gen &&
-                          f.spec_ok_writes == g_sasrt_key_writes &&
-                          sasrt::gpu_round::On(sasrt::gpu_round::kRt4SpecKeySkip);
+  const u32 plain_fetches = SasrtPlainFetchMask(sc, ps_entry, vs->entry);  // sasrt-nx (2026-11-08); vivapinata-nx: vs
+  const u32 clip_bit = SasrtClipBit(sc);  // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec)
+  const SasrtSpecWords spec_words = SasrtSpecWordsOf(sc, vs->entry, ps_entry, &vs_constants, &targets);  // sasrt-nx (third round)
   const bool key_inputs = f.key_rs_epoch != f.rs_epoch || !f.pipeline || !f.kp || depth_only != f.depth_only ||
+                          std::memcmp(f.kp->sasrt_words, spec_words.w, sizeof(spec_words.w)) != 0 ||  // sasrt-nx
                           misc != f.key_misc || f.prebuild_epoch != prebuild_epoch ||
-                          (!spec_known &&
-                           (std::memcmp(f.kp->sasrt_words, spec_words.w, sizeof(spec_words.w)) != 0 ||  // sasrt-nx
-                            f.kp->fetch_pad != (f.kp->pixel_shader ? plain_fetches : 0u) ||
-                            (f.kp->reserved & 8u) != clip_bit ||  // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec)
-                            FetchSpecDiffers(*f.kp, fetch_spec))) ||  // banjo_gpu_fetch_spec; vivapinata-nx: every draw
+                          f.kp->fetch_pad != (f.kp->pixel_shader ? plain_fetches : 0u) ||
+                          (f.kp->reserved & 8u) != clip_bit ||  // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec)
                           ((shaders_changed || (fields & kFieldDecl)) &&
                            (vs->entry != f.kp->vertex_shader || ps_entry != f.kp->pixel_shader ||
-                            declaration->layout_hash != f.kp->layout_hash || ab_off == 41));  // A/B 41: as before
-  if (spec_known)
-    sasrt::gpu_round::Count(sasrt::gpu_round::kRt4SpecKeySkip);
+                            declaration->layout_hash != f.kp->layout_hash || ab_off == 41)) ||  // A/B 41: as before
+                          FetchSpecDiffers(*f.kp, fetch_spec);  // banjo_gpu_fetch_spec; vivapinata-nx (2026-11-12): every draw
   if (key_inputs) {
     // blur-nx (2026-11-18, the Renut host batch's #16, blur_renut_fast_pipeline_two_way / A/B 235): the entry and its
     // neighbour. An entry answers when it was made from this draw's inputs (same_inputs: all that MakeKey reads and the
@@ -12048,37 +11730,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     };
     FastPipeline *cp = &g_fast_pipelines[fp_index];
     bool hit = answers(*cp);
-    // sasrt-nx (2026-11-20, sasrt_rt4_pipeline_four_way; the third table's #24, the first's #17): the four entries of the
-    // index's aligned group (the 4P race: 4,516 conflicts a 10 s with two ways, each a MakeKey and GetPipelineLocked).
-    // The same choice as two ways: an entry that answers; else one made from this draw's inputs, else an empty one, else
-    // the one used longest ago.
-    if (!hit && ::renut::gpu::host_batch::On(::renut::gpu::host_batch::kPipelineTwoWay) &&
-        sasrt::gpu_round::On(sasrt::gpu_round::kRt4PipelineFourWay)) {
-      FastPipeline *victim = nullptr;
-      int victim_rank = -1;  // 3: same inputs, 2: empty, 1: older (by age)
-      uint32_t victim_age = 0;
-      for (u32 w = 0; w < 4; ++w) {
-        FastPipeline &e = g_fast_pipelines[(fp_index & ~3u) | w];
-        if (answers(e)) {
-          cp = &e;
-          hit = true;
-          break;
-        }
-        const int rank = same_inputs(e) ? 3 : !e.pipeline ? 2 : 1;
-        const uint32_t age = uint8_t(g_fast_pipeline_stamp - e.stamp);
-        if (rank > victim_rank || (rank == victim_rank && rank == 1 && age > victim_age)) {
-          victim = &e;
-          victim_rank = rank;
-          victim_age = age;
-        }
-      }
-      if (!hit) {
-        cp = victim;
-        sasrt::gpu_round::Count(sasrt::gpu_round::kRt4PipelineFourWay, 1, 1);  // a miss (the line's /n)
-      } else {
-        sasrt::gpu_round::Count(sasrt::gpu_round::kRt4PipelineFourWay);
-      }
-    } else if (!hit && ::renut::gpu::host_batch::On(::renut::gpu::host_batch::kPipelineTwoWay)) {
+    if (!hit && ::renut::gpu::host_batch::On(::renut::gpu::host_batch::kPipelineTwoWay)) {
       FastPipeline &other = g_fast_pipelines[fp_index ^ 1u];
       if (answers(other)) {
         cp = &other;
@@ -12111,7 +11763,6 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
       const bool keep_key = c.generation == g_fast_pipeline_generation && same_inputs(c) &&
                             ::renut::gpu::host_batch::On(::renut::gpu::host_batch::kProvisionalKey);
       if (!keep_key) {
-        ++g_sasrt_key_writes;  // sasrt-nx (2026-11-20, sasrt_rt4_spec_key_skip)
         c.key = MakeKey(device, vs, ps, declaration, targets, call.primitive, geometry.per_instance, sc.booleans,
                         sc.alpha_test_func, fetch_spec);
         c.key.fetch_pad = c.key.pixel_shader ? plain_fetches : 0u;  // sasrt-nx (2026-11-08, sasrt_gpu_plain_fetches)
@@ -12150,22 +11801,12 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
       if (logged++ < 8)
         RGPU_WARN("banjo_renut_fast_draw_verify: the kept or cached pipeline {} differs from the one made (VS {:016X})",
                   std::memcmp(&key, f.kp, sizeof(key)) != 0 ? "key" : "", vs->hash);
-      ++g_sasrt_key_writes;  // sasrt-nx (2026-11-20, sasrt_rt4_spec_key_skip)
       f.key = key;
       f.kp = &f.key;
       f.kp_hot = KeyHot::Of(key);
       f.blend_used = true;
       f.pipeline = made;
     }
-  }
-  // sasrt-nx (2026-11-20, sasrt_rt4_spec_key_skip): the kept key now matches this draw's spec answers (compared, or
-  // found or made with them); known for the next draw when they are the memo's.
-  if (g_spec_memo_hit || g_spec_memo_stored) {
-    f.spec_ok_kp = f.kp;
-    f.spec_ok_gen = g_spec_memo_gen;
-    f.spec_ok_writes = g_sasrt_key_writes;
-  } else {
-    f.spec_ok_kp = nullptr;
   }
   plume::RenderPipeline *pipeline = f.pipeline;
   if (!pipeline)
@@ -12188,32 +11829,8 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   // frame; a carry draws with its own framebuffer and resets g_bound, so the targets are bound again below.
   if (EdramCarryOn()) [[unlikely]]
     CarryEdramBeforeDrawLocked(targets);
-  // sasrt-nx (2026-11-20, sasrt_rt2_bind_layout_narrow; the second render-thread round's #14): a layout change somewhere
-  // since the last bind (g_layout_epoch moves at every transition: a texture made readable, any target) binds the targets
-  // again only when this draw's own targets are not all in the layouts BindTargets would leave them in, or hold
-  // something BindTargets does first (a pending restore copy, a hand-over); else nothing it does would change anything.
-  const auto layouts_hold = [&] {
-    if (!sasrt::gpu_round::On(sasrt::gpu_round::kRt2BindLayoutNarrow) || gpu_profile::Timed())
-      return false;
-    for (u32 i = 0; i < targets.color_count; ++i) {
-      const HostSurface *c = targets.colors[i];
-      if (c->layout != plume::RenderTextureLayout::COLOR_WRITE || c->handed)  // (sasrt-nx: || its restore copy)
-        return false;
-    }
-    if (const HostSurface *d = targets.depth) {
-      if (d->handed)
-        return false;
-      if (d->layout != plume::RenderTextureLayout::DEPTH_WRITE &&
-          (fast_depth_writes || d->layout != plume::RenderTextureLayout::SHADER_READ ||
-           !banjo::renut_gpu::DepthReadLayoutOn()))
-        return false;
-    }
-    sasrt::gpu_round::Count(sasrt::gpu_round::kRt2BindLayoutNarrow);
-    f.bind_layout_epoch = g_layout_epoch;
-    return true;
-  };
   if (targets_changed || !g_bound.framebuffer || g_bound.framebuffer != f.bound_framebuffer ||
-      (f.bind_layout_epoch != g_layout_epoch && !layouts_hold()) || f.framebuffer_epoch != FramebufferEpochLocked() ||
+      f.bind_layout_epoch != g_layout_epoch || f.framebuffer_epoch != FramebufferEpochLocked() ||
       (targets.depth && targets.depth->handed && (fast_depth_writes || !banjo::renut_gpu::DepthHandOverReadOnlyOn())) ||
       // kameo-nx (2026-11-03, banjo_deko3d_depth_read_layout): a draw that writes a depth target left in the read layout.
       (fast_depth_writes && targets.depth && targets.depth->layout != plume::RenderTextureLayout::DEPTH_WRITE) ||
@@ -12260,11 +11877,9 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   // round's #31): not called when the bias set is still bound and none of the packets it reads changed since the draw
   // before in the chain (its mode control in the view packets, its words in the point packet, kFieldMisc, the depth
   // info in the destination packet): it would read three cold lines of the snapshot to set what is set.
-  if (!(g_bound.depth_bias_set && !(fields & (kFieldDest | kFieldViewPackets | kFieldMisc)) &&
-        sasrt::gpu_round::On(sasrt::gpu_round::kRt3DepthBiasFields)))
+  // banjo-nx (2026-11-21, the lean batch): its round measured -1.0 % a draw in N&B's city A/B; A/B 302 here.
+  if (!(g_bound.depth_bias_set && !(fields & (kFieldDest | kFieldViewPackets | kFieldMisc)) && banjo::renut_gpu::g_ab_off_plain != 302))
     SetDrawDepthBias(cmd, dev);
-  else
-    sasrt::gpu_round::Count(sasrt::gpu_round::kRt3DepthBiasFields);
   float blend_constant[4];
   if (f.blend_used && DrawBlendConstant(dev, *f.kp, blend_constant) &&
       !(g_bound.blend_constant_set && SameBytes<sizeof(blend_constant)>(blend_constant, g_bound.blend_constant))) {
@@ -12292,9 +11907,8 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     g_bound.shared_words_set = true;
   }
 #endif
-  // banjo-nx (2026-11-21): the common call with the constant empty streams, the export streams' call apart: with one call
-  // passing the runtime value LTO kept no specialised copy of BindStreams for the fast path (ef5fe0f4: one 14 KB
-  // BindStreams at every fast draw, against 5d1c60e9's 6 KB constprop copy).
+  // banjo-nx (2026-11-21): the export streams' call apart, so the common call keeps the constant empty streams (one call
+  // with the runtime value left LTO no specialised copy of BindStreams for the fast path: one 14 KB copy at every draw).
   if (whole ? !BindWholeStreams(declaration->layout, whole_copies, base_draw ? 0u : geometry.whole_base)
             : export_streams ? !BindStreams(device, call, *vs, shader_strides, declaration->layout,
                                             declaration->layout_hash, geometry, export_gpu_streams, nullptr)
@@ -12441,7 +12055,6 @@ void StoreFastStateLocked(const DrawCall &call, ShaderRecord *vs, ShaderRecord *
   g_last_draw_kind = DrawKindOf(targets, depth_only ? nullptr : device_ps);  // banjo-nx (2026-10-27): the census's
   g_last_draw_fields = g_chain_hint.fields;
   g_last_draw_fast = false;
-  g_chain_carry_fields = 0;  // sasrt-nx (2026-11-20, sasrt_rt4_inert_keeps_chain): a new chain from this draw
   f.valid = usable;
   if (!usable)
     return;
@@ -12475,7 +12088,6 @@ void StoreFastStateLocked(const DrawCall &call, ShaderRecord *vs, ShaderRecord *
   f.textures_valid = false;  // the next draw fills its slots (the words and transitions are DrawStateLocked's)
   f.texture_mask = texture_mask;
   (void)fetches;
-  ++g_sasrt_key_writes;  // sasrt-nx (2026-11-20, sasrt_rt4_spec_key_skip)
   f.key = key;
   f.kp = &f.key;  // banjo-nx (2026-10-27)
   f.kp_hot = KeyHot::Of(key);  // banjo-nx (2026-10-28)
@@ -13132,10 +12744,8 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     ReadDrawStateKeys();
   {  // sasrt-nx (2026-11-11, port 82; its GPU list's row 4; UNTESTED), sasrt_gpu_skip_cull_both: before everything else
     const bool cull_both = g_ds_keys.cull_both;
-    if (cull_both && SasrtCullBothLocked(device_state, call)) [[unlikely]] {
-      SasrtKeepChainOverSkipped();  // sasrt-nx (2026-11-20, sasrt_rt4_inert_keeps_chain)
+    if (cull_both && SasrtCullBothLocked(device_state, call)) [[unlikely]]
       return true;
-    }
   }
   // sasrt-nx (2026-11-08, sasrt_gpu_skip_inert_draws): before the fast path and the targets (SasrtInertDrawLocked). The
   // chain's next draw then finds no kept state of this one (its sequence number is not the last kept + 1): the full path.
@@ -13144,7 +12754,6 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     const u32 dc = inert_device.valid() ? u32(inert_device.dev().m_ControlPacket.DepthControl) : 6u;
     if ((dc & 6) != 6 && SasrtInertDrawLocked(device_state)) [[unlikely]] {
       sasrt::gpu_round::Count(sasrt::gpu_round::kInertDraws);
-      SasrtKeepChainOverSkipped();  // sasrt-nx (2026-11-20, sasrt_rt4_inert_keeps_chain)
       return true;
     }
   }
@@ -15020,13 +14629,6 @@ void DropReplacedRanges() {
   if (!over_limit && g_stream_cache_frame % kWholeReplacePeriod &&
       banjo::renut_gpu::g_ab_off_plain != 54)
     return;  // banjo-nx (2026-10-28): kWholeReplacePeriod (A/B 54: every frame, as before)
-  // sasrt-nx (2026-11-20, sasrt_rt2_drop_throttle): over the limit, every 4th frame (the 4-player race sat over it).
-  if (over_limit && g_stream_cache_frame % 4u != 0 && sasrt::gpu_round::On(sasrt::gpu_round::kRt2DropThrottle)) {
-    sasrt::gpu_round::Count(sasrt::gpu_round::kRt2DropThrottle);
-    return;
-  }
-  if (over_limit)
-    sasrt::gpu_round::Count(sasrt::gpu_round::kRt2DropThrottle, 1, 1);  // passes over the limit (the line's /n)
   const auto ready = std::find_if(g_whole_spans.begin(), g_whole_spans.end(), [](const WholeSpan &w) {
     return g_stream_cache_frame - w.frame < kWholeReplaceFrames;
   });
@@ -15220,21 +14822,13 @@ void AdvanceStreamCacheFrameLocked() {
   DropReplacedRanges();
   // sasrt-nx (2026-10-21, sasrt_renut_exports_held): kept exports four frames old go (a game exporting its skinned meshes every
   // frame, in two buffers by turns).
-  bool held_dropped = false;  // banjo-nx (2026-11-20, batch #7)
   for (auto it = g_held_exports.begin(); it != g_held_exports.end();) {
     if (g_stream_cache_frame - it->second.frame > 4) {
       g_held_retired.push_back(std::move(it->second.data));
       it = g_held_exports.erase(it);
-      held_dropped = true;
     } else {
       ++it;
     }
-  }
-  if (held_dropped) {  // the granules made again from what is kept (a few entries, once a frame at most)
-    std::fill(std::begin(g_held_granules), std::end(g_held_granules), 0ull);
-    for (const auto &[base, h] : g_held_exports)
-      if (h.data && !h.data->empty())
-        HeldGranulesMark(base, u32(h.data->size()));
   }
   if (g_held_reads && banjo::renut_gpu::ExportsHeldOn() && g_stream_cache_frame % 300 == 0) {
     RGPU_INFO("[renut] vertex streams read from kept export results (sasrt_renut_exports_held): {} in 300 frames; {} kept",
