@@ -434,3 +434,31 @@ to the draw's later reads of the same line. 38: command memory is 64 KB blocks a
 The rest (14, 23-26, 30-37, 41, 44) are 0.01-0.03 us each on paper and touch the record/replay format; left for after
 this measurement. memcpy (0.37 us, exp 45): its callers cannot be read from the stacks (a leaf without a frame record
 is folded into its caller; scratchpad leaf_callers.py decodes the BL before each return address).
+
+### The batch's second commit (6a8d3760): all of sasrt-nx's rounds 2-4, items 14 and 31
+
+The user: "44 in the batch plus as many experiments as possible and all of sasrt's". sasrt-nx's 26 render-thread items
+(its handoff docs/handoff/rt_rounds_1120) are a second table in sasrt_gpu_round.{h,cpp} with its keys, defaults and A/B
+numbers (339 + i; 401/402/403 a round at once; our first table keeps the base's 90 + i). The eight items of a390d9b2
+moved back under their keys (their temporary A/B 302-309 are gone; 300 and 301 remain mine). In with its code:
+drop_throttle, color_alias_memo, readable_memo (the SDK's rex::memory::g_page_access_generation in xmemory.cpp, declared
+in draw.cpp only; N&B's readable check is off, so it never runs here), bind_layout_narrow (no restore-copy term: N&B
+has no EDRAM depth restore), texture_memo_two_way, surface_memo_256, state_id_crc, spec_key_skip, ring_lock_once,
+inert_keeps_chain, and off as sasrt-nx ships them: pipeline_four_way, stream_memo_two_way; plus the menus' flash fix
+(sasrt_resolve_alias_previous). Nothing in N&B's code for: slot_index and words_owner_table (sasrt-nx's copy-back and
+restore lookups), place_wait_unlocked and place_spin (split-screen places), host_packets_split (split views),
+repeat_recorded_index (no ReplayIndexBuffer here; WholeGeometryTry and WholeRepeatHit both read the live header);
+round 1's later view_surface_memo and words_owner_memo likewise (no EDRAM views in GetHostSurfaceLocked).
+
+Batch #31 was not a bind: "1,005,954 binds of a depth resolve's float target" is CountDepthFloatSampled, a call into
+banjo_renut_tuning.cpp from every texture memo answer; it and CountDepthWords are inline and skipped with logs off.
+#14: TextureFetch::FromGuest in two NEON loads and reversals. Also checked and already so in the code: 24 (ApplyState
+applies the op's dirty chunks only), 25 (the fetch pool keeps each buffer's copy across draws and kicks), 26
+(g_last_stream_sources), 35 (CachedIndices per buffer), 36 (FetchSpecWords is a few loads; the spec memo skips it),
+41 (SetViewport writes only changes). Left: 23, 30, 32-34, 37, 44 (per command buffer or per frame, or plume's
+recording format; under 0.02 us each on paper).
+
+Experiments in this NRO (toml keys, off unless said): banjo_renut_ring_spin_us (#58); sasrt_rt4_pipeline_four_way,
+sasrt_rt4_stream_memo_two_way; existing keys that are the table's experiments: banjo_renut_upload_cached (#56),
+banjo_deko3d_kick_submit (#46), banjo_renut_core_layout (#60, hung before). The build-flag experiments (#47 cold split,
+#52 -O2, #57 alignment, #62 one LTO partition, #63 partial training) each need their own NRO.
