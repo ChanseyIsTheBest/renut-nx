@@ -517,3 +517,15 @@ items moves N&B's draw stream too (likely the colour-alias memo, also a resolve 
 So: per-draw comparisons between builds whose draw counts differ were confounded all night; the c18 in-run A/B
 (same draws in both halves) stands. The lean batch equals 5d1c60e9 (24.06 / 23.97 fps). Against 1.0.2 (26.5 fps): the
 GPU (32.4 vs 32.7 ms) and draws a frame (4,825 vs 4,854) now match; the render thread a draw (8.57 vs 7.55) is the gap.
+
+### The lean batch against 1.0.2, by source function (c27 vs c11, both 1 ms sampled, --from 260)
+
+8.19 against 7.29 us a draw. Lean ahead in FastDrawLocked (-0.18) and Replay + PrefetchShaderBehind (about even).
+The rest is mostly what 1.0.2 does not have: the base's spec words (SasrtSpecWordsOf + SasrtPlainFetchMask +0.16:
+shader specialisation, a GPU saving), plume's vertex input mask (bindVertexInput +0.06), the tracked texture
+invalidation (markSampled +0.05), bindGraphicsBuffers +0.05, the GPU round's On() checks +0.04, memexport binds
++0.04; the report counters +0.12 with logs on (0 in the release: they follow log_level); memcpy +0.13 (copy volumes
+a draw the same as 1.0.2's in the logs: callers not found). GPU a frame now equals 1.0.2's (32.4 vs 32.7 ms).
+In-run A/B of the GPU round items that change no shader variant (c28; 6 s halves, render us a draw on vs off):
+122 vertex input mask +0.6 % (fps -1.1 %), 132 +0.2 %, 133 -0.2 %, 134 -0.2 %: noise; defaults unchanged.
+The spec-word items cannot be A/B'd cleanly (their off half needs other shader variants than the cache holds).
