@@ -546,3 +546,16 @@ Per draw, low state: lean2 8.50, 5d1c60e9 8.48-8.54, 1.0.2 7.55; high state: lea
 Correction to "the draws-a-frame puzzle solved" above: with sasrt_resolve_alias_previous on N&B landed in the high
 state 5 of 5 times and off low 2 of 2, but the level is a per-run choice the counters' switch can flip too: the fix is
 strongly associated with the high state, not proven to cause it directly. Off for N&B either way.
+
+### SOLVED (06:45): the "draw level" is Showdown Town's day/night cycle
+
+Screenshots of two runs of lean2 back to back: night (c31, 4,854 draws a frame, 24.22 fps) and DAY with "Saving
+content" (c32, 5,107). The town's time of day runs on across runs through the autosave on arriving, so consecutive
+runs alternate day and night; daytime draws 5,100-5,630 a frame (more replayed and immediate draws: likely the sun's
+shadow passes), night ~4,850. Every "high" run was a daytime run: the alias fix, the counters switch and sampling are
+cleared (the earlier sections on them are wrong; sasrt_resolve_alias_previous stays off for N&B only because N&B
+does not need SASRT's menu fix and 1.0.2 did not have it). Regrouped, per draw:
+night: 1.0.2 7.55; 5d1c60e9 8.48 / 8.54 / 8.53; lean 8.57, lean A/B 8.45, lean2 8.50 / 8.48 -> lean = 5d1c60e9.
+day: b44 9.17 / 9.40 / 9.10, round 2 9.67 / 9.42 (alias off); lean 8.24, lean2 8.26 / 8.58 -> the full sasrt set
+cost ~1 us a draw by day; the lean batch was the right call. No daytime run of 5d1c60e9 or 1.0.2 exists to compare.
+Method from now: note day/night (a screenshot at ~300 s) and compare runs of the same time of day.
