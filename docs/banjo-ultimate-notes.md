@@ -559,3 +559,6 @@ night: 1.0.2 7.55; 5d1c60e9 8.48 / 8.54 / 8.53; lean 8.57, lean A/B 8.45, lean2 
 day: b44 9.17 / 9.40 / 9.10, round 2 9.67 / 9.42 (alias off); lean 8.24, lean2 8.26 / 8.58 -> the full sasrt set
 cost ~1 us a draw by day; the lean batch was the right call. No daytime run of 5d1c60e9 or 1.0.2 exists to compare.
 Method from now: note day/night (a screenshot at ~300 s) and compare runs of the same time of day.
+Daytime 5d1c60e9 (c33, screenshot: late-afternoon light): 22.87 fps, 5,242 draws a frame, 8.30 us a draw. Daytime
+lean / lean2: 8.24, 8.26, 8.58 us; full batch b44: 9.17, 9.10. So the lean batch equals 5d1c60e9 by day and by night,
+and sasrt-nx's full rounds 2-4 set cost ~10 % a draw in N&B. Against 1.0.2 (night 7.55) the lean build is +12.6 %.
