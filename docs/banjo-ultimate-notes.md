@@ -325,3 +325,13 @@ tools/profile_per_draw.py (second version) lines the profile's windows up with t
 first version counted lines, and its draws were the "specialised bools: N draws" count at each line's end). On the
 sampled runs of the night: last night's build (no PGO) 16.0 us of render-thread user code a draw, 1.0.2 8.0 us, the
 same scene (1,230 and 1,390 draws a frame).
+
+**The console, 2026-11-20 12:14 (block 6: the cap's second build 845d01fb, the card's cache = v5 with block 4's 74
+compiles appended, A/B 151 alone with 10 s halves, 12.4 minutes).** The cap holds: 49 compiles of 1.27 s on average
+(62 s of compiling in 740 s, about 8 % of core 3), 540.9 s of rests, 15 in the background and 34 the prebuild waited
+for, none a draw waited for; the uam thread 5.9 % of core 3 over the last 10 minutes (blocks 3 and 4: 26 % and 20 %).
+No stall, no fence timeout. The attract loop showed other content this time (the vehicle demo, "RETURN TO GARAGE",
+and quiet stretches of 15 draws a frame instead of 150): mostly a locked 30 fps, the render thread 6.4-6.8 us a draw
+and the GPU 11-16, all threads 101 % of 400. Those figures are of a lighter scene and do not compare with blocks 3-5.
+A/B 151 (tools/ab_halves.py --pairs, 8 heavy pairs): the off half (no early alpha test) GPU -1.4 %, render thread
+-2.0 %: noise, so vivapinata_shader_noearly stays false.
