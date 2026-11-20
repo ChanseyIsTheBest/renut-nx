@@ -1147,6 +1147,7 @@ const char *AbName(int target) {
   // vivapinata-nx (2026-11-12, port 115; its number).
   case 170: return "FillTextures: a call not asking same_as_last skips the per-slot compare; slot-last answers skip the epoch buckets while g_texture_bind_gen holds (banjo-nx 2026-11-20; the base's port 242-249 number)";
   case 171: return "Replay: PrefetchShaderBehind skipped for a stage whose shader word is the last op's (banjo-nx 2026-11-20; the base's number)";
+  case 172: return "the fast path's spec answers (fetch spec, plain fetches, clip bit, sasrt words) kept while their inputs hold (banjo-nx 2026-11-21)";
   case 156: return "depth resolves nothing has read left out until something does (vivapinata_depth_resolve_skip_unread; NOT exact in principle; off half: drawn)";
   case 152: return "the pixel shaders' alpha test moved up ahead of the colour arithmetic, constant 977 = 1 (vivapinata_shader_earlykill; off half: the test last)";
   case 151: return "the pixel shaders without Renut's early alpha test, constant 976 = 0 (vivapinata_shader_noearly; off half: the test as before)";

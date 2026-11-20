@@ -293,12 +293,16 @@ REXCVAR_DEFINE_BOOL(sasrt_gpu_convert_tail_no_texture_drop, true, "SASRT/GPU",
                     "frames ago, and every queue flush since dropped the texture and L2 caches (deko3d's postSubmitFlush). "
                     "The wait itself (all 3D work done, the stream in L2) stays. Same bytes read: same pixels")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(sasrt_gpu_vs_input_mask, true, "SASRT/GPU",
+// banjo-nx (2026-11-21): off for N&B: two in-run A/Bs of 122 in Showdown Town (console c28, c34) had it on worse (render
+// thread +0.6 % and +0.8 % a frame, fps -1.1 % and -0.8 %, GPU +0.3 %): the per-draw mask costs more CPU than the
+// attribute fetches it saves on the GPU here.
+REXCVAR_DEFINE_BOOL(sasrt_gpu_vs_input_mask, false, "SASRT/GPU",
                     "deko3d renderer (third GPU round, item 32, A/B 122): a pipeline's vertex attributes that the bound "
                     "vertex shader variant never reads (its shader program header's input map, read from the DKSH at load: "
                     "the outputs a pixel shader does not read, constant 905, take their inputs out with them) are bound as "
                     "constants, which the vertex attribute fetch does not read from memory. The shader reads the same "
-                    "attributes as before: same pixels")
+                    "attributes as before: same pixels. Off in banjo-nx (two A/Bs: on cost the render thread more than "
+                    "it saved the GPU)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(sasrt_gpu_export_no_pixel_shader, true, "SASRT/GPU",
                     "deko3d renderer (third GPU round, item 33, A/B 123; with sasrt_gpu_export_raster_discard): an "

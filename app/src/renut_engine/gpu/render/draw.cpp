@@ -3827,6 +3827,9 @@ constexpr u32 kSharedLines = (u32(sizeof(SharedConstants)) + 63) / 64;
 constexpr u32 kAllSharedLines = (1u << kSharedLines) - 1;
 static_assert(kSharedLines == 25);  // halo3-nx: 22 before the loop constants (24); renut-ultimate: the clip planes; the tail, bit 24, is still 16 bytes
 u32 g_sc_dirty = kAllSharedLines;
+// banjo-nx (2026-11-21, the spec answers kept): the lines of g_draw_sc written with a new value since the fast path last
+// made its spec answers (every push adds g_sc_dirty; a push of another block, all lines). FastDrawLocked clears it.
+u32 g_spec_lines_seen = ~0u;
 // banjo-nx (2026-10-28, per-draw night): the lines from the first to the last as one mask (a loop a line before, run at
 // every mark the compiler could not fold: FillTextures' slot words, the fields of a block passed by reference).
 constexpr u32 SharedLinesOf(size_t offset, size_t size) {
@@ -3909,7 +3912,9 @@ void PushSharedConstants(plume::RenderCommandList *cmd, const SharedConstants &s
   // banjo-nx (2026-10-26, API-level stage 1): the persistent block's lines are known: those written with a new value
   // since its last push (g_sc_dirty), the held copy being the block in every other line.
   const bool tracked = &sc == &g_draw_sc;
+  g_spec_lines_seen |= tracked ? g_sc_dirty : ~0u;  // banjo-nx (2026-11-21): the spec answers kept
   if (!g_bound.pushed_shared_valid) {
+    g_spec_lines_seen = ~0u;  // banjo-nx (2026-11-21): a whole push does not need the marks, so trust none
     DiagPushLines(0, kSharedLines);  // banjo-nx (2026-10-28, diagnostic)
     plume::Deko3DPushUniform(cmd, ubo, kSize, 0, now, kSize);
     std::memcpy(held, now, kSize);
@@ -7720,6 +7725,38 @@ struct SasrtSpecWords {
   u32 w[20];  // sasrt-nx (2026-11-09, the fifth round): [12]-[19] constants 950-973
 };
 static_assert(sizeof(SasrtSpecWords::w) == sizeof(PipelineKey::sasrt_words));
+// banjo-nx (2026-11-21, the user's "make the spec words cheaper"; A/B 172): the spec answers of the draw that made them
+// (FetchSpecWords, SasrtPlainFetchMask, SasrtClipBit, SasrtSpecWordsOf: ~0.15 us a draw in the c27 profile, made at
+// every fast draw), kept while all they read is the same: these lines of the persistent shared constants (no write
+// with a new value since: g_spec_lines_seen), both shaders' entries and the vertex shader record's bound_fetches (all
+// FetchSpecWords reads of it: N&B makes a record a mesh, so not its address), instancing, the A/B word
+// (every On() and A/B check they make follows it) and the targets' colour info words (the 7e3 clamp). Not for a
+// memexport vertex shader (its words read the float constants). Exact; banjo_renut_fast_draw_verify recomputes them.
+constexpr u32 kSpecLines =
+    SharedLinesOf(offsetof(SharedConstants, texture_indices), sizeof(SharedConstants::texture_indices)) |
+    SharedLinesOf(offsetof(SharedConstants, sampler_indices), sizeof(SharedConstants::sampler_indices)) |
+    SharedLinesOf(offsetof(SharedConstants, vertex_fetch_slots), sizeof(SharedConstants::vertex_fetch_slots)) |
+    SharedLinesOf(offsetof(SharedConstants, screen_space), sizeof(SharedConstants::screen_space)) |
+    SharedLinesOf(offsetof(SharedConstants, depth_remap), sizeof(SharedConstants::depth_remap)) |
+    SharedLinesOf(offsetof(SharedConstants, resolution_scale), sizeof(SharedConstants::resolution_scale)) |
+    SharedLinesOf(offsetof(SharedConstants, user_clip_planes), sizeof(SharedConstants::user_clip_planes)) |
+    SharedLinesOf(offsetof(SharedConstants, tessellation), sizeof(SharedConstants::tessellation)) |
+    SharedLinesOf(offsetof(SharedConstants, bound_fetch), sizeof(SharedConstants::bound_fetch));
+struct SpecKeep {
+  bool valid = false;
+  const ShaderCacheEntry *vs_entry = nullptr, *ps_entry = nullptr;
+  bool bound_fetches = false;
+  bool per_instance = false;
+  int ab = 0;
+  u32 color_count = 0;
+  u32 color_info[4] = {};
+  FetchSpec fetch{};
+  u32 plain = 0, clip = 0;
+  SasrtSpecWords words{};
+};
+SpecKeep g_spec_keep;
+uint64_t g_spec_kept = 0, g_spec_made = 0, g_spec_verify_differ = 0;
+void ForgetSpecKeepLocked() { g_spec_keep.valid = false; }
 // sasrt-nx (2026-11-08, sasrt_gpu_export_format_spec): [8]-[11] (cold: export shaders only).
 [[gnu::noinline]] void SasrtExportFormatWords(SasrtSpecWords &s, const ShaderCacheEntry &vs, const FloatConstants &vsc) {
   u32 n = 0;
@@ -10684,6 +10721,7 @@ void ForgetBoundTargetsLocked() {
 }
 
 void InvalidateFastDrawLocked() {
+  ForgetSpecKeepLocked();
   g_fast.valid = false;
   ++g_fast_pipeline_generation;
   ++g_packet_epoch;  // banjo-nx (2026-10-28, host packets)
@@ -10696,6 +10734,7 @@ void InvalidateFastDrawLocked() {
 // Every record a frame destroyed cleared both (N&B makes and drops shader objects with its meshes): the next draws took
 // the full path and made their pipeline keys again.
 void InvalidateFastDrawForRecordLocked(const void *record) {
+  ForgetSpecKeepLocked();  // banjo-nx (2026-11-21): the kept spec answers read the vertex shader record's summary
   if (g_fast.vs == record || g_fast.ps == record || g_fast.declaration == record)
     g_fast.valid = false;
   for (LastStreamSource &l : g_last_stream_sources)
@@ -11691,14 +11730,56 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
                                                                   : RenderStateIdLocked(f.rs, targets);
   const uint64_t prebuild_epoch = PrebuildEpochLocked();
   const u32 misc = call.primitive | u32(geometry.per_instance) << 8 | alpha_test_func << 9 | u32(ab_off) << 16;
-  const FetchSpec fetch_spec = FetchSpecWords(sc, *vs, geometry.per_instance, ab_off);  // banjo-nx (banjo_gpu_fetch_spec)
   const ShaderCacheEntry *const ps_entry = ps ? ps->entry : nullptr;
+  // banjo-nx (2026-11-21, A/B 172): the spec answers kept (SpecKeep) or made.
+  SpecKeep &sk = g_spec_keep;
+  const u32 sk_colors = std::min<u32>(targets.color_count, 4u);
+  const bool sk_cacheable = !(vs->entry && vs->entry->memExportConstants[0]) && ab_off != 172;
+  const bool sk_bound = DrawSummaryOf(*vs).bound_fetches;
+  bool sk_hit = sk_cacheable && sk.valid && (g_spec_lines_seen & kSpecLines) == 0 && sk.bound_fetches == sk_bound &&
+                sk.vs_entry == vs->entry && sk.ps_entry == ps_entry && sk.per_instance == geometry.per_instance &&
+                sk.ab == ab_off && sk.color_count == targets.color_count;
+  for (u32 i = 0; i < sk_colors && sk_hit; ++i)
+    sk_hit = sk.color_info[i] == (targets.colors[i] ? targets.colors[i]->color_info_word : 0u);
+  if (sk_hit && verify) [[unlikely]] {
+    const FetchSpec vf = FetchSpecWords(sc, *vs, geometry.per_instance, ab_off);
+    const SasrtSpecWords vw = SasrtSpecWordsOf(sc, vs->entry, ps_entry, &vs_constants, &targets);
+    if (vf.kind != sk.fetch.kind || std::memcmp(vf.types, sk.fetch.types, sizeof(vf.types)) != 0 ||
+        SasrtPlainFetchMask(sc, ps_entry, vs->entry) != sk.plain || SasrtClipBit(sc) != sk.clip ||
+        std::memcmp(vw.w, sk.words.w, sizeof(vw.w)) != 0) {
+      ++g_spec_verify_differ;
+      static uint32_t logged = 0;
+      if (logged++ < 16)
+        RGPU_WARN("banjo_renut_fast_draw_verify: the kept spec answers differ from the draw's (made again)");
+      sk_hit = false;
+    }
+  }
+  if (sk_hit) {
+    ++g_spec_kept;
+  } else {
+    ++g_spec_made;
+    sk.fetch = FetchSpecWords(sc, *vs, geometry.per_instance, ab_off);  // banjo-nx (banjo_gpu_fetch_spec)
+    sk.plain = SasrtPlainFetchMask(sc, ps_entry, vs->entry);  // sasrt-nx (2026-11-08); vivapinata-nx: vs
+    sk.clip = SasrtClipBit(sc);  // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec)
+    sk.words = SasrtSpecWordsOf(sc, vs->entry, ps_entry, &vs_constants, &targets);  // sasrt-nx (third round)
+    sk.valid = sk_cacheable;
+    sk.bound_fetches = sk_bound;
+    sk.vs_entry = vs->entry;
+    sk.ps_entry = ps_entry;
+    sk.per_instance = geometry.per_instance;
+    sk.ab = ab_off;
+    sk.color_count = targets.color_count;
+    for (u32 i = 0; i < 4; ++i)
+      sk.color_info[i] = i < sk_colors && targets.colors[i] ? targets.colors[i]->color_info_word : 0u;
+    g_spec_lines_seen = 0;
+  }
+  const FetchSpec &fetch_spec = sk.fetch;
   // banjo-nx (2026-10-27, shadow sort): the key reads the shaders through their cache entries and the declaration
   // through its layout hash (MakeKey, BoolSpecMask), so another shader object of the same contents (N&B makes one per
   // mesh: a new address at 69 % of the shadow draws) keeps the key and the pipeline; compared with the key's own.
-  const u32 plain_fetches = SasrtPlainFetchMask(sc, ps_entry, vs->entry);  // sasrt-nx (2026-11-08); vivapinata-nx: vs
-  const u32 clip_bit = SasrtClipBit(sc);  // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec)
-  const SasrtSpecWords spec_words = SasrtSpecWordsOf(sc, vs->entry, ps_entry, &vs_constants, &targets);  // sasrt-nx (third round)
+  const u32 plain_fetches = sk.plain;  // sasrt-nx (2026-11-08); vivapinata-nx: vs (kept or made above)
+  const u32 clip_bit = sk.clip;  // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec)
+  const SasrtSpecWords &spec_words = sk.words;  // sasrt-nx (third round)
   const bool key_inputs = f.key_rs_epoch != f.rs_epoch || !f.pipeline || !f.kp || depth_only != f.depth_only ||
                           std::memcmp(f.kp->sasrt_words, spec_words.w, sizeof(spec_words.w)) != 0 ||  // sasrt-nx
                           misc != f.key_misc || f.prebuild_epoch != prebuild_epoch ||
@@ -12452,6 +12533,10 @@ std::string FastDrawReport() {
     out += fmt::format(" host packets (banjo_renut_host_packets): {} found, {} not, {} stale, {} made,",
                        std::exchange(g_packet_hits, 0), std::exchange(g_packet_misses, 0),
                        std::exchange(g_packet_stale, 0), std::exchange(g_packet_made, 0));
+  // banjo-nx (2026-11-21): the spec answers kept (A/B 172)
+  out += fmt::format(" spec answers kept {} of {}{},", g_spec_kept, g_spec_kept + g_spec_made,
+                     g_spec_verify_differ ? fmt::format(" (verify: {} differ)", g_spec_verify_differ) : std::string());
+  g_spec_kept = g_spec_made = 0;
   return out;
 }
 
