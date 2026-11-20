@@ -462,3 +462,20 @@ Experiments in this NRO (toml keys, off unless said): banjo_renut_ring_spin_us (
 sasrt_rt4_stream_memo_two_way; existing keys that are the table's experiments: banjo_renut_upload_cached (#56),
 banjo_deko3d_kick_submit (#46), banjo_renut_core_layout (#60, hung before). The build-flag experiments (#47 cold split,
 #52 -O2, #57 alignment, #62 one LTO partition, #63 partial training) each need their own NRO.
+
+### The batch on the console (2026-11-21 01:05-01:40, NRO ef5fe0f4, PGO retrained in the city)
+
+| Run | fps | render a frame | draws a frame | render a draw | GPU a frame |
+|---|---|---|---|---|---|
+| c16 batch ef5fe0f4 | 19.28 | 51.6 ms | 5,627 | 9.17 us | 35.5 ms |
+| c17 5d1c60e9 (bracket, right after) | 24.26 | 41.1 ms | 4,842 | 8.48 us | 32.4 ms |
+| c18 batch, A/B run (four-way on in the "on" halves) | 20.15 | 49.4 ms | 5,256 | 9.40 us | 34.2 ms |
+
+The batch was ~10 % SLOWER a draw. Draws a frame differ run to run (4,842-5,627): the game autosaves on reaching
+Showdown Town ("Saving content"), so every run moves the save on (day/night, NPCs); compare per draw, or in-run A/B.
+In-run A/B (6 s halves, --pairs, render us a draw, on vs off): 300 -0.9 %, 301 -0.5 %, 401 (sasrt rt2) +0.7 %,
+402 (rt3) -1.0 %, 403 (rt4) +1.1 %, 359 four-way +1.5 % (keep off): all within about 1 %, so not the regression.
+CAUSE (log): item 22, sasrt_ring_cleaner_take_over false: the render thread cleaned 0 ranges itself (500 a 10 s
+before) and WAITED instead (done_cv_) for the cleaner thread, which runs at the lowest priority on the system core.
+The audit's "waits instead of re-cleaning" was wrong: the clean is cheap, the wait is not. Test: the same NRO with the
+key true (out/card/renut_city_takeover.toml).
