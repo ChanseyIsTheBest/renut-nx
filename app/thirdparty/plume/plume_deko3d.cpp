@@ -2133,8 +2133,12 @@ namespace plume {
                     // And while a drawing thread waits for a pipeline the prebuild builds (Deko3DHurryCompiles), the
                     // prebuild's compiles too.
                     const bool hurry = g_compileHurry.load(std::memory_order_relaxed) > 0;
+                    // 2026-11-20 (the city on the console): and an urgent compile (a fetch-specialised pipeline the
+                    // draws use the generic one for meanwhile): with the rest, Showdown Town's terrain pipelines came
+                    // 33-68 s late, the GPU at 51 ms a frame instead of 34 until then, and the prebuild's other
+                    // (cached) pipelines queued behind them.
                     pick = std::find_if(compileQueue.begin(), compileQueue.end(), [hurry](const CompileJob *j) {
-                        return (j->async && j->cached) || (!j->async && (j->drawWaits || hurry));
+                        return (j->async && j->cached) || (!j->async && (j->drawWaits || j->urgent || hurry));
                     });
                     if (pick != compileQueue.end())
                         break;
@@ -2333,6 +2337,7 @@ namespace plume {
         job.log = &log;
         // banjo-nx (2026-10-23): a blocking compile: a drawing thread (the game stops) or a background one (prebuild).
         job.drawWaits = !t_backgroundThread;
+        job.urgent = t_urgentVariants;  // banjo-nx (2026-11-20): no compile rest (see the uam loop)
         // banjo-nx (2026-10-18): the waiting thread's priority, lent to the uam thread while it waits (the render
         // thread must not wait behind the game's threads for a low-priority compile).
         s32 waiterPriority = 0;

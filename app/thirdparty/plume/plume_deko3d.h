@@ -788,6 +788,9 @@ namespace plume {
             bool async = false;
             bool cached = false;  // banjo-nx (2026-10-23): read from the cache file, not compiled (asyncCacheReads)
             bool drawWaits = false;  // banjo-nx (2026-10-23): blocking, and the waiting thread draws (the game stops)
+            // banjo-nx (2026-11-20): blocking, for a pipeline its draws badly need (Deko3DSetUrgentVariants: Renut's
+            // fetch-specialised pipelines, built on the prebuild thread while the draws use the generic one): no rest.
+            bool urgent = false;
             bool background = false;  // asked by a thread that does not draw (Deko3DSetBackgroundThread): queued last
             Deko3DVariantRequest request;  // the text is made from it on the uam thread, one at a time
             std::string ownSource;
