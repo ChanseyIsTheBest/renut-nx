@@ -85,7 +85,10 @@ std::unordered_map<u32, HostTexture *> g_resolve_targets;
 // the page's entry, the FP16 read found another format, ResolvedAlias said no, and the texture was made from guest
 // memory, which the GPU never wrote: a frame of garbage once a run, ~frame 900 ("[flash] ... made from guest memory over
 // resolve destination B5640DA8" in every log). The read now takes the earlier destination of its own description.
-REXCVAR_DEFINE_BOOL(sasrt_resolve_alias_previous, true, "SASRT/Graphics",
+// banjo-nx (2026-11-21): OFF for N&B (sasrt-nx's default on: SASRT's menus). With it on, N&B issued ~14 % more draws
+// a frame (replayed +14 %, immediate ~2.7x) in Showdown Town: 21.9 fps / 5,523 draws against 24.06 / 4,825 with it off,
+// the same NRO (c23, c25); 4,825 is 1.0.2's count. The game evidently reads that resolve back. sasrt-nx: per game.
+REXCVAR_DEFINE_BOOL(sasrt_resolve_alias_previous, false, "SASRT/Graphics",
                     "A texture read of memory a resolve wrote, in another format than the page's latest resolve, takes "
                     "an earlier resolve destination of that page with its own description (format, size, memory) instead "
                     "of a texture made from guest memory the GPU never wrote (the menus' one-frame flash, 2026-11-20)")

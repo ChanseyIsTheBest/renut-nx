@@ -504,3 +504,16 @@ DECISION (a8b56d4a, "the lean batch"): 5d1c60e9's sources for draw.cpp, render_t
 command_buffers.cpp, surfaces, sasrt_gpu_round and xmemory.cpp, plus only: g_ab_off_plain, A/B 300 and 301,
 export_reads_fast (A/B 305, with round 2's GpuStreams/BindStreams fixes), depth_bias_fields (A/B 302), the counts
 switch, plain answer bytes, the ring-spin key. The rest of sasrt-nx's rounds 2-4 is out of N&B (no measured gain here).
+
+### The draws-a-frame puzzle solved (2026-11-21 05:00-05:19)
+
+Every batch build drew 13-16 % more a frame than 5d1c60e9 in the same spot (the camera's clip plane identical in all
+runs). The lean NRO 3423e703 with only sasrt_resolve_alias_previous = false (sasrt-nx's menu-flash fix, textures.cpp):
+24.06 fps, 4,825 draws a frame, 8.57 us a draw; with it on 21.90 / 5,523 / 8.24; 5d1c60e9 23.97 / 4,875 / 8.53.
+The fix hands a read of a resolved page in another format the page's earlier destination; N&B evidently reads that
+back and draws more (replayed +14 %, immediate ~2.7x). Now off for N&B (sasrt-nx agrees: per game; in SASRT's race it
+changes nothing). Round 2's NRO with it off still drew 5,305 (immediate draws 2x): another of sasrt-nx's rounds 2-4
+items moves N&B's draw stream too (likely the colour-alias memo, also a resolve read); the lean batch dropped them all.
+So: per-draw comparisons between builds whose draw counts differ were confounded all night; the c18 in-run A/B
+(same draws in both halves) stands. The lean batch equals 5d1c60e9 (24.06 / 23.97 fps). Against 1.0.2 (26.5 fps): the
+GPU (32.4 vs 32.7 ms) and draws a frame (4,825 vs 4,854) now match; the render thread a draw (8.57 vs 7.55) is the gap.
