@@ -359,3 +359,13 @@ clocks, not the build; whether the attract content also differs (quiet stretches
 open. What stands from blocks 6-7: the compile cap (a share of time: 8 % of core 3 compiling, the uam thread 5.9 %),
 the in-run A/B 151 (both halves at the same clocks: noise) and the 5 ms sampled function breakdown (shares within the
 run). Every comparison from here on checks the clock line first.
+
+**Block 5's cause found (2026-11-20 14:55): renut-nx 1.0.2 lacks the base's port 64**, sasrt-nx's GPU hang fix: when
+dynamic resolution steps with its settable codes 4 and 6, a texture over a depth resolve keeps its old-size image and
+CopyDepthWords copies the new, larger size into it (a GPU write past the image; "a fence has not signalled", no deko3d
+error). Both hung 1.0.2 runs stepped constantly at stock clocks (block 5: 720, 684, 648, 612, 576, 612, 648 between
+10:08:23 and 10:09:14; the hang at 10:09:22), because the title scene's GPU time sits at the 34.5 ms threshold; at the
+user's overclock the GPU stays far under it and the resolution never leaves 720, so 1.0.2 does not hang there. Not the
+logs and not the shader files: 1.0.2 loaded its own cache (28,688 variants) and GLSL package (4,731 shaders), compiled
+nothing, and its pipeline list is the release's plus 206 records of its own format (v5, 965 bytes). The ultimate build
+has the fix. 1.0.2 comparison runs from here on: banjo_renut_dynamic_resolution = false (648 lines) in both builds.
