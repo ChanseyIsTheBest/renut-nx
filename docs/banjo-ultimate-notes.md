@@ -349,3 +349,13 @@ The link registers of the render thread's samples (the callers of its leaf funct
 25 %, texture content hashing (ContentHash, CheckedHash) 12 %, DrawStateLocked 10 %, Replay 8 %, texture level reads
 (ReadLevelParallel) 8 %, ConvertVertices 5 %. The next render-thread items: the texture content checks and reads
 (memmove, the hashes), then the vertex conversions 1.0.2 did not have.
+
+**Correction (2026-11-20 14:15, from culdcept-nx's note): blocks 6 and 7 ran overclocked.** Their profiles' clock lines
+read CPU 1963.5 MHz, GPU 998.4 MHz, memory 2733 MHz (rex_stderr: the starting point already memory 2733 and GPU 307.2;
+the game's own request, configuration 0x92220008 = GPU 460 / EMC 1331 as in every block, came out as GPU 998.4). Blocks
+3-5 ran at stock: CPU 1020, GPU 460.8, memory 1600. The console came back from the user's restart (11:57) with an
+overclock profile active; N&B asks for none of it. So blocks 6-7's halved costs per draw and locked 30 fps are the
+clocks, not the build; whether the attract content also differs (quiet stretches of 15 draws a frame against 150) is
+open. What stands from blocks 6-7: the compile cap (a share of time: 8 % of core 3 compiling, the uam thread 5.9 %),
+the in-run A/B 151 (both halves at the same clocks: noise) and the 5 ms sampled function breakdown (shares within the
+run). Every comparison from here on checks the clock line first.
