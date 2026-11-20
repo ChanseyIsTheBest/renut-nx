@@ -106,13 +106,16 @@ void LatchNow();
 // RefreshEffective at each A/B switch (AbApply).
 // On() is that one load: before, every call read the latch flag and the A/B half (two atomics) and the latched key,
 // FastDrawLocked asks dozens of times a draw, and those loads were 0.13 us of the 9.2 us a draw (1 ms sampling).
-extern std::atomic<uint8_t> g_effective[kCount];
+// banjo-nx (2026-11-21): plain bytes (were relaxed atomics: a load the compiler could not merge at each of the ~20
+// checks a draw makes with sasrt-nx's rounds 2-4; the c20 profile's byte loads +0.1 us a draw). Written at the latch
+// and at each A/B switch (the render thread), as g_ab_off_plain.
+extern uint8_t g_effective[kCount];
 void RefreshEffective();  // the answers again from the latched keys and banjo::renut_gpu::g_ab_off
 [[gnu::always_inline]] inline bool On(Item i) {
-  uint8_t v = g_effective[i].load(std::memory_order_relaxed);
+  uint8_t v = g_effective[i];
   if (v == 0) [[unlikely]] {
     LatchNow();
-    v = g_effective[i].load(std::memory_order_relaxed);
+    v = g_effective[i];
   }
   return v == 2;
 }
@@ -174,12 +177,12 @@ constexpr int kAbRt3Group = 402;   // the third round's
 constexpr int kAbRt4Group = 403;   // the fourth round's
 static_assert(kRtAbBase + kRtItemCount <= kAbRt2Group && kAbRt4Group < 512, "banjo_renut_ab_targets takes up to 511");
 extern bool g_rt_latched[kRtItemCount];
-extern std::atomic<uint8_t> g_rt_effective[kRtItemCount];  // as g_effective: 0 not latched, 1 off, 2 on
+extern uint8_t g_rt_effective[kRtItemCount];  // as g_effective: 0 not latched, 1 off, 2 on
 [[gnu::always_inline]] inline bool On(RtItem i) {
-  uint8_t v = g_rt_effective[i].load(std::memory_order_relaxed);
+  uint8_t v = g_rt_effective[i];
   if (v == 0) [[unlikely]] {
     LatchNow();
-    v = g_rt_effective[i].load(std::memory_order_relaxed);
+    v = g_rt_effective[i];
   }
   return v == 2;
 }

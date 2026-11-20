@@ -561,7 +561,10 @@ REXCVAR_DEFINE_BOOL(sasrt_rt_cached_export_seeds, true, "SASRT/RenderThread",
 REXCVAR_DEFINE_BOOL(sasrt_rt2_slot_index, true, "SASRT/RenderThread",
                     "Render thread (second round, 2026-11-20; docs/render-thread-ideas-1120.md): FindHostTextureBySlotLocked (the copy-back checks of the post passes, about 13 a frame in the 4-player race, each a walk of every texture: 3.4 % of the render thread in rex_profile_307) remembers an answer per slot in a 256-entry table, each checked by the fields the walk tests (a slot has one live owner), instead of one last answer")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(sasrt_rt2_spec_memo, true, "SASRT/RenderThread",
+// banjo-nx (2026-11-21, N&B's default off; sasrt-nx ships it on): in Showdown Town the memo answered 22 % of the
+// draws and its own bookkeeping (SasrtSpecAnswersOf 0.12 us a draw, c20 profile) cost more than the spec words it
+// saved (SasrtSpecWordsOf 0.083 before and after). spec_key_skip only acts on its hits.
+REXCVAR_DEFINE_BOOL(sasrt_rt2_spec_memo, false, "SASRT/RenderThread",
                     "Render thread (second round, 2026-11-20; docs/render-thread-ideas-1120.md): A fast draw's FetchSpecWords, SasrtPlainFetchMask, SasrtClipBit and SasrtSpecWordsOf are the draw before's when none of the shared constants' lines was written since (g_sc_dirty, which the push trusts too), the shaders, the vertex shader's record, the targets and their colour words, the instancing and the A/B half are the same, and the vertex shader exports nothing (its words read its float constants)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(sasrt_rt2_drop_throttle, true, "SASRT/RenderThread",
@@ -621,13 +624,16 @@ REXCVAR_DEFINE_BOOL(sasrt_rt4_state_id_crc, true, "SASRT/RenderThread",
 REXCVAR_DEFINE_BOOL(sasrt_rt4_pipeline_four_way, false, "SASRT/RenderThread",
                     "Render thread (fourth round, 2026-11-20; docs/render-thread-ideas-1120.md): The fast draw's pipeline cache looks in the four entries of the index's aligned group, not two: an answering entry, else the way made from this draw's inputs, an empty one, or the one used longest ago (the 4P race had 4,516 conflicts a 10 s with two ways, each a MakeKey and pipeline lookup)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(sasrt_rt4_spec_key_skip, true, "SASRT/RenderThread",
+// banjo-nx (2026-11-21): off with sasrt_rt2_spec_memo (N&B's default; see there).
+REXCVAR_DEFINE_BOOL(sasrt_rt4_spec_key_skip, false, "SASRT/RenderThread",
                     "Render thread (fourth round, 2026-11-20; docs/render-thread-ideas-1120.md): A fast draw whose spec answers are the spec memo's (sasrt_rt2_spec_memo hit) does not compare them with the kept pipeline key's fields (the 80 spec words, fetch pad, clip bit, fetch spec types) when that key was last checked against the same memo answers and no pipeline key has been written since (a count of every key write)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(sasrt_rt4_stream_memo_two_way, false, "SASRT/RenderThread",
                     "Render thread (fourth round, 2026-11-20; docs/render-thread-ideas-1120.md): The stream and index caches' entry memos (EntryMemo, 16,384 slots) look in a slot and its pair (two ways, the most recently used first: a hit in the second swaps them, a new entry pushes the first into the second) instead of one: four views' thousands of stream and index keys a frame conflicted in the direct-mapped slots, each conflict a map lookup")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(sasrt_rt4_ring_lock_once, true, "SASRT/RenderThread",
+// banjo-nx (2026-11-21, N&B's default off; sasrt-nx ships it on): +1.07 +- 1.42 % render thread in sasrt-nx's own still
+// A/B, and its round (A/B 403) +1.1 % a draw in N&B's city A/B (c18).
+REXCVAR_DEFINE_BOOL(sasrt_rt4_ring_lock_once, false, "SASRT/RenderThread",
                     "Render thread (fourth round, 2026-11-20; docs/render-thread-ideas-1120.md): The render thread keeps State().mutex from one queued draw (QueuePrefetched's items) into the next when that one is published already, at most 8 in a row and never past the ring run's end: a lock and an unlock fewer a draw. Place waits and every other item take it on their own as before (holding it across those deadlocked in 2026-10-19's proposal 19)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(sasrt_rt4_inert_keeps_chain, true, "SASRT/RenderThread",
@@ -667,22 +673,22 @@ void LatchNow() {
 }
 
 // banjo-nx (2026-11-20): On()'s answers (see the header): the latched key, and not this item's A/B "off" half.
-std::atomic<uint8_t> g_effective[kCount] = {};  // constant-initialised to 0: not latched
+uint8_t g_effective[kCount] = {};  // constant-initialised to 0: not latched
 bool g_rt_latched[kRtItemCount] = {};
-std::atomic<uint8_t> g_rt_effective[kRtItemCount] = {};
+uint8_t g_rt_effective[kRtItemCount] = {};
 std::atomic<uint64_t> g_rt_counts[kRtItemCount][2] = {};
 void RefreshEffective() {
   const int ab = banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed);
   for (int i = 0; i < kCount; ++i) {
     const bool on = g_latched.on[i] && ab != kAbBase + i && !(ab == kAbRtGroup && i >= kRtRestoreCandidates);
-    g_effective[i].store(on ? 2 : 1, std::memory_order_relaxed);
+    g_effective[i] = on ? 2 : 1;
   }
   // banjo-nx (2026-11-20): sasrt-nx's rounds 2-4, as its On(): the item's own number, or its round's group.
   for (int i = 0; i < kRtItemCount; ++i) {
     const bool on = g_rt_latched[i] && ab != kRtAbBase + i && !(ab == kAbRt2Group && i >= SASRT_GPU_ROUND_RT2_FIRST &&
                     i < SASRT_GPU_ROUND_RT3_FIRST) && !(ab == kAbRt3Group && i >= SASRT_GPU_ROUND_RT3_FIRST &&
                     i < SASRT_GPU_ROUND_RT4_FIRST) && !(ab == kAbRt4Group && i >= SASRT_GPU_ROUND_RT4_FIRST);
-    g_rt_effective[i].store(on ? 2 : 1, std::memory_order_relaxed);
+    g_rt_effective[i] = on ? 2 : 1;
   }
 }
 

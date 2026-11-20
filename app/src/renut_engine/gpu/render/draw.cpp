@@ -11591,8 +11591,12 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
 #endif
   // sasrt-nx (2026-11-20, sasrt_rt4_export_reads_fast): the export windows' streams converted (their compute work and
   // barriers recorded now; the bound pipeline and framebuffer are forgotten by it, so the binds below are made again).
-  GpuStreams export_gpu_streams;
+  // banjo-nx (2026-11-21): one object on the render thread, set only for a draw with export streams (the only one that
+  // reads it, BindStreams' export call below): a GpuStreams a draw was ~320 bytes zeroed at every fast draw (the c20
+  // profile's memset +0.05 us a draw).
+  static GpuStreams export_gpu_streams;
   if (export_streams) {
+    export_gpu_streams = GpuStreams{};
     if (!ConvertExportedStreamsLocked(s, device, call, *vs, shader_strides, *declaration, geometry, export_gpu_streams))
       return FastMiss(kFastExportRead);
     sasrt::gpu_round::Count(sasrt::gpu_round::kRt4ExportReadsFast);
@@ -12288,9 +12292,14 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     g_bound.shared_words_set = true;
   }
 #endif
+  // banjo-nx (2026-11-21): the common call with the constant empty streams, the export streams' call apart: with one call
+  // passing the runtime value LTO kept no specialised copy of BindStreams for the fast path (ef5fe0f4: one 14 KB
+  // BindStreams at every fast draw, against 5d1c60e9's 6 KB constprop copy).
   if (whole ? !BindWholeStreams(declaration->layout, whole_copies, base_draw ? 0u : geometry.whole_base)
-            : !BindStreams(device, call, *vs, shader_strides, declaration->layout, declaration->layout_hash, geometry,
-                           export_gpu_streams, nullptr))  // sasrt-nx (2026-11-20): empty but for export_reads_fast's
+            : export_streams ? !BindStreams(device, call, *vs, shader_strides, declaration->layout,
+                                            declaration->layout_hash, geometry, export_gpu_streams, nullptr)
+                             : !BindStreams(device, call, *vs, shader_strides, declaration->layout,
+                                            declaration->layout_hash, geometry, GpuStreams{}, nullptr))
     return -1;
   if (targets_changed || (key_inputs && banjo::renut_gpu::DiagGpuShadersOn()) || SasrtProfileVsOn())
     f.profile_label = UINT32_MAX;  // the label reads the targets (and with the shaders' breakdown the shader and key)
