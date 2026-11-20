@@ -529,3 +529,17 @@ a draw the same as 1.0.2's in the logs: callers not found). GPU a frame now equa
 In-run A/B of the GPU round items that change no shader variant (c28; 6 s halves, render us a draw on vs off):
 122 vertex input mask +0.6 % (fps -1.1 %), 132 +0.2 %, 133 -0.2 %, 134 -0.2 %: noise; defaults unchanged.
 The spec-word items cannot be A/B'd cleanly (their off half needs other shader variants than the cache holds).
+
+### N&B picks its draw level early in each run (2026-11-21 06:30) — the confound behind the night's numbers
+
+lean2 (80b43288, sasrt_resolve_alias_previous off by default): 24.08 fps, 4,867 draws a frame, 8.50 us a draw (c29);
+the same NRO with banjo_renut_draw_counts = false (c30): 21.46 fps, 5,627 draws a frame, 8.26 us a draw. Counters
+cannot change what the game draws, so the draw level is not the code's doing. Across all 19 city runs the level is
+set in the first 10 s line in the town and holds for the run (in-run A/B halves never differ): a low state ~4,800-4,900
+(5d1c60e9 x3, lean alias-off, lean2, 1.0.2 c9) and a high state ~5,250-5,630 (every batch run, lean with the alias fix,
+lean2 counts-off, and every 1 ms SAMPLED run: c11 1.0.2 5,266, c15 5d1c60e9 5,037, c27 lean 5,538). The loading-to-town
+line's fps leans with it (>= 10.4 fps -> low in 6 of 7; <= 10.2 -> high in 8 of 9). The game's fence polls are ~0 a
+10 s (not fence gating). The high state's extra draws are replayed +14 % and immediate ~2x. So: compare builds per draw
+(render us a draw), or bracket A/B/A until both land in the same state; an fps difference between two runs is mostly
+which state each landed in (~10 %). What the game varies (crowd, LOD, effects) and on what timing is still open.
+Per draw, low state: lean2 8.50, 5d1c60e9 8.48-8.54, 1.0.2 7.55; high state: lean2 counts-off 8.26, lean (alias on) 8.24.
