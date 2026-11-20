@@ -63,6 +63,7 @@ void Report();  // app/src/cpu/banjo_hot_guest.cpp: at most once every 10 s
 
 // banjo-nx's own renderer defines these (me_native_system.cpp, masseffect_native_draws.cpp); they mean the same job
 // here: the renderer's main thread and its background pipeline compiles.
+REXCVAR_DECLARE(std::string, log_level);  // sdk/src/core/logging.cpp (banjo-nx 2026-11-20, batch #4)
 REXCVAR_DECLARE(int32_t, banjo_ring_core);
 REXCVAR_DECLARE(int32_t, banjo_background_compile_core);
 // banjo-nx (2026-10-27, the user's request: NetherSX2_nx's 4-core mode). See sdk/src/core/threading_switch.h.
@@ -953,6 +954,7 @@ void NotePipelineBuilt() {
 
 // The A/B word (banjo_renut_ab); the header reads it inline.
 std::atomic<int> g_ab_off{0};
+int g_ab_off_plain = 0;  // banjo-nx (2026-11-20, batch #3): see the header
 
 namespace {
 
@@ -1179,8 +1181,12 @@ bool g_precise_barriers_on = false;  // banjo_renut_precise_barriers as configur
 namespace {
 
 // banjo-nx (2026-10-20, banjo_renut_ab_targets): the list, read once (numbers 1-31).
+// banjo-nx (2026-11-20): filled under std::call_once, so this file can be built with -fno-threadsafe-statics (its
+// other function statics are plain values from keys); the list and the flag are constant-initialised.
 const std::vector<int> &AbTargets() {
-  static const std::vector<int> list = [] {
+  static std::vector<int> list;
+  static std::once_flag once;
+  std::call_once(once, [] {
     std::vector<int> v;
     const std::string s = REXCVAR_GET(banjo_renut_ab_targets);
     int n = 0;
@@ -1199,8 +1205,8 @@ const std::vector<int> &AbTargets() {
         digit = false;
       }
     }
-    return v;
-  }();
+    list = std::move(v);
+  });
   return list;
 }
 // The target the A/B switches now (requires g_stats.mutex).
@@ -1214,6 +1220,7 @@ int AbTargetLocked() {
 // Render thread: the part as the half says.
 void AbApply(int target, bool on) {
   g_ab_off.store(on ? 0 : target, std::memory_order_relaxed);
+  g_ab_off_plain = on ? 0 : target;  // banjo-nx (2026-11-20, batch #3)
   // banjo-nx (2026-11-20): the GPU round's On() answers follow the half (before ApplyPlume, which asks them)
   if (sasrt::gpu_round::g_latched_ready.load(std::memory_order_acquire))
     sasrt::gpu_round::RefreshEffective();
@@ -2702,6 +2709,8 @@ void LatchTuning() {
   g_latched.small_captures = REXCVAR_GET(banjo_renut_small_captures);
   g_latched.delta_masks = REXCVAR_GET(banjo_renut_delta_masks);
   g_latched.delta_prefetch = REXCVAR_GET(banjo_renut_delta_prefetch);
+  g_latched.counts = REXCVAR_GET(log_level) != "off";  // banjo-nx (2026-11-20, batch #4)
+  g_latched.ready = true;  // banjo-nx (2026-11-20, batch #3): Latch() reads this one
   g_latched_ready.store(true, std::memory_order_release);
 }
 

@@ -3180,9 +3180,18 @@ void CensusPacket(const u8 *state, const OpCall &call, u32 fields) {
     }
     // banjo-nx (2026-10-28, per-draw night): this op's records came an op ago: what its shader change reads behind
     // them (the cache entries, the bound declaration), while its state is applied.
+    // banjo-nx (2026-11-20, render-thread batch #16): a stage whose word is the last such op's (the other stage changed)
+    // is skipped: its record, cache entry and declaration were read by that op's draw (one record line read and up to
+    // five prefetches a stage; the c15 city profile's PrefetchShaderBehind 0.18 us a draw). Prefetches only.
     if (stream && op.kind == OpKind::Draw && (op.fields & kFieldShaders)) {
-      PrefetchShaderBehind(op.call.vs_word);
-      PrefetchShaderBehind(op.call.ps_word);
+      static u32 behind_vs = 0, behind_ps = 0;  // render thread
+      const bool all = banjo::renut_gpu::g_ab_off_plain == 301;
+      if (all || op.call.vs_word != behind_vs)
+        PrefetchShaderBehind(op.call.vs_word);
+      if (all || op.call.ps_word != behind_ps)
+        PrefetchShaderBehind(op.call.ps_word);
+      behind_vs = op.call.vs_word;
+      behind_ps = op.call.ps_word;
     }
     const uint64_t op_start = kinds ? RenderTicks() : 0;
     ApplyState(state, buffer.arena.data() + op.state, op.plain_dirty, op.vs_dirty, op.ps_dirty, groups);

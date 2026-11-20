@@ -116,7 +116,12 @@
 // waiting for the ring cleaner's range in progress, the cleaner at 0x3B on the system core kept off it by other work
 // there). A clean (dc cvac, plume Deko3DBuffer::unmap) can be repeated and run on two cores at once: the render thread
 // cleans that range itself instead of waiting for the thread to finish it (RingCleaner::Wait).
-REXCVAR_DEFINE_BOOL(sasrt_ring_cleaner_take_over, true, "Banjo/Enhancements",
+// banjo-nx (2026-11-20, render-thread batch #22): OFF for N&B. A submit waits for its ranges right after queueing them, so
+// the cleaner is always partway through the last one and the take-over fired at nearly every kick: in Showdown Town the
+// render thread cleaned 594 of the 1,320 ranges a 10 s again itself (a whole range of DC CVAC each). Waiting for the
+// rest of that range is never longer than cleaning all of it. Per game: on where the cleaner is starved (sasrt-nx's race
+// start, 280-350 ms).
+REXCVAR_DEFINE_BOOL(sasrt_ring_cleaner_take_over, false, "Banjo/Enhancements",
                     "From sasrt-nx: a submit that needs the range the ring cleaner thread is cleaning cleans it itself (a "
                     "cache clean by address, repeatable) instead of waiting for the thread, which runs at the lowest "
                     "priority on the system core and was kept off it for 280-350 ms at SASRT's race start")
