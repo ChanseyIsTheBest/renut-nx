@@ -121,6 +121,8 @@ void RefreshEffective();  // the answers again from the latched keys and banjo::
 // diagnostic's error, not the renderer's).
 extern std::atomic<uint64_t> g_counts[kCount][2];
 [[gnu::always_inline]] inline void Count(Item i, uint64_t n = 1, int which = 0) {
+  if (!banjo::renut_gpu::Latch().counts)  // banjo-nx (2026-11-20): off with the logs (banjo_renut_draw_counts)
+    return;
   std::atomic<uint64_t> &c = g_counts[i][which];
   c.store(c.load(std::memory_order_relaxed) + n, std::memory_order_relaxed);
 }
@@ -183,6 +185,8 @@ extern std::atomic<uint8_t> g_rt_effective[kRtItemCount];  // as g_effective: 0 
 }
 extern std::atomic<uint64_t> g_rt_counts[kRtItemCount][2];
 [[gnu::always_inline]] inline void Count(RtItem i, uint64_t n = 1, int which = 0) {
+  if (!banjo::renut_gpu::Latch().counts)  // banjo-nx (2026-11-20): off with the logs (banjo_renut_draw_counts)
+    return;
   std::atomic<uint64_t> &c = g_rt_counts[i][which];
   c.store(c.load(std::memory_order_relaxed) + n, std::memory_order_relaxed);
 }

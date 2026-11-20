@@ -688,6 +688,7 @@ void RefreshEffective() {
 
 void ApplyPlume() {
 #if defined(PLUME_DEKO3D)
+  plume::g_deko3dCounts = banjo::renut_gpu::Latch().counts;  // banjo-nx (2026-11-20): plume's stats bumps
   plume::g_deko3dOptions.preciseDepthResolve = On(kPreciseDepth);
   plume::g_deko3dOptions.decompressMerge = On(kDecompressMerge);
   plume::g_deko3dOptions.readbackMerge = On(kReadbackMerge);

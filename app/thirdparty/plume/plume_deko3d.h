@@ -29,6 +29,10 @@
 #include <vector>
 
 namespace plume {
+    // banjo-nx (2026-11-20): plume's atomic statistics bumps (Deko3DStats: binds, barriers, the GPU round's counts),
+    // off when the renderer's report counts are (banjo_renut_draw_counts, log_level "off"). The plain per-list counts
+    // (statDraws, statTexRuns...) stay.
+    extern bool g_deko3dCounts;
     // RenderShaderFormat::DEKO3D's container.
     struct Deko3DShaderBlob {
         static constexpr uint32_t Magic = 0x334B4442; // "BDK3"
@@ -658,8 +662,13 @@ namespace plume {
         void markTargetsWritten();  // sasrt-nx (2026-11-08, trackedReadWait): the bound framebuffer's textures
         uint32_t extraFragTex[8] = {};  // Deko3DBindFragmentTextures' ids (not in boundTex)
         uint32_t extraFragTexCount = 0;
-        static void bumpStat(std::atomic<uint64_t> &c) { c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); }
+        static void bumpStat(std::atomic<uint64_t> &c) {
+            if (g_deko3dCounts)
+                c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        }
         static void bumpRound(int i) {
+            if (!g_deko3dCounts)
+                return;
             std::atomic<uint64_t> &c = GetDeko3DStats().sasrtRound[i];
             c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
         }

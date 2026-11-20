@@ -542,7 +542,10 @@ namespace plume {
         {
             // banjo-nx (2026-10-19): counted for the renderer's report (a load and a store: diagnostics).
             Deko3DStats &st = GetDeko3DStats();
-            auto bump = [](std::atomic<uint64_t> &c) { c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); };
+            auto bump = [](std::atomic<uint64_t> &c) {
+                if (g_deko3dCounts)  // banjo-nx (2026-11-20)
+                    c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+            };
             bump(mode == DkBarrier_Full ? st.barriersFull : mode == DkBarrier_Fragments ? st.barriersFragments : st.barriersPrimitives);
             if (invalidate & DkInvalidateFlags_Image)
                 bump(st.barriersImageInvalidate);
@@ -979,7 +982,10 @@ namespace plume {
         }
         // banjo-nx (2026-10-19): a load and a store (a lost count is possible between two recording threads), not
         // an exclusive read-modify-write loop: the A57 has no LSE atomics.
-        auto bump = [](std::atomic<uint64_t> &c) { c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); };
+        auto bump = [](std::atomic<uint64_t> &c) {
+            if (g_deko3dCounts)  // banjo-nx (2026-11-20)
+                c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        };
         bump(GetDeko3DStats().pipelineBinds);
         // Shaders: rebound when any stage differs (absent stages are disabled by the bind).
         // banjo-nx (2026-10-28, per-draw night): only the stages that differ (deko3d binds each stage on its own: its

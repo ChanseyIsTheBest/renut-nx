@@ -115,6 +115,13 @@ REXCVAR_DECLARE(bool, banjo_renut_delta_prefetch);
 // matched. On deko3d (the console, Ryujinx) the river water was missing with it on and drawn with it off. Why its
 // discard is not the blend's no-op there is not found yet; the native renderer keeps banjo_gpu_blend_skip.
 // banjo-nx (2026-10-26, setter rewrite): d3d_native.h g_touch_compare.
+// banjo-nx (2026-11-20, render-thread batch): the 10 s report's per-draw counts (Latch().counts).
+REXCVAR_DEFINE_BOOL(banjo_renut_draw_counts, true, "Banjo/Renut",
+                    "The 10 s report's per-draw statistics counts (the GPU round's item counts, plume's binds and "
+                    "barriers, the shared and pushed constant counts, the depth counters): a load and a store each, "
+                    "several a draw. Off: those lines show zeros, the render thread saves their work. Always off with "
+                    "log_level \"off\" (the release); this key turns them off with the logs kept (a measured run)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_touch_compare, true, "Banjo/Enhancements",
                     "Renut's renderer (2026-10-26): the native D3D setters store a device field and mark its chunk for "
                     "the recording only when the value changes (compare-on-set, as Unleashed's setters), so a recorded "
@@ -2705,7 +2712,7 @@ void LatchTuning() {
   g_latched.small_captures = REXCVAR_GET(banjo_renut_small_captures);
   g_latched.delta_masks = REXCVAR_GET(banjo_renut_delta_masks);
   g_latched.delta_prefetch = REXCVAR_GET(banjo_renut_delta_prefetch);
-  g_latched.counts = REXCVAR_GET(log_level) != "off";  // banjo-nx (2026-11-20, batch #4)
+  g_latched.counts = REXCVAR_GET(log_level) != "off" && REXCVAR_GET(banjo_renut_draw_counts);  // banjo-nx (2026-11-20, batch #4)
   g_latched.ready = true;  // banjo-nx (2026-11-20, batch #3): Latch() reads this one
   g_latched_ready.store(true, std::memory_order_release);
 }

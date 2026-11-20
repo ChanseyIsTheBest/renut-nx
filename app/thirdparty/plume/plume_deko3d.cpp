@@ -263,6 +263,7 @@ namespace plume {
 
 
     Deko3DOptions g_deko3dOptions;
+    bool g_deko3dCounts = true;  // banjo-nx (2026-11-20): see plume_deko3d.h
     // sasrt-nx (2026-11-11, port 82; its GPU list's row 2; UNTESTED): preciseStencilWrite's count.
     std::atomic<uint64_t> g_deko3dPreciseStencilSaved{0};
     void Deko3DSetOptions(const Deko3DOptions &options) { g_deko3dOptions = options; }
