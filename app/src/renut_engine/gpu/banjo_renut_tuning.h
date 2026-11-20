@@ -173,11 +173,11 @@ extern std::atomic<uint64_t> g_shared_reused, g_shared_uploaded;
 // A/B halves' draws a frame and render-thread microseconds a draw.
 extern uint64_t g_ab_draws;
 [[gnu::always_inline]] inline void CountSharedConstants(bool reused) {
+  ++g_ab_draws;  // (a plain add, kept with the counts off: the in-run A/B's draws a frame; the base's port 244)
   if (!Latch().counts)  // banjo-nx (2026-11-20, batch #4)
     return;
   std::atomic<uint64_t> &c = reused ? g_shared_reused : g_shared_uploaded;
   c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
-  ++g_ab_draws;
 }
 
 // banjo_renut_exact_streams (package 27): Renut keeps converted copies of vertex streams and index ranges whose guest

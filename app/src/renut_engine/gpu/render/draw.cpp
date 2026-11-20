@@ -4291,7 +4291,7 @@ inline uint64_t BindingEpoch(const BindEffects &fx, const TextureFetch &fetch, u
 // while the binding generation is the one it was last found at (SlotLast::checked_gen).
 inline bool SlotLastEpochHolds(SlotLast &l, const TextureFetch &fetch, u32 va) {
   const bool fine = !(l.fx.depth_source || l.fx.handover_surface || l.fx.handover_image) && FineTextureEpochs();
-  if (fine && l.checked_gen == g_texture_bind_gen && banjo::renut_gpu::g_ab_off_plain != 300)
+  if (fine && l.checked_gen == g_texture_bind_gen && banjo::renut_gpu::g_ab_off_plain != 170)
     return true;
   if (l.epoch != BindingEpoch(l.fx, fetch, va))
     return false;
@@ -4894,7 +4894,7 @@ const FetchFilterOverrides *DrawFetchFiltersLocked(const ShaderRecord *vs, const
   // the compare and the copy of every slot's words: only DrawStateLocked asks, and it takes the answer only when the
   // call before its own was its own too (texture_fill_before == held_texture_fill: g_texture_fills counts every call).
   // The table is marked unknown, so an answer after a skipped call is "not the same" as before such a call.
-  if (!same_as_last && banjo::renut_gpu::g_ab_off_plain != 300) {
+  if (!same_as_last && banjo::renut_gpu::g_ab_off_plain != 170) {
     last_mask = ~0u;
     return;
   }

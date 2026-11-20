@@ -3185,7 +3185,7 @@ void CensusPacket(const u8 *state, const OpCall &call, u32 fields) {
     // five prefetches a stage; the c15 city profile's PrefetchShaderBehind 0.18 us a draw). Prefetches only.
     if (stream && op.kind == OpKind::Draw && (op.fields & kFieldShaders)) {
       static u32 behind_vs = 0, behind_ps = 0;  // render thread
-      const bool all = banjo::renut_gpu::g_ab_off_plain == 301;
+      const bool all = banjo::renut_gpu::g_ab_off_plain == 171;
       if (all || op.call.vs_word != behind_vs)
         PrefetchShaderBehind(op.call.vs_word);
       if (all || op.call.ps_word != behind_ps)
