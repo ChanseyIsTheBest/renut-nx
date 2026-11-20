@@ -369,3 +369,32 @@ user's overclock the GPU stays far under it and the resolution never leaves 720,
 logs and not the shader files: 1.0.2 loaded its own cache (28,688 variants) and GLSL package (4,731 shaders), compiled
 nothing, and its pipeline list is the release's plus 206 records of its own format (v5, 965 bytes). The ultimate build
 has the fix. 1.0.2 comparison runs from here on: banjo_renut_dynamic_resolution = false (648 lines) in both builds.
+
+## The render thread against renut-nx 1.0.2 in Showdown Town (2026-11-20 afternoon)
+
+Same spot (the user's save, the spawn at the garage, input_script A presses, then still), 540 lines fixed, dynamic
+resolution off (1.0.2's port-64 hang), stock clocks, unsampled; steady city lines:
+
+| Build | fps | render thread a frame | a draw | draws a frame | GPU a frame |
+|---|---|---|---|---|---|
+| renut-nx 1.0.2 (62ab5e4c) | 26.5 | 36.6 ms | 7.55 us | 4,854 | 32.7 ms |
+| ultimate d5cffbfb (this morning's PGO: title + intro) | 20.8 | 46.2 ms | 8.99 us | 5,207 | 39.0 ms |
+| 72e4bafd (the fixes below, the old profile: the changed functions lost it) | 17.7 | 56.5 ms | 10.17 us | 5,549 | 35.5 ms |
+| 5d1c60e9 (the fixes, PGO retrained in Showdown Town) | 23.1 | 42.4 ms | 8.39 us | 5,047 | 35.4 ms |
+
+1 ms sampled runs of 1.0.2 and d5cffbfb in the city, named by source function with inlining (tools/profile_inline.py;
+1.0.2's ELF is banjo-nx/app/out/switch-dist/renut, md5 of the release NRO 62ab5e4c2253; pkgstage/renut_release.elf is
+1.0.1's): 7.29 against 9.22 us a draw. By area: the atomics, censuses, GPU round checks and spec words +0.42, draw
+submit +0.38, plume's command list +0.26, mem* / NEON / byte swaps +0.30, the rest +0.6 spread thin; the copies'
+proving is the same (0.62 / 0.63: its +0.13 under ProveCopyRange was attribution). The hot functions grew: 1.0.2's
+FillTextures one copy of 16 KB, the ultimate's three of 18-20 KB (constprop clones), PushFloatConstants two, Replay two,
+FastDrawLocked 22 -> 42 KB, from the same sources nearly.
+
+The fixes (1f06bd5e, 17984e41): the censuses compiled out on the Switch (BANJO_SWITCH_DIAG_CENSUS OFF: their checks ran
+with the keys off), sasrt::gpu_round::On() one byte per item (RefreshEffective at the latch and each A/B switch),
+[[gnu::noclone]] on FillTextures, PushFloatConstants and Replay, the NaN flush key read once a push; N&B's defaults:
+banjo_renut_const_nan_flush and banjo_renut_vertex_finite off (1.0.2 had neither), stream redeem and the Dishonored
+readable check off (earlier). Built with the old profile they ran 13 % slower: every changed hot function lost its
+profile (GCC drops it when the function's code changed). PGO retrained (the instrumented build, 16 minutes in Ryujinx
+loading the user's save into Showdown Town, then input_script_sticks; out/emu/emu_train_city.toml; the old profile in
+pgo-inplace-titleintro-2026-11-20): 23.1 fps. Left: +11 % a draw and +4 % draws a frame against 1.0.2.
