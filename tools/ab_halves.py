@@ -5,6 +5,8 @@ the render thread's and the GPU's microseconds a draw (the halves may catch diff
 in part). tools/ab_sum.py has the render thread only.
 
   python tools/ab_halves.py renut_00N.log [--from SECONDS]   (--from: lines stamped that long after the log's first)
+      [--pairs [TOL]]   only the lines whose halves had draws a frame within TOL of each other (default 0.15: the
+                        same scene), split into heavy (500 draws a frame or more) and light lines
 """
 import argparse
 import re
@@ -19,6 +21,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('log')
     ap.add_argument('--from', dest='t0', type=float, default=0.0)
+    ap.add_argument('--pairs', type=float, nargs='?', const=0.15, default=None)
     a = ap.parse_args()
     acc = {}
     names = {}
@@ -32,6 +35,14 @@ def main():
         if t - first < a.t0:
             continue
         target = int(m.group(5))
+        if a.pairs is not None:
+            d_on, d_off = m.group(11), m.group(17)
+            if not d_on or not d_off or float(d_off) <= 0:
+                continue
+            d_on, d_off = float(d_on), float(d_off)
+            if abs(d_on / d_off - 1.0) > a.pairs:
+                continue
+            target = (target, 'heavy' if (d_on + d_off) / 2 >= 500 else 'light')
         names[target] = m.group(4)
         v = acc.setdefault(target, {'on': [0.0] * 8, 'off': [0.0] * 8, 'n': 0})
         v['n'] += 1
@@ -55,7 +66,7 @@ def main():
                 s[7] += frames
     for target in sorted(acc):
         v = acc[target]
-        print('target %d (%s), %d lines:' % (target, names[target], v['n']))
+        print('target %s (%s), %d lines:' % (target, names[target], v['n']))
         rows = {}
         for half in ('on', 'off'):
             s = v[half]

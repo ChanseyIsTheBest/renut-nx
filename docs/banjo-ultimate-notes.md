@@ -269,3 +269,31 @@ minutes).** Most windows 25-30 fps (1.0.2's block 2, sampled: 25-30), the render
 minutes (4.55 s each; 53 named misses with the 3D fetch words 934-936, which no guess makes), core 3 still 0.5-0.9 %
 idle, and the slower later windows. The run's deko3d.log and renut log went into the next cache (--runtime-log). A fair
 CPU comparison needs 1.0.2 without sampling on the same loop.
+
+**The compile cap (the user's: the shader compiler at most 10 % of core 3).** Every compile, whoever waits for it, adds
+a rest of 9 times its length (banjo_deko3d_background_compile_share 10, at most 60 s outstanding); a compile a draw
+waits for, and a cache read, never wait. The first build (13c1cf67, not shipped) looked only at the queue's front: a
+compile the prebuild waits for is queued ahead of the background ones too, so a draw's compile could sit behind one
+for the rest. The second (b830247a) takes the first such job anywhere in the queue, and lifts the rest for the
+prebuild's compiles while the render thread waits for a pipeline the prebuild builds (TakePrebuilt) and at shutdown
+(plume::Deko3DHurryCompiles).
+
+**The console, 2026-11-20 09:37 (block 4: 84a50b1d, cache v5, A/B "151,83,1" with 30 s halves, 12 minutes).** No
+answer for 151: the title loop repeats every ~180 s (110-120 s of the 3D title scene at 1,300-2,100 draws a frame,
+then 60-70 s of a light scene at ~150), the same as the A/B's cycle (3 targets x 60 s), so each target's halves kept
+landing on the same scenes (151's "on" halves averaged 11 draws a frame, its "off" halves 482; the control's halves
+differed by 52 % in GPU time). The one cycle where both of 151's halves fell in the light scene: 7.89 against 7.61 ms of
+GPU, noise. The next 151 test: that target alone, 10 s halves, and only the pairs whose draws a frame match
+(tools/ab_halves.py). The 3D scene's 10 s lines: render thread 16-28 ms a frame, GPU 29-42 ms, 26-30 fps.
+
+Compiles: 74 in 12 minutes (4.46 s each: 330 s, half of core 3), 31 for the prebuild and 33 in the background, none a
+draw waited for; background rests 52.9 s. All 74 were appended to the card's cache file (2,184,341,724 bytes now).
+48 named misses against v5; tools/deko3d_miss_coverage.py --nearest puts them down to pipelines the shipped list never
+had: the bool words 1243-1249 in combinations the list lacks (44), 906 (the inputs the vertex shader writes as zero:
+another vertex shader with the same pixel shader, 28) and the vertex shaders' 955 (4). The next cache: the card's
+grown pipeline_list.bin and this run's deko3d.log (--runtime-log).
+
+tools/profile_per_draw.py (second version) lines the profile's windows up with the renut log's lines by the clock (the
+first version counted lines, and its draws were the "specialised bools: N draws" count at each line's end). On the
+sampled runs of the night: last night's build (no PGO) 16.0 us of render-thread user code a draw, 1.0.2 8.0 us, the
+same scene (1,230 and 1,390 draws a frame).
