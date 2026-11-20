@@ -576,6 +576,17 @@ void LatchNow() {
 #undef SASRT_GPU_ROUND_LATCH
   g_latched = l;
   g_latched_ready.store(true, std::memory_order_release);
+  RefreshEffective();
+}
+
+// banjo-nx (2026-11-20): On()'s answers (see the header): the latched key, and not this item's A/B "off" half.
+std::atomic<uint8_t> g_effective[kCount] = {};  // constant-initialised to 0: not latched
+void RefreshEffective() {
+  const int ab = banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed);
+  for (int i = 0; i < kCount; ++i) {
+    const bool on = g_latched.on[i] && ab != kAbBase + i && !(ab == kAbRtGroup && i >= kRtRestoreCandidates);
+    g_effective[i].store(on ? 2 : 1, std::memory_order_relaxed);
+  }
 }
 
 void ApplyPlume() {

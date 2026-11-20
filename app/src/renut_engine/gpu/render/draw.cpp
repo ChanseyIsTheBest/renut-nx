@@ -3569,7 +3569,9 @@ inline void DiagPushLines(u32 first, u32 run) {
       ++g_diag_push_lines[l];
 }
 // One stage's float constants (see above); 'ubo' its buffer's address.
-void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &constants, const u32 used[8],
+// banjo-nx (2026-11-20, N&B's render thread against renut-nx 1.0.2 in Showdown Town): one copy (noclone): LTO's
+// constant propagation made two 6 KB copies of it, and both ran every draw (the instruction cache; 1.0.2 had one).
+[[gnu::noclone]] void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &constants, const u32 used[8],
                         ConstantUpload &last, const ShaderCacheEntry *entry, uint64_t ubo, const GroupSummary &summary) {
   ::renut::gpu::census::Scope census_scope(::renut::gpu::census::kPushConstants);  // blur-nx (2026-11-17)
   // banjo-nx (2026-10-27, constants): whether the shader has literals and the registers it reads from its summary (the
@@ -4455,7 +4457,9 @@ const FetchFilterOverrides *DrawFetchFiltersLocked(const ShaderRecord *vs, const
   return &merged;
 }
 
-void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc, BindEffects *slot_fx = nullptr,
+// banjo-nx (2026-11-20, N&B's render thread against renut-nx 1.0.2 in Showdown Town): one copy (noclone): LTO's
+// constant propagation made three 18-20 KB copies of it, and both ran every draw (the instruction cache; 1.0.2 had one).
+[[gnu::noclone]] void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc, BindEffects *slot_fx = nullptr,
                   bool *all_memo = nullptr, const TextureFetch *draw_fetches = nullptr, bool *same_as_last = nullptr,
                   const FetchFilterOverrides *filters = nullptr) {
   ::renut::gpu::census::Scope census_scope(::renut::gpu::census::kFillTextures);  // blur-nx (2026-11-17)

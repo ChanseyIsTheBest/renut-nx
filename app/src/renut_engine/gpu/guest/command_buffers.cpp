@@ -2922,7 +2922,9 @@ void CensusPacket(const u8 *state, const OpCall &call, u32 fields) {
 // On the render thread. 'predication': the mask the buffer runs under
 // (SetPredication before RunCommandBuffer), which the draws' own masks narrow
 // (see SetReplayPredicationLocked).
-void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, u32 depth,
+// banjo-nx (2026-11-20, N&B's render thread against renut-nx 1.0.2 in Showdown Town): one copy (noclone): LTO's
+// constant propagation made two 18 KB copies of it, and both ran every draw (the instruction cache; 1.0.2 had one).
+[[gnu::noclone]] void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, u32 depth,
             u32 predication) {
   if (depth >= kMaxRunDepth)
     return;

@@ -1214,6 +1214,9 @@ int AbTargetLocked() {
 // Render thread: the part as the half says.
 void AbApply(int target, bool on) {
   g_ab_off.store(on ? 0 : target, std::memory_order_relaxed);
+  // banjo-nx (2026-11-20): the GPU round's On() answers follow the half (before ApplyPlume, which asks them)
+  if (sasrt::gpu_round::g_latched_ready.load(std::memory_order_acquire))
+    sasrt::gpu_round::RefreshEffective();
   sasrt::gpu_round::ApplyPlume();  // sasrt-nx (2026-11-08): the GPU round's plume items follow the half
   if (target == 26)  // banjo-nx (2026-10-26): read by every setter, so a plain flag (d3d_native.h)
     renut::gpu::native::g_touch_compare = on && REXCVAR_GET(banjo_renut_touch_compare);
@@ -2815,10 +2818,12 @@ int CleanerPriority() {
   static const int p = REXCVAR_GET(blur_renut_ring_cleaner_priority);
   return p;
 }
+#if !defined(RENUT_DIAG_CENSUS_OFF)
 bool CensusOn() {
   static const bool on = REXCVAR_GET(blur_renut_diag_batch_census);
   return on;
 }
+#endif
 bool VerifyOn() {
   static const bool on = REXCVAR_GET(blur_renut_host_batch_verify);
   return on;
