@@ -494,3 +494,13 @@ SetShared<u32> +0.06, Latch +0.04 (the counts checks, logs on). Also LTO kept on
 6 KB specialised copy for the fast path) since the fast path passed the export streams at its one call.
 Round 2 (08b1a669): take-over on, spec memo + spec key skip + ring lock off by default for N&B, GpuStreams only when
 used, BindStreams' constant call split off, On() answers plain bytes.
+
+Round 2 on the console (03:19-03:36): 5da00249 20.07 fps, 9.67 us a draw; 5d1c60e9 right after (bracket 2) 24.06 fps,
+8.54 us. Two batch builds with two separate city trainings both 9.1-9.7 against 8.48 / 8.54: the code, not PGO luck.
+Stacks by callee per draw (c20 vs c15): FastDrawLocked's own frame 2.94 against 2.47 us, WholeGeometryTry under it
+0.49 against 0.31, the general BindStreams 0.11 (shown as "State", its first inlined line). sasrt-nx's items sit in
+FastDrawLocked (40.5 -> 43.9 KB, against the A57's 48 KB L1I): each check is cheap, the code is not.
+DECISION (a8b56d4a, "the lean batch"): 5d1c60e9's sources for draw.cpp, render_thread.cpp, video.cpp,
+command_buffers.cpp, surfaces, sasrt_gpu_round and xmemory.cpp, plus only: g_ab_off_plain, A/B 300 and 301,
+export_reads_fast (A/B 305, with round 2's GpuStreams/BindStreams fixes), depth_bias_fields (A/B 302), the counts
+switch, plain answer bytes, the ring-spin key. The rest of sasrt-nx's rounds 2-4 is out of N&B (no measured gain here).
