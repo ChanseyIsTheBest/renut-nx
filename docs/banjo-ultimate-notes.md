@@ -293,6 +293,21 @@ had: the bool words 1243-1249 in combinations the list lacks (44), 906 (the inpu
 another vertex shader with the same pixel shader, 28) and the vertex shaders' 955 (4). The next cache: the card's
 grown pipeline_list.bin and this run's deko3d.log (--runtime-log).
 
+The cap's second build (NRO 845d01fb, PGO + LTO) in Ryujinx, 2026-11-20 11:00-11:17 (the comparison route, 450 s):
+self-check 45,134 of 45,134, the usual 152 NtQueryInformationFile errors, 27-30 fps late in the run. The first run
+compiled nothing (the emulator's cache has the route); the second, with A/B 151 at 10 s halves, compiled 2 (one in
+the background, 2.9 s; one the prebuild waited for, 1.0 s, after 25.8 s of rest), no draw waited. The hurry path
+(the render thread waiting for a prebuild's compile) did not come up: the console decides.
+
+Cache v6 (2026-11-20 10:43): v5 merged with the card's grown pipeline_list.bin (3.50 million pipelines, from 2.30)
+and block 4's deko3d.log and renut log: 197,486 variants (1,917 compiled, 0 failed), 2,195,149,376 bytes,
+out/deko3d_shaders/deko3d_shaders_v6.bin.
+
+The 3D title scene's lines (800 draws a frame or more) of the console runs: 84a50b1d (blocks 3 and 4) 13.3-13.9 us of
+render thread a draw and 23.4-24.8 us of GPU; 1.0.2 sampled at 1 ms (block 2) 11.8 and 22.3. The unsampled 1.0.2
+block (5, 2026-11-20 10:06) waits on the card: sys-botbase went down at 10:19 after screenshot requests (pixelPeek)
+with 1.0.2 in the foreground, and the game holds its log open until the user closes it.
+
 tools/profile_per_draw.py (second version) lines the profile's windows up with the renut log's lines by the clock (the
 first version counted lines, and its draws were the "specialised bools: N draws" count at each line's end). On the
 sampled runs of the night: last night's build (no PGO) 16.0 us of render-thread user code a draw, 1.0.2 8.0 us, the
