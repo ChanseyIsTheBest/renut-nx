@@ -335,3 +335,17 @@ and quiet stretches of 15 draws a frame instead of 150): mostly a locked 30 fps,
 and the GPU 11-16, all threads 101 % of 400. Those figures are of a lighter scene and do not compare with blocks 3-5.
 A/B 151 (tools/ab_halves.py --pairs, 8 heavy pairs): the off half (no early alpha test) GPU -1.4 %, render thread
 -2.0 %: noise, so vivapinata_shader_noearly stays false.
+
+**The console, 2026-11-20 12:30 (block 7: 845d01fb, stack sampling every 5 ms, 12 minutes).** No freeze at 5 ms. The
+same content as block 6 (a locked 30 fps; heavy stretches of 1,150-2,100 draws a frame at 6.1-7.1 us of render thread
+and 9-15 us of GPU a draw, quiet ones of 15 draws a frame). Since the console's restart the attract loop shows other
+content than blocks 3-5 did (their quiet stretches drew 150 a frame and the heavy ones cost 29-42 ms of GPU against
+15-23 now), so blocks 6-7 compare only with each other. tools/profile_per_draw.py over the run (890 draws a frame on
+average, the quiet stretches included): 7.28 us of render-thread user code a draw: FastDrawLocked 1.46, Replay 0.78,
+memmove 0.61, FillTextures 0.46, PushFloatConstants 0.43, ConvertVertices 0.35, WholeGeometryTry 0.34, PagesClean
+0.30, DrawStateLocked 0.27, FastExportReads 0.17, ContentHash64 0.12 (last night's build without PGO: FastDrawLocked
+2.45, FillTextures 0.94, PushFloatConstants 0.83, and PmullHash 0.44, ExpandElement 0.51, census::On 0.28 now gone).
+The link registers of the render thread's samples (the callers of its leaf functions such as memmove): FastDrawLocked
+25 %, texture content hashing (ContentHash, CheckedHash) 12 %, DrawStateLocked 10 %, Replay 8 %, texture level reads
+(ReadLevelParallel) 8 %, ConvertVertices 5 %. The next render-thread items: the texture content checks and reads
+(memmove, the hashes), then the vertex conversions 1.0.2 did not have.
