@@ -32,9 +32,8 @@ option(BANJO_SWITCH_RENUT_DEBUG_INFO "Switch: -g for Renut's renderer and plume 
 # compiled in. OFF (the Switch's default): their checks are constant false and every census block compiles away; the
 # keys do nothing. In Showdown Town the checks with the keys off cost N&B's render thread ~0.1 us a draw.
 option(BANJO_SWITCH_DIAG_CENSUS "Switch: compile in the renderer's diagnostic censuses" OFF)
-if(REXGLUE_PLATFORM_SWITCH AND NOT BANJO_SWITCH_DIAG_CENSUS)
-    add_compile_definitions(RENUT_DIAG_CENSUS_OFF)
-endif()
+# (Set on the renderer's targets below, where they exist: a directory-wide definition recompiled the generated game
+# code, ~1,000 files, for a definition it never reads.)
 if(REXGLUE_PLATFORM_SWITCH AND NOT BANJO_SWITCH_EARLY_RA)
     add_compile_options(-mearly-ra=none)
     add_link_options(-mearly-ra=none)
@@ -991,6 +990,11 @@ endif()
 if(WIN32)
     target_compile_options(renut PRIVATE -gline-tables-only -gcodeview)
     target_link_options(renut PRIVATE "LINKER:/DEBUG:FULL")
+endif()
+
+if(REXGLUE_PLATFORM_SWITCH AND NOT BANJO_SWITCH_DIAG_CENSUS)  # banjo-nx (2026-11-20), see the option above
+    target_compile_definitions(banjo_renut_gpu PRIVATE RENUT_DIAG_CENSUS_OFF)
+    target_compile_definitions(renut PRIVATE RENUT_DIAG_CENSUS_OFF)
 endif()
 
 if(REXGLUE_PLATFORM_SWITCH AND BANJO_SWITCH_RENUT_DEBUG_INFO)

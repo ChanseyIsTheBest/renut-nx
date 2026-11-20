@@ -15,7 +15,10 @@ REXCVAR_DEFINE_INT32(banjo_deko3d_user_clip_enable, 1, "Banjo/Enhancements",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 // kameo-nx (2026-11-04, 776227708d): the coloured ground patches of Kameo's Badlands.
-REXCVAR_DEFINE_BOOL(banjo_renut_const_nan_flush, true, "Banjo/Enhancements",
+// banjo-nx (2026-11-20, the user: "anything we don't need [that] 1.0.2 [did not have] turn off"): OFF for N&B. Its NEON
+// test runs in every constant group a draw pushes (PushFloatConstants, +0.14 us a draw against 1.0.2 in Showdown Town)
+// and renut-nx 1.0.2, which had no such rule, drew N&B right. Per game: on for Kameo.
+REXCVAR_DEFINE_BOOL(banjo_renut_const_nan_flush, false, "Banjo/Enhancements",
                     "Float constants that are NaN or infinity reach the shaders as 0 (from kameo-nx, the rule of Kameo: RePowered). "
                     "The console's GPU multiplies anything by 0 to 0 and the host's keeps the NaN: a shader multiplying a register "
                     "the game never wrote as a float by 0 got NaN (coloured patches). Off: the words as they are")
@@ -126,7 +129,10 @@ REXCVAR_DEFINE_BOOL(banjo_renut_export_only_draws, true, "Banjo/Enhancements",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 // vivapinata-nx (2026-11-03, fe12c548).
-REXCVAR_DEFINE_BOOL(banjo_renut_vertex_finite, true, "Banjo/Enhancements",
+// banjo-nx (2026-11-20, the user: turn off what N&B does not need and 1.0.2 did not have): OFF for N&B: a check in the
+// conversion of every 32-bit float vertex element (renut-nx 1.0.2 had none and drew N&B right). Per game: on for Viva
+// Pinata.
+REXCVAR_DEFINE_BOOL(banjo_renut_vertex_finite, false, "Banjo/Enhancements",
                     "From vivapinata-nx: single 32-bit float vertex elements have infinities and NaNs made the largest "
                     "finite value: on the Xenos 0 times anything is 0, so they make no NaN there. Off, as Renut had it "
                     "(Viva Pinata's distant creatures draw dark)")
