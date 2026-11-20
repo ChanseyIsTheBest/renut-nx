@@ -7742,6 +7742,15 @@ constexpr u32 kSpecLines =
     SharedLinesOf(offsetof(SharedConstants, user_clip_planes), sizeof(SharedConstants::user_clip_planes)) |
     SharedLinesOf(offsetof(SharedConstants, tessellation), sizeof(SharedConstants::tessellation)) |
     SharedLinesOf(offsetof(SharedConstants, bound_fetch), sizeof(SharedConstants::bound_fetch));
+// When one of those lines was written, the words the answers read are compared, masked to the bits they read
+// (SpecInputsSame): the lines also hold what changes at most draws and the answers do not read (the fetch slots' copy
+// offsets, vertex_fetch_bytes, the texture words' slot numbers). Read, of fetch constant r of either shader:
+// texture_indices[0] and [2] bits 20-28 (exponent adjust, scale code), [1] whole (the null 3D slot compare),
+// sampler_indices bits 13-19 (signs, gamma); of the vertex shader's memory fetches i: vertex_fetch_slots[64 + i] bits
+// 0-1; and tessellation[0], bound_fetch[0-3][3], user_clip_planes[0], resolution_scale, screen_space, depth_remap[0].
+constexpr u32 kSpecTextureBits = 0x1FF00000u;
+constexpr u32 kSpecSamplerBits = 0x000FE000u;
+constexpr u32 kSpecScalars = 12;
 struct SpecKeep {
   bool valid = false;
   const ShaderCacheEntry *vs_entry = nullptr, *ps_entry = nullptr;
@@ -7753,10 +7762,56 @@ struct SpecKeep {
   FetchSpec fetch{};
   u32 plain = 0, clip = 0;
   SasrtSpecWords words{};
+  // the words read (SpecInputsSame)
+  u32 fetches = 0, memory_fetches = 0;
+  u32 scalars[kSpecScalars] = {};
+  u32 tex0[32] = {}, tex1[32] = {}, tex2[32] = {}, sampler[32] = {}, slots[32] = {};
 };
 SpecKeep g_spec_keep;
-uint64_t g_spec_kept = 0, g_spec_made = 0, g_spec_verify_differ = 0;
+uint64_t g_spec_kept = 0, g_spec_by_words = 0, g_spec_made = 0, g_spec_verify_differ = 0;
 void ForgetSpecKeepLocked() { g_spec_keep.valid = false; }
+[[gnu::always_inline]] inline void SpecScalarsOf(const SharedConstants &sc, u32 out[kSpecScalars]) {
+  out[0] = sc.tessellation[0];
+  for (u32 k = 0; k < 4; ++k)
+    out[1 + k] = sc.bound_fetch[k][3];
+  std::memcpy(out + 5, sc.user_clip_planes[0], 16);
+  std::memcpy(out + 9, &sc.resolution_scale, 4);
+  out[10] = sc.screen_space;
+  std::memcpy(out + 11, &sc.depth_remap[0], 4);
+}
+// The words read, kept with the answers made (fetches and memory_fetches set).
+[[gnu::noinline]] void SpecKeepInputs(SpecKeep &k, const SharedConstants &sc) {
+  for (u32 bits = k.fetches; bits; bits &= bits - 1) {
+    const u32 r = u32(std::countr_zero(bits));
+    k.tex0[r] = sc.texture_indices[0][r] & kSpecTextureBits;
+    k.tex1[r] = sc.texture_indices[1][r];
+    k.tex2[r] = sc.texture_indices[2][r] & kSpecTextureBits;
+    k.sampler[r] = sc.sampler_indices[r] & kSpecSamplerBits;
+  }
+  for (u32 bits = k.memory_fetches; bits; bits &= bits - 1) {
+    const u32 i = u32(std::countr_zero(bits));
+    k.slots[i] = sc.vertex_fetch_slots[64 + i] & 3u;
+  }
+  SpecScalarsOf(sc, k.scalars);
+}
+[[gnu::noinline]] bool SpecInputsSame(const SpecKeep &k, const SharedConstants &sc) {
+  u32 d = 0;
+  for (u32 bits = k.fetches; bits; bits &= bits - 1) {
+    const u32 r = u32(std::countr_zero(bits));
+    d |= ((sc.texture_indices[0][r] & kSpecTextureBits) ^ k.tex0[r]) | (sc.texture_indices[1][r] ^ k.tex1[r]) |
+         ((sc.texture_indices[2][r] & kSpecTextureBits) ^ k.tex2[r]) |
+         ((sc.sampler_indices[r] & kSpecSamplerBits) ^ k.sampler[r]);
+  }
+  for (u32 bits = k.memory_fetches; bits; bits &= bits - 1) {
+    const u32 i = u32(std::countr_zero(bits));
+    d |= (sc.vertex_fetch_slots[64 + i] & 3u) ^ k.slots[i];
+  }
+  u32 now[kSpecScalars];
+  SpecScalarsOf(sc, now);
+  for (u32 j = 0; j < kSpecScalars; ++j)
+    d |= now[j] ^ k.scalars[j];
+  return d == 0;
+}
 // sasrt-nx (2026-11-08, sasrt_gpu_export_format_spec): [8]-[11] (cold: export shaders only).
 [[gnu::noinline]] void SasrtExportFormatWords(SasrtSpecWords &s, const ShaderCacheEntry &vs, const FloatConstants &vsc) {
   u32 n = 0;
@@ -11736,11 +11791,17 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   const u32 sk_colors = std::min<u32>(targets.color_count, 4u);
   const bool sk_cacheable = !(vs->entry && vs->entry->memExportConstants[0]) && ab_off != 172;
   const bool sk_bound = DrawSummaryOf(*vs).bound_fetches;
-  bool sk_hit = sk_cacheable && sk.valid && (g_spec_lines_seen & kSpecLines) == 0 && sk.bound_fetches == sk_bound &&
+  bool sk_hit = sk_cacheable && sk.valid && sk.bound_fetches == sk_bound &&
                 sk.vs_entry == vs->entry && sk.ps_entry == ps_entry && sk.per_instance == geometry.per_instance &&
                 sk.ab == ab_off && sk.color_count == targets.color_count;
   for (u32 i = 0; i < sk_colors && sk_hit; ++i)
     sk_hit = sk.color_info[i] == (targets.colors[i] ? targets.colors[i]->color_info_word : 0u);
+  bool sk_by_words = false;
+  if (sk_hit && (g_spec_lines_seen & kSpecLines) != 0) {
+    sk_hit = sk_by_words = SpecInputsSame(sk, sc);  // a line they read was written: the words they read
+    if (sk_hit)
+      g_spec_lines_seen = 0;  // the words kept are the block's again
+  }
   if (sk_hit && verify) [[unlikely]] {
     const FetchSpec vf = FetchSpecWords(sc, *vs, geometry.per_instance, ab_off);
     const SasrtSpecWords vw = SasrtSpecWordsOf(sc, vs->entry, ps_entry, &vs_constants, &targets);
@@ -11755,7 +11816,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     }
   }
   if (sk_hit) {
-    ++g_spec_kept;
+    ++(sk_by_words ? g_spec_by_words : g_spec_kept);
   } else {
     ++g_spec_made;
     sk.fetch = FetchSpecWords(sc, *vs, geometry.per_instance, ab_off);  // banjo-nx (banjo_gpu_fetch_spec)
@@ -11771,6 +11832,11 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     sk.color_count = targets.color_count;
     for (u32 i = 0; i < 4; ++i)
       sk.color_info[i] = i < sk_colors && targets.colors[i] ? targets.colors[i]->color_info_word : 0u;
+    if (sk_cacheable) {
+      sk.fetches = (ps_entry ? ps_entry->textureFetchMask : 0u) | (vs->entry ? vs->entry->textureFetchMask : 0u);
+      sk.memory_fetches = vs->entry ? vs->entry->vertexFetchMemoryMask : 0u;
+      SpecKeepInputs(sk, sc);
+    }
     g_spec_lines_seen = 0;
   }
   const FetchSpec &fetch_spec = sk.fetch;
@@ -12534,9 +12600,10 @@ std::string FastDrawReport() {
                        std::exchange(g_packet_hits, 0), std::exchange(g_packet_misses, 0),
                        std::exchange(g_packet_stale, 0), std::exchange(g_packet_made, 0));
   // banjo-nx (2026-11-21): the spec answers kept (A/B 172)
-  out += fmt::format(" spec answers kept {} of {}{},", g_spec_kept, g_spec_kept + g_spec_made,
+  out += fmt::format(" spec answers kept {} of {} ({} by their words){},", g_spec_kept + g_spec_by_words,
+                     g_spec_kept + g_spec_by_words + g_spec_made, g_spec_by_words,
                      g_spec_verify_differ ? fmt::format(" (verify: {} differ)", g_spec_verify_differ) : std::string());
-  g_spec_kept = g_spec_made = 0;
+  g_spec_kept = g_spec_by_words = g_spec_made = 0;
   return out;
 }
 
