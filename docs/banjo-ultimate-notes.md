@@ -398,3 +398,39 @@ readable check off (earlier). Built with the old profile they ran 13 % slower: e
 profile (GCC drops it when the function's code changed). PGO retrained (the instrumented build, 16 minutes in Ryujinx
 loading the user's save into Showdown Town, then input_script_sticks; out/emu/emu_train_city.toml; the old profile in
 pgo-inplace-titleintro-2026-11-20): 23.1 fps. Left: +11 % a draw and +4 % draws a frame against 1.0.2.
+
+## The render-thread batch (2026-11-20 evening, a390d9b2)
+
+The audited table of 64 (44 batch items, 20 experiments; c15 city profile 8.88 us a draw sampled at 1 ms, 8.39
+unsampled) went through against the code. What went in, each with its own A/B target where it can be switched:
+
+| Item | What | A/B |
+|---|---|---|
+| 1 | spec-word memo (sasrt rt2 spec_memo) | 306 |
+| 2 | -fno-threadsafe-statics on ultimate.cpp, banjo_renut_tuning.cpp, render_thread.cpp | build |
+| 3 | g_ab_off_plain (a plain int for the draw path); Latch() tests g_latched.ready | - |
+| 4 | the report's per-draw counters skipped with log_level "off" (release only) | - |
+| 5 | export reads kept on the fast path (sasrt rt4 export_reads_fast) | 305 |
+| 7 | held-export granule bitmap before GetStreamSource's map look | 307 |
+| 8 | PagesClean NEON tail for 1-7 pages | 304 |
+| 9 | whole-repeat answers for the kick's last four meshes | 309 |
+| 11 | constant runs one or two groups apart pushed as one | 308 |
+| 16 | PrefetchShaderBehind skipped for a stage whose word is the last op's | 301 |
+| 18 | FillTextures: a call that does not ask "same as last" skips the per-slot compare and copy | 300 |
+| 22 | the render thread's take-over of the cleaner's ranges off (594 of 1,320 a 10 s) | key |
+| 29 | slot-last answers skip the epoch buckets while g_texture_bind_gen holds (TextureObject's rule) | 300 |
+| 39 | depth bias left alone when its packets did not change | 302 |
+| 54 | two more ring prefetch lines | 303 |
+| 58 | experiment: banjo_renut_ring_spin_us (0 = off) | key |
+
+Found already done in the code (the cost in the profile is the lines they touch, not repeated work): 6 (the export
+checks run only while exports are pending), 12 (PushSharedConstants pushes only the lines written since the last push),
+13 (each copy proven once per kick interval: ProveCopyRange's first compare), 17 (PrefetchResourceObjects skips the
+objects the replay holds), 19-21, 27, 28 (plume: bindTextures skips an unchanged set and marks only rebound handles,
+setPipeline returns for the bound pipeline and binds only changed stages and state groups, buffers rebound only when
+dirty; noteDepthWrite is three loads). 15 and 16's rest are the shader record's first-touch miss: a memo would move it
+to the draw's later reads of the same line. 38: command memory is 64 KB blocks already; reserve's cost is per command.
+40: the skin table reports 0 without room. 42/43 not taken: one NRO with the A/B keys (the user's rule). 10 N/A.
+The rest (14, 23-26, 30-37, 41, 44) are 0.01-0.03 us each on paper and touch the record/replay format; left for after
+this measurement. memcpy (0.37 us, exp 45): its callers cannot be read from the stacks (a leaf without a frame record
+is folded into its caller; scratchpad leaf_callers.py decodes the BL before each return address).
