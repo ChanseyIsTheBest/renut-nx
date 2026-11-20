@@ -543,3 +543,6 @@ line's fps leans with it (>= 10.4 fps -> low in 6 of 7; <= 10.2 -> high in 8 of 
 (render us a draw), or bracket A/B/A until both land in the same state; an fps difference between two runs is mostly
 which state each landed in (~10 %). What the game varies (crowd, LOD, effects) and on what timing is still open.
 Per draw, low state: lean2 8.50, 5d1c60e9 8.48-8.54, 1.0.2 7.55; high state: lean2 counts-off 8.26, lean (alias on) 8.24.
+Correction to "the draws-a-frame puzzle solved" above: with sasrt_resolve_alias_previous on N&B landed in the high
+state 5 of 5 times and off low 2 of 2, but the level is a per-run choice the counters' switch can flip too: the fix is
+strongly associated with the high state, not proven to cause it directly. Off for N&B either way.
