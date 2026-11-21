@@ -594,12 +594,13 @@ void RefreshEffective() {
 }
 
 // banjo-nx (2026-11-21, the render thread to 33 ms; A/B 173): plume's Deko3DOptions::cachedCommands (see there).
-// Console c36 (Showdown Town, 21 pairs): render thread +0.2 % a draw (noise), GPU -1.0 % a draw (19 of 21 pairs),
-// all threads' CPU -0.9 %: on by default on the Switch.
-REXCVAR_DEFINE_BOOL(banjo_deko3d_cached_commands, BANJO_SWITCH_DEFAULT(false, true), "Banjo/Enhancements",
+// Console, Showdown Town, in-run pairs (median, render thread a draw with it on): c36 +0.11 % (21 pairs), c39 +0.90 %
+// (16); GPU -1.0 % and -0.9 % a draw (34 of 37 pairs lower). The ranges' clean at each list's end is the render
+// thread's, and the render thread sets the frame rate in the town: off by default (a GPU-bound scene may want it).
+REXCVAR_DEFINE_BOOL(banjo_deko3d_cached_commands, false, "Banjo/Enhancements",
                     "deko3d renderer (2026-11-21, A/B 173): command memory CPU-cached, each list's written ranges cleaned "
                     "to memory at its end (uncached before: every command word a store to the bus). The same commands. "
-                    "Console c36: GPU -1.0 % a draw, all threads' CPU -0.9 %")
+                    "Console c36/c39: GPU -1 % a draw, render thread +0.1/+0.9 % a draw (off: the town is render-bound)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 void ApplyPlume() {
