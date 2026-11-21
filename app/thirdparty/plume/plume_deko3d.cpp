@@ -639,6 +639,7 @@ namespace plume {
     }
 
     Deko3DBuffer::~Deko3DBuffer() {
+        Deko3DBeforeDestroy();  // banjo-nx (2026-11-21, the core-3 command stage)
         if (block) {
             {
                 std::lock_guard<std::mutex> lock(device->bufferMutex);
@@ -778,6 +779,7 @@ namespace plume {
     }
 
     Deko3DTexture::~Deko3DTexture() {
+        Deko3DBeforeDestroy();  // banjo-nx (2026-11-21, the core-3 command stage)
         if (valid && ownsMemory) {
             g_deko3dStats.imageBytes -= alloc.size;
             device->retire(alloc, nullptr);
@@ -891,6 +893,8 @@ namespace plume {
         }
         if (images) {
             imageCount = images;
+            imageSizes.resize(images);  // banjo-nx (2026-11-21): sized once (see imageTextures)
+            imageTextures.resize(images, nullptr);
             imageBlock = device->makeBlock(alignUp(images * 32, DK_MEMBLOCK_ALIGNMENT), DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, "image descriptors");
             if (imageBlock)
                 memset(dkMemBlockGetCpuAddr(imageBlock), 0, images * 32);
@@ -905,6 +909,7 @@ namespace plume {
     }
 
     Deko3DDescriptorSet::~Deko3DDescriptorSet() {
+        Deko3DBeforeDestroy();  // banjo-nx (2026-11-21, the core-3 command stage)
         if (imageBlock)
             device->retire({}, imageBlock);
         if (samplerBlock)
@@ -941,6 +946,9 @@ namespace plume {
 
     // renut-ultimate (2026-11-10, port 59, from LostOdysseyRecomp ff013164; Deko3DOptions::relaxedDescriptorCounters): the
     // count and the epoch of a descriptor write. Relaxed, nothing waits for the uncached descriptor store to drain.
+    static Deko3DImageTrackHook g_deko3dImageTrackHook = nullptr;  // banjo-nx (2026-11-21): Deko3DSetImageTrackHook
+    void (*g_deko3dBeforeDestroyHook)() = nullptr;  // banjo-nx (2026-11-21): plume_deko3d.h
+
     static void noteDescriptorWrite(Deko3DDevice *device) {
         if (g_deko3dOptions.relaxedDescriptorCounters) {
             g_deko3dStats.descriptorWrites.fetch_add(1, std::memory_order_relaxed);
@@ -987,8 +995,6 @@ namespace plume {
             // size at the view's first level; the depth of a 3D image there, else the view's layers (all from its first
             // when it names no count). tools/deko3d_glsl_opt.py's txq verify (constant 908 = 2) checks it on the GPU.
             const uint32_t id = descriptorIndex - imageFirst;
-            if (imageSizes.size() <= id)
-                imageSizes.resize(id + 1);
             const uint32_t m = view.mipLevelOffset;
             const uint32_t w = std::max(1u, t->desc.width >> m), h = std::max(1u, t->desc.height >> m);
             const DkImageType type = view.type != DkImageType_None ? view.type : t->type;
@@ -998,17 +1004,38 @@ namespace plume {
             else
                 z = view.layerCount ? view.layerCount
                                     : (t->desc.arraySize > view.layerOffset ? t->desc.arraySize - view.layerOffset : 1u);
-            imageSizes[id] = {w, h, z};
-            if (imageTextures.size() <= id)  // sasrt-nx (2026-11-08, Deko3DOptions::trackedImageInvalidate)
-                imageTextures.resize(id + 1, nullptr);
-            imageTextures[id] = t;
+            // banjo-nx (2026-11-21, the core-3 command stage): the tables' update through the hook when it takes it.
+            const Deko3DImageTrack track{this, id, t, {w, h, z}, true};
+            if (!g_deko3dImageTrackHook || !g_deko3dImageTrackHook(track))
+                Deko3DApplyImageTrack(track);
         }
         if (t == nullptr || !t->valid) {  // sasrt-nx (2026-11-08): an emptied slot names no texture
-            const uint32_t id = descriptorIndex - imageFirst;
-            if (id < imageTextures.size())
-                imageTextures[id] = nullptr;
+            const Deko3DImageTrack track{this, descriptorIndex - imageFirst, nullptr, {0, 0, 0}, false};
+            if (!g_deko3dImageTrackHook || !g_deko3dImageTrackHook(track))
+                Deko3DApplyImageTrack(track);
         }
         noteDescriptorWrite(device);
+    }
+
+    // banjo-nx (2026-11-21, the core-3 command stage): plume_deko3d.h.
+    void Deko3DSetImageTrackHook(Deko3DImageTrackHook hook) { g_deko3dImageTrackHook = hook; }
+    void Deko3DApplyImageTrack(const Deko3DImageTrack &track) {
+        Deko3DDescriptorSet *set = track.set;
+        const uint32_t id = track.id;
+        if (!set)
+            return;
+        if (track.sized) {
+            if (set->imageSizes.size() <= id)  // (not with a set made with its images: sized then)
+                set->imageSizes.resize(id + 1);
+            set->imageSizes[id] = {track.size[0], track.size[1], track.size[2]};
+        }
+        if (track.texture) {
+            if (set->imageTextures.size() <= id)
+                set->imageTextures.resize(id + 1, nullptr);
+            set->imageTextures[id] = track.texture;
+        } else if (id < set->imageTextures.size()) {
+            set->imageTextures[id] = nullptr;
+        }
     }
 
     void Deko3DDescriptorSet::setSampler(uint32_t descriptorIndex, const RenderSampler *sampler) {
@@ -1035,6 +1062,7 @@ namespace plume {
     }
 
     Deko3DQueryPool::~Deko3DQueryPool() {
+        Deko3DBeforeDestroy();  // banjo-nx (2026-11-21, the core-3 command stage)
         if (block)
             device->retire({}, block);
     }
@@ -2497,6 +2525,7 @@ namespace plume {
     Deko3DGraphicsPipeline::Deko3DGraphicsPipeline() { g_graphicsPipelines.fetch_add(1, std::memory_order_relaxed); }
 
     Deko3DGraphicsPipeline::~Deko3DGraphicsPipeline() {
+        Deko3DBeforeDestroy();  // banjo-nx (2026-11-21, the core-3 command stage)
         g_graphicsPipelines.fetch_sub(1, std::memory_order_relaxed);
         if (provisional.load(std::memory_order_relaxed))
             g_deko3dProvisionalPipelines.fetch_sub(1, std::memory_order_relaxed);

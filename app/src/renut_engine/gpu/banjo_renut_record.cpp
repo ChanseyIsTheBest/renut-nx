@@ -14,6 +14,9 @@
 
 #include <plume_render_interface.h>
 #include <plume_vulkan.h>
+#if defined(PLUME_DEKO3D)
+#include <plume_deko3d.h>
+#endif
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -35,7 +38,37 @@ REXCVAR_DEFINE_INT32(banjo_renut_record_worker_core, 0, "Banjo",
                      "Renut's renderer, the Switch: the core of banjo_renut_record_worker's thread (-1: not pinned; "
                      "the render thread has banjo_ring_core, the pipeline workers banjo_background_compile_core)")
     .range(-1, 2);
+// banjo-nx (2026-11-21, the user's "build core 3"): banjo_renut_record.h.
+REXCVAR_DEFINE_BOOL(banjo_deko3d_command_stage, false, "Banjo/Enhancements",
+                    "deko3d renderer (2026-11-21, the core-3 command stage): the render thread records its command "
+                    "list into a stream and a thread on the system core (core 3, 4-core mode only) plays it into "
+                    "deko3d (plume's command list and libdeko3d's encoding move off the render thread). Same "
+                    "commands, same order. In-run A/B target 182 (its off half: the render thread records directly)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(banjo_deko3d_command_stage_priority, 0x2E, "Banjo",
+                     "deko3d command stage: its thread's priority on the system core (0x2E: below the game's audio "
+                     "threads there, 0x2A-0x2D, above the shader compiler)")
+    .range(0x20, 0x3F)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(banjo_deko3d_command_stage_batch, 1024, "Banjo",
+                     "deko3d command stage: commands recorded before a hand-over to its thread (each a possible wake: "
+                     "fewer, larger hand-overs cost the render thread less; the frame's last part waits for its play)")
+    .range(64, 16384)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_deko3d_command_stage_any_core, false, "Banjo/Diagnostics",
+                    "deko3d command stage without 4-core mode (the emulator's tests): its thread on any core, not pinned")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_deko3d_command_stage_verify, false, "Banjo/Diagnostics",
+                    "deko3d command stage: before every recorded draw a hash of the render thread's shared constants "
+                    "copy (what bindTextures reads) goes into the stream, and the stage compares its own copy's (the "
+                    "10 s line's 'shared copies checked / differ')")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DECLARE(bool, banjo_cpu_verify);
+
+#if REX_PLATFORM_SWITCH
+extern "C" int RexSwitchSystemCore(void);
+extern "C" bool RexSwitchMoveCurrentThreadToSystemCore(int priority);
+#endif
 
 namespace banjo::renut_gpu::record {
 namespace {
@@ -52,7 +85,12 @@ enum Op : uint16_t {
   kSetIndexBuffer, kSetVertexBuffers, kSetViewports, kSetScissors, kSetFramebuffer, kSetDepthBias,
   kSetStencilReference, kClearColor, kClearDepthStencil, kCopyBufferRegion, kCopyTextureRegion, kCopyBuffer,
   kCopyTexture, kResolveTexture, kResolveTextureRegion, kDiscardTexture, kResetQueryPool, kWriteTimestamp,
-  kBlendConstants, kOpCount
+  kBlendConstants,
+  // banjo-nx (2026-11-21, the deko3d command stage): plume's deko3d calls that take the list, and the image tables.
+  kD3PushUniform, kD3BindUniform, kD3BindStorage, kD3SetSharedWords, kD3SharedLines, kD3BindFragTextures,
+  kD3BindMemExport, kD3BindFetchData, kD3FlushL2, kD3DiscardNextDraw, kD3SampleMask, kD3NextPrimitive, kD3BufferWait,
+  kD3ReportCounter, kD3ImageTrack, kD3VerifyShared,
+  kOpCount
 };
 
 struct Header {
@@ -96,16 +134,52 @@ bool On() {
   static const bool on = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(banjo_renut_record_worker));
   return on && RecordWorkerAbOn();
 }
+// banjo-nx (2026-11-21): the deko3d command stage, in 4-core mode only (on the game's cores it would take their time).
+bool StageOn() {
+#if defined(PLUME_DEKO3D) && REX_PLATFORM_SWITCH
+  static const bool on = REXCVAR_GET(banjo_deko3d_command_stage) &&
+                         (RexSwitchSystemCore() >= 0 || REXCVAR_GET(banjo_deko3d_command_stage_any_core));
+  return on && g_ab_off.load(std::memory_order_relaxed) != 182;
+#elif defined(PLUME_DEKO3D)
+  static const bool on = REXCVAR_GET(banjo_deko3d_command_stage) && REXCVAR_GET(banjo_deko3d_command_stage_any_core);
+  return on && g_ab_off.load(std::memory_order_relaxed) != 182;
+#else
+  return false;
+#endif
+}
+// The shared constants' copy's hash (banjo_deko3d_command_stage_verify): FNV-1a over 64-bit words.
+uint64_t SharedHash(const uint8_t *p, uint32_t n) {
+  uint64_t h = 0xCBF29CE484222325ull;
+  uint32_t i = 0;
+  for (; i + 8 <= n; i += 8) {
+    uint64_t w;
+    std::memcpy(&w, p + i, 8);
+    h = (h ^ w) * 0x100000001B3ull;
+  }
+  for (; i < n; ++i)
+    h = (h ^ p[i]) * 0x100000001B3ull;
+  return h;
+}
+std::atomic<uint64_t> g_shared_checked{0}, g_shared_differ{0};
+bool g_deko3d_stage = false;  // the worker plays deko3d lists (set before it starts)
+thread_local bool t_recording_thread = false;  // the render thread, once it has wrapped a list
 
 void Play(plume::RenderCommandList *cmd, const uint8_t *p, const uint8_t *end);
 
 void Worker() {
 #if REX_PLATFORM_SWITCH
+  if (g_deko3d_stage) {
+    const int priority = REXCVAR_GET(banjo_deko3d_command_stage_priority);
+    const bool moved = RexSwitchMoveCurrentThreadToSystemCore(priority);
+    REXLOG_INFO("[renut] deko3d command stage: thread on the system core {}{} at priority 0x{:X}", RexSwitchSystemCore(),
+                moved ? "" : " (NOT accepted)", priority);
+  } else {
   const int core = REXCVAR_GET(banjo_renut_record_worker_core);
   const bool priority_ok = RexSwitchSetCurrentThreadPriorityOk(kWorkerPriority);
   const bool core_ok = core < 0 || RexSwitchPinCurrentThreadToCore(core);
   REXLOG_INFO("[renut] record worker at priority 0x{:X}{}, {}", kWorkerPriority, priority_ok ? "" : " (NOT accepted)",
               core < 0 ? std::string("not pinned") : fmt::format("core {}{}", core, core_ok ? "" : " (NOT accepted)"));
+  }
 #endif
   for (;;) {
     Chunk *c = nullptr;
@@ -172,6 +246,25 @@ struct ResolveRegionHead { const plume::RenderTexture *dst; uint32_t x, y; const
                            uint32_t has_rect; plume::RenderResolveMode mode; };
 struct QueryHead { const plume::RenderQueryPool *pool; uint32_t first, count; };
 struct Floats4 { float v[4]; };
+// banjo-nx (2026-11-21, the deko3d command stage)
+struct PushUniformHead { uint64_t address; uint32_t ubo_size, offset, size, pad; };
+struct BindBufHead { uint64_t address; uint32_t slot, size; };
+struct SharedWordsHead { uint32_t size, has; };
+struct FragTexHead { uint32_t first, count; };
+struct FetchHead { uint64_t address; uint32_t size, pad; };
+struct BufferWaitHead { uint32_t invalidate, counts; };
+struct ReportHead { const void *pool; uint32_t index, counter; };
+struct VerifyHead { uint64_t hash; uint32_t size, pad; };
+#if defined(PLUME_DEKO3D)
+static_assert(kPod<plume::Deko3DImageTrack>, "the stream copies an image track as bytes");
+// The stage's own copy of the shared constants that plume's bindTextures reads (the render thread's, g_bound.pushed_shared,
+// is the next draws' by the time a draw is played): set whole at each recorded Deko3DSetSharedWords, then every recorded
+// push to the shared buffer (uniform slot 2) written into it at its offset, as the render thread writes its copy after
+// each push. Worker only.
+std::vector<uint8_t> g_stage_shared;
+uint64_t g_stage_shared_address = 0;
+constexpr uint32_t kSharedUboSlot = 2;  // plume_deko3d_commands.cpp SharedUboSlot
+#endif
 
 void Play(plume::RenderCommandList *cmd, const uint8_t *p, const uint8_t *end) {
   while (p < end) {
@@ -309,11 +402,89 @@ void Play(plume::RenderCommandList *cmd, const uint8_t *p, const uint8_t *end) {
     case kWriteTimestamp: { const QueryHead &q = At<QueryHead>(p); cmd->writeTimestamp(q.pool, q.first); break; }
     case kBlendConstants: {
       const Floats4 &f = At<Floats4>(p);
+#if defined(PLUME_DEKO3D)
+      if (g_deko3d_stage) {
+        plume::Deko3DSetBlendConstant(cmd, f.v);
+        break;
+      }
+#endif
       VkCommandBuffer vk = static_cast<plume::VulkanCommandList *>(cmd)->vk;
       if (vk && vkCmdSetBlendConstants)
         vkCmdSetBlendConstants(vk, f.v);
       break;
     }
+#if defined(PLUME_DEKO3D)
+    case kD3PushUniform: {
+      const PushUniformHead &u = At<PushUniformHead>(p);
+      const uint8_t *data = Array<uint8_t>(p, u.size);
+      plume::Deko3DPushUniform(cmd, u.address, u.ubo_size, u.offset, data, u.size);
+      if (u.address == g_stage_shared_address && uint64_t(u.offset) + u.size <= g_stage_shared.size())
+        std::memcpy(g_stage_shared.data() + u.offset, data, u.size);
+      break;
+    }
+    case kD3BindUniform: {
+      const BindBufHead &b = At<BindBufHead>(p);
+      plume::Deko3DBindUniform(cmd, b.slot, b.address, b.size);
+      if (b.slot == kSharedUboSlot)
+        g_stage_shared_address = b.address;
+      break;
+    }
+    case kD3BindStorage: {
+      const BindBufHead &b = At<BindBufHead>(p);
+      plume::Deko3DBindStorage(cmd, b.slot, b.address, b.size);
+      break;
+    }
+    case kD3SetSharedWords: {
+      const SharedWordsHead &w = At<SharedWordsHead>(p);
+      if (w.has) {
+        const uint8_t *bytes = Array<uint8_t>(p, w.size);
+        g_stage_shared.assign(bytes, bytes + w.size);
+        plume::Deko3DSetSharedWords(cmd, g_stage_shared.data(), w.size);
+      } else {
+        plume::Deko3DSetSharedWords(cmd, nullptr, 0);
+      }
+      break;
+    }
+    case kD3SharedLines: plume::Deko3DSharedLinesWritten(cmd, At<CountHead>(p).count); break;
+    case kD3BindFragTextures: {
+      const FragTexHead &f = At<FragTexHead>(p);
+      plume::Deko3DBindFragmentTextures(cmd, f.first, Array<uint32_t>(p, f.count), f.count);
+      break;
+    }
+    case kD3BindMemExport:
+      plume::Deko3DBindMemExport(cmd, static_cast<const plume::RenderBuffer *>(At<Ptr>(p).p));
+      break;
+    case kD3BindFetchData: {
+      const FetchHead &f = At<FetchHead>(p);
+      plume::Deko3DBindFetchData(cmd, f.address, f.size);
+      break;
+    }
+    case kD3FlushL2: plume::Deko3DFlushL2(cmd); break;
+    case kD3DiscardNextDraw: plume::Deko3DDiscardNextDraw(cmd); break;
+    case kD3SampleMask: plume::Deko3DSetSampleMask(cmd, At<CountHead>(p).count); break;
+    case kD3NextPrimitive: plume::Deko3DSetNextPrimitive(cmd, At<CountHead>(p).count); break;
+    case kD3BufferWait: {
+      const BufferWaitHead &w = At<BufferWaitHead>(p);
+      plume::Deko3DBufferWait(cmd, w.invalidate, w.counts != 0);
+      break;
+    }
+    case kD3ReportCounter: {
+      const ReportHead &r = At<ReportHead>(p);
+      plume::Deko3DReportCounter(cmd, static_cast<const plume::RenderQueryPool *>(r.pool), r.index, r.counter);
+      break;
+    }
+    case kD3ImageTrack: plume::Deko3DApplyImageTrack(At<plume::Deko3DImageTrack>(p)); break;
+    case kD3VerifyShared: {
+      const VerifyHead &v = At<VerifyHead>(p);
+      g_shared_checked.fetch_add(1, std::memory_order_relaxed);
+      if (v.size != g_stage_shared.size() || SharedHash(g_stage_shared.data(), v.size) != v.hash) {
+        if (g_shared_differ.fetch_add(1, std::memory_order_relaxed) < 8)
+          REXLOG_WARN("[renut] deko3d command stage verify: the stage's shared constants copy differs from the render "
+                      "thread's at a draw ({} bytes against {})", g_stage_shared.size(), v.size);
+      }
+      break;
+    }
+#endif
     default:
       REXLOG_ERROR("[renut] record worker: unknown command {}", h.op);
       return;
@@ -360,7 +531,7 @@ public:
 
   // Hands the recorded chunk to the worker (always when 'full'; else once enough is recorded).
   void Publish(bool full) {
-    if (cur_ && cur_->used && (full || cur_->used >= kPublishBytes || commands_ >= kPublishCommands)) {
+    if (cur_ && cur_->used && (full || cur_->used >= kPublishBytes || commands_ >= publish_commands_)) {
       Chunk *c = cur_;
       cur_ = nullptr;
       c->target = real;  // every command since the last hand-over is for the list open now (Wrap)
@@ -418,6 +589,8 @@ public:
     p = Put(p, Barriers{stages, bn, tn});
     p = PutArray(p, bb, bn);
     PutArray(p, tb, tn);
+    if (bn)
+      ++buffer_waits_;  // banjo-nx (2026-11-21): plume's Deko3DBufferWaits counts these
     Done();
   }
   void dispatch(uint32_t x, uint32_t y, uint32_t z) override {
@@ -429,10 +602,12 @@ public:
     Unsupported("traceRays");
   }
   void drawInstanced(uint32_t a, uint32_t b, uint32_t c, uint32_t d) override {
+    VerifyShared();  // banjo-nx (2026-11-21): banjo_deko3d_command_stage_verify
     Put(Emit(kDraw, Size<U32x4>()), U32x4{a, b, c, d});
     Done();
   }
   void drawIndexedInstanced(uint32_t a, uint32_t b, uint32_t c, int32_t d, uint32_t e) override {
+    VerifyShared();  // banjo-nx (2026-11-21): banjo_deko3d_command_stage_verify
     Put(Emit(kDrawIndexed, Size<DrawIndexed>()), DrawIndexed{a, b, c, d, e});
     Done();
   }
@@ -568,6 +743,69 @@ public:
     Done();
   }
 
+  // banjo-nx (2026-11-21, the deko3d command stage): banjo_renut_record.h's wrappers.
+  uint32_t publish_commands_ = kPublishCommands;
+  uint64_t buffer_waits_ = 0;
+  void D3PushUniform(uint64_t address, uint32_t ubo_size, uint32_t offset, const void *data, uint32_t size) {
+    uint8_t *p = Emit(kD3PushUniform, Size<PushUniformHead>() + Size<uint8_t>(size));
+    PutArray(Put(p, PushUniformHead{address, ubo_size, offset, size, 0}), static_cast<const uint8_t *>(data), size);
+    Done();
+  }
+  void D3BindBuf(Op op, uint32_t slot, uint64_t address, uint32_t size) {
+    Put(Emit(op, Size<BindBufHead>()), BindBufHead{address, slot, size});
+    Done();
+  }
+  const uint8_t *shared_cpu_ = nullptr;  // the render thread's copy (Deko3DSetSharedWords), for the verify form
+  uint32_t shared_size_ = 0;
+  bool verify_ = false;
+  void VerifyShared() {
+    if (verify_ && shared_cpu_)
+      Put(Emit(kD3VerifyShared, Size<VerifyHead>()), VerifyHead{SharedHash(shared_cpu_, shared_size_), shared_size_, 0});
+  }
+  void D3SetSharedWords(const void *cpu, uint32_t size) {
+    shared_cpu_ = static_cast<const uint8_t *>(cpu);
+    shared_size_ = cpu ? size : 0u;
+    const uint32_t n = cpu ? size : 0u;
+    uint8_t *p = Emit(kD3SetSharedWords, Size<SharedWordsHead>() + Size<uint8_t>(n));
+    PutArray(Put(p, SharedWordsHead{n, cpu ? 1u : 0u}), static_cast<const uint8_t *>(cpu), n);
+    Done();
+  }
+  void D3Word(Op op, uint32_t v) {
+    Put(Emit(op, Size<CountHead>()), CountHead{v});
+    Done();
+  }
+  void D3Bare(Op op) {
+    Emit(op, 0);
+    Done();
+  }
+  void D3FragTextures(uint32_t first, const uint32_t *slots, uint32_t count) {
+    uint8_t *p = Emit(kD3BindFragTextures, Size<FragTexHead>() + Size<uint32_t>(count));
+    PutArray(Put(p, FragTexHead{first, count}), slots, count);
+    Done();
+  }
+  void D3Ptr(Op op, const void *ptr) { PutPtr(op, ptr); }
+  void D3FetchData(uint64_t address, uint32_t size) {
+    Put(Emit(kD3BindFetchData, Size<FetchHead>()), FetchHead{address, size, 0});
+    Done();
+  }
+  void D3BufferWait(uint32_t invalidate, bool counts) {
+    Put(Emit(kD3BufferWait, Size<BufferWaitHead>()), BufferWaitHead{invalidate, counts ? 1u : 0u});
+    if (counts)
+      ++buffer_waits_;
+    Done();
+  }
+  void D3ReportCounter(const void *pool, uint32_t index, uint32_t counter) {
+    Put(Emit(kD3ReportCounter, Size<ReportHead>()), ReportHead{pool, index, counter});
+    Done();
+  }
+#if defined(PLUME_DEKO3D)
+  void D3ImageTrack(const plume::Deko3DImageTrack &track) {
+    Put(Emit(kD3ImageTrack, Size<plume::Deko3DImageTrack>()), track);
+    Done();
+  }
+#endif
+  bool Pending() const { return cur_ && cur_->used; }
+
 private:
   Chunk *cur_ = nullptr;
   uint32_t commands_ = 0;
@@ -600,12 +838,66 @@ private:
 };
 
 Recorder g_recorder;
+// banjo-nx (2026-11-21, the deko3d command stage): a list is open on the proxy (between the Wrap that gave it and the
+// next Wrap); the image tables' updates then go into the stream (render thread only).
+bool g_stage_list = false;
+std::atomic<uint64_t> g_image_tracks{0}, g_image_tracks_direct{0}, g_image_tracks_other_thread{0};
+
+#if defined(PLUME_DEKO3D)
+std::atomic<uint64_t> g_destroy_drains{0};
+// plume's object destructors (g_deko3dBeforeDestroyHook): on the render thread with a stage list open and anything
+// recorded not played yet, the stage plays it all first (a command naming the object may be among it). The objects
+// retired with the frame go when the stream is empty (the frame's drain came first): a test, no wait.
+void BeforeDestroyHook() {
+  if (!g_stage_list || !t_recording_thread)
+    return;
+  bool busy = g_recorder.Pending();
+  if (!busy) {
+    std::lock_guard lock(g_mutex);
+    busy = g_played != g_published;
+  }
+  if (busy) {
+    g_recorder.Drain();
+    g_destroy_drains.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+// plume's setTexture, any thread: on the render thread with a stage list open, the image tables' update goes into the
+// stream, after the draws recorded so far (the stage reads the tables in bindTextures and markSampled); else plume writes
+// it now. (setTexture's callers hold State().mutex: the render thread's work, or none of it running.)
+bool ImageTrackHook(const plume::Deko3DImageTrack &track) {
+  if (!g_stage_list || !t_recording_thread) {
+    if (g_stage_list)
+      g_image_tracks_other_thread.fetch_add(1, std::memory_order_relaxed);
+    else
+      g_image_tracks_direct.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  g_recorder.D3ImageTrack(track);
+  g_image_tracks.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+#endif
 
 }  // namespace
 
+#if defined(PLUME_DEKO3D)
+plume::RenderCommandList *g_proxy = nullptr;
+#endif
+
 plume::RenderCommandList *Wrap(plume::RenderCommandList *real) {
-  // Vulkan only: the blend constant is played as a Vulkan command (SetBlendConstant's own call).
-  if (!real || !::renut::gpu::IsVulkan() || !On()) {
+  t_recording_thread = true;
+  // Vulkan: the blend constant is played as a Vulkan command (SetBlendConstant's own call). deko3d: the command stage.
+  const bool deko3d = ::renut::gpu::IsDeko3D();
+  const bool use = real && (deko3d ? StageOn() : (::renut::gpu::IsVulkan() && On()));
+  if (!use) {
+    // banjo-nx (2026-11-21): from the stage to direct recording (an A/B half): what the stream still holds (image tables'
+    // updates made since the last drain) is played first, so they stay in order with what the render thread does now.
+    if (g_stage_list) {
+      g_stage_list = false;
+      if (g_recorder.Pending() || g_started)
+        g_recorder.Drain();
+    }
     g_direct_lists.fetch_add(1, std::memory_order_relaxed);
     return real;
   }
@@ -613,14 +905,52 @@ plume::RenderCommandList *Wrap(plume::RenderCommandList *real) {
     std::lock_guard lock(g_mutex);
     if (!g_started) {
       g_started = true;
+#if defined(PLUME_DEKO3D)
+      if (deko3d) {
+        g_deko3d_stage = true;  // before the worker starts (it reads it once)
+        g_recorder.publish_commands_ = uint32_t(REXCVAR_GET(banjo_deko3d_command_stage_batch));
+        g_recorder.verify_ = REXCVAR_GET(banjo_deko3d_command_stage_verify);
+        g_proxy = &g_recorder;
+        plume::Deko3DSetImageTrackHook(&ImageTrackHook);
+        plume::g_deko3dBeforeDestroyHook = &BeforeDestroyHook;
+      }
+#endif
       StartLongLivedThread(&Worker, 256u << 10);
     }
   }
-  // Every earlier list was drained before its submit: the stream is empty here, so the target switches cleanly.
+  // Every earlier list was drained before its submit: the stream holds no command for an earlier list here (at most
+  // image tables' updates, which name no list), so the target switches cleanly.
   g_recorder.real = real;
+  g_stage_list = deko3d;
   g_lists.fetch_add(1, std::memory_order_relaxed);
   return &g_recorder;
 }
+
+#if defined(PLUME_DEKO3D)
+namespace detail {
+void PushUniform(uint64_t address, uint32_t uboSize, uint32_t offset, const void *data, uint32_t size) {
+  g_recorder.D3PushUniform(address, uboSize, offset, data, size);
+}
+void BindUniform(uint32_t slot, uint64_t address, uint32_t size) { g_recorder.D3BindBuf(kD3BindUniform, slot, address, size); }
+void BindStorage(uint32_t slot, uint64_t address, uint32_t size) { g_recorder.D3BindBuf(kD3BindStorage, slot, address, size); }
+void SetSharedWords(const void *cpu, uint32_t size) { g_recorder.D3SetSharedWords(cpu, size); }
+void SharedLinesWritten(uint32_t lines) { g_recorder.D3Word(kD3SharedLines, lines); }
+void BindFragmentTextures(uint32_t first, const uint32_t *slots, uint32_t count) {
+  g_recorder.D3FragTextures(first, slots, count);
+}
+void BindMemExport(const plume::RenderBuffer *buffer) { g_recorder.D3Ptr(kD3BindMemExport, buffer); }
+void BindFetchData(uint64_t address, uint32_t size) { g_recorder.D3FetchData(address, size); }
+void FlushL2() { g_recorder.D3Bare(kD3FlushL2); }
+void DiscardNextDraw() { g_recorder.D3Bare(kD3DiscardNextDraw); }
+void SetSampleMask(uint32_t mask) { g_recorder.D3Word(kD3SampleMask, mask); }
+void SetNextPrimitive(uint32_t primitive) { g_recorder.D3Word(kD3NextPrimitive, primitive); }
+void BufferWait(uint32_t invalidate, bool countsAsBufferWait) { g_recorder.D3BufferWait(invalidate, countsAsBufferWait); }
+uint64_t BufferWaits() { return g_recorder.buffer_waits_; }
+void ReportCounter(const plume::RenderQueryPool *pool, uint32_t index, uint32_t counter) {
+  g_recorder.D3ReportCounter(pool, index, counter);
+}
+}  // namespace detail
+#endif
 
 void Drain() {
   if (g_started)
@@ -660,9 +990,21 @@ void Report(int seconds) {
   const uint64_t wait_us = g_drain_wait_us.exchange(0, std::memory_order_relaxed);
   const uint64_t busy_us = g_worker_busy_us.exchange(0, std::memory_order_relaxed);
   const uint64_t wakes = g_wakes.exchange(0, std::memory_order_relaxed);
-  REXLOG_INFO("[renut] record worker (banjo_renut_record_worker): {} lists through it, {} direct; {} commands in {} "
-              "chunks ({} wakes); worker playing {:.1f} ms; the render thread waited {:.1f} ms in {} drains",
-              lists, direct, commands, chunks, wakes, double(busy_us) / 1000.0, double(wait_us) / 1000.0, drains);
+#if defined(PLUME_DEKO3D)
+  const uint64_t destroy_drains = g_destroy_drains.exchange(0, std::memory_order_relaxed);
+#else
+  const uint64_t destroy_drains = 0;
+#endif
+  REXLOG_INFO("[renut] record worker (banjo_renut_record_worker{}): {} lists through it, {} direct; {} commands in {} "
+              "chunks ({} wakes); worker playing {:.1f} ms; the render thread waited {:.1f} ms in {} drains; image "
+              "tables' updates {} in the stream, {} direct, {} off the render thread with a stage list open; drains "
+              "before an object went {}; shared copies checked {}, differ {}",
+              g_deko3d_stage ? ", banjo_deko3d_command_stage" : "", lists, direct, commands, chunks, wakes,
+              double(busy_us) / 1000.0, double(wait_us) / 1000.0, drains,
+              g_image_tracks.exchange(0, std::memory_order_relaxed),
+              g_image_tracks_direct.exchange(0, std::memory_order_relaxed),
+              g_image_tracks_other_thread.exchange(0, std::memory_order_relaxed), destroy_drains,
+              g_shared_checked.exchange(0, std::memory_order_relaxed), g_shared_differ.load(std::memory_order_relaxed));
 }
 
 }  // namespace banjo::renut_gpu::record

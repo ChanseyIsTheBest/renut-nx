@@ -2655,7 +2655,7 @@ void InheritEdramBeforeDrawLocked(const Targets &t, u32 color_mask, const u32 *b
       // resolve's multisampled variant does (katamari-nx: Ryujinx cannot follow a bindless multisampled fetch).
       // Without it they read whatever binding 0 last held.
       if (src_ms && IsDeko3D())
-        plume::Deko3DBindFragmentTextures(cmd, 0, &source_slot, 1);
+        banjo::renut_gpu::record::BindFragmentTextures(cmd, 0, &source_slot, 1);
 #endif
       cmd->setGraphicsPushConstants(0, &push, 0, sizeof(push));
       cmd->drawInstanced(3, 1, 0, 0);
@@ -3681,7 +3681,7 @@ inline void DiagPushLines(u32 first, u32 run) {
       }
       remaining &= ~(uint64_t(1) << (63 - group));
     }
-    plume::Deko3DPushUniform(cmd, ubo, kFloatConstantsUboBytes, first * kConstantGroupBytes, lanes,
+    banjo::renut_gpu::record::PushUniform(cmd, ubo, kFloatConstantsUboBytes, first * kConstantGroupBytes, lanes,
                              count * kConstantGroupBytes);
     pushed_bytes += count * kConstantGroupBytes;
   }
@@ -3698,7 +3698,7 @@ inline void DiagPushLines(u32 first, u32 run) {
     // would push them, and its registers' mask words.
     if (const auto *lr = static_cast<const LiteralRuns *>(summary.literal_runs)) {
       for (const LiteralRuns::Run &run : lr->runs()) {
-        plume::Deko3DPushUniform(cmd, ubo, kFloatConstantsUboBytes, run.first * 16, lr->values() + run.value_word,
+        banjo::renut_gpu::record::PushUniform(cmd, ubo, kFloatConstantsUboBytes, run.first * 16, lr->values() + run.value_word,
                                  run.count * 16);
         pushed_bytes += run.count * 16;
         for (u32 k = 0; k < run.count && run.first + k < 256; ++k)
@@ -3722,7 +3722,7 @@ inline void DiagPushLines(u32 first, u32 run) {
     u32 run_first = 0, run_count = 0;
     auto flush_run = [&] {
       if (run_count) {
-        plume::Deko3DPushUniform(cmd, ubo, kFloatConstantsUboBytes, run_first * 16, run_values, run_count * 16);
+        banjo::renut_gpu::record::PushUniform(cmd, ubo, kFloatConstantsUboBytes, run_first * 16, run_values, run_count * 16);
         pushed_bytes += run_count * 16;
         run_count = 0;
       }
@@ -3922,10 +3922,10 @@ void PushSharedConstants(plume::RenderCommandList *cmd, const SharedConstants &s
   if (!g_bound.pushed_shared_valid) {
     g_spec_lines_seen = ~0u;  // banjo-nx (2026-11-21): a whole push does not need the marks, so trust none
     DiagPushLines(0, kSharedLines);  // banjo-nx (2026-10-28, diagnostic)
-    plume::Deko3DPushUniform(cmd, ubo, kSize, 0, now, kSize);
+    banjo::renut_gpu::record::PushUniform(cmd, ubo, kSize, 0, now, kSize);
     std::memcpy(held, now, kSize);
 #if defined(PLUME_DEKO3D)
-    plume::Deko3DSharedLinesWritten(cmd, ~0u);  // banjo-nx (2026-10-27): the held copy's lines bindTextures reads
+    banjo::renut_gpu::record::SharedLinesWritten(cmd, ~0u);  // banjo-nx (2026-10-27): the held copy's lines bindTextures reads
 #endif
     g_bound.pushed_shared_valid = true;
     pushed_bytes = kSize;
@@ -3936,14 +3936,14 @@ void PushSharedConstants(plume::RenderCommandList *cmd, const SharedConstants &s
     g_sc_dirty = 0;
 #if defined(PLUME_DEKO3D)
     if (differ)
-      plume::Deko3DSharedLinesWritten(cmd, differ);  // banjo-nx (2026-10-27)
+      banjo::renut_gpu::record::SharedLinesWritten(cmd, differ);  // banjo-nx (2026-10-27)
 #endif
     while (differ) {
       const u32 first = u32(std::countr_zero(differ));
       const u32 run = u32(std::countr_one(differ >> first));
       const u32 at = first * kLine, end = std::min((first + run) * kLine, kSize);
       DiagPushLines(first, run);  // banjo-nx (2026-10-28, diagnostic)
-      plume::Deko3DPushUniform(cmd, ubo, kSize, at, now + at, end - at);
+      banjo::renut_gpu::record::PushUniform(cmd, ubo, kSize, at, now + at, end - at);
       u32 off = at;
       for (; off + kLine <= end; off += kLine)
         std::memcpy(held + off, now + off, kLine);
@@ -3965,7 +3965,7 @@ void PushSharedConstants(plume::RenderCommandList *cmd, const SharedConstants &s
     differ &= ~equal_lines;
 #if defined(PLUME_DEKO3D)
     if (differ)
-      plume::Deko3DSharedLinesWritten(cmd, differ);  // banjo-nx (2026-10-27)
+      banjo::renut_gpu::record::SharedLinesWritten(cmd, differ);  // banjo-nx (2026-10-27)
 #endif
     if (tracked) {  // banjo-nx (2026-10-26): the verify form (banjo_renut_persistent_shared_verify)
       if (differ & ~g_sc_dirty) {
@@ -3980,7 +3980,7 @@ void PushSharedConstants(plume::RenderCommandList *cmd, const SharedConstants &s
       const u32 first = u32(std::countr_zero(differ));
       const u32 run = u32(std::countr_one(differ >> first));
       const u32 at = first * kLine, end = std::min((first + run) * kLine, kSize);
-      plume::Deko3DPushUniform(cmd, ubo, kSize, at, now + at, end - at);
+      banjo::renut_gpu::record::PushUniform(cmd, ubo, kSize, at, now + at, end - at);
       // banjo-nx (2026-10-23, batch 6): line by line at a fixed size (inline), the tail's 16 bytes last: no C library
       // call per run.
       u32 off = at;
@@ -9018,7 +9018,7 @@ bool PrepareMemExportLocked(VideoState &s, const MemExportStream *streams, u32 c
     // waits for nothing; SeedFromPendingExportsLocked's copies wait with their own barriers. Kept when a memexport draw
     // of this list has had no buffer wait since (the export draw may read that draw's windows by address).
     if (!dispatched && sasrt::gpu_round::On(sasrt::gpu_round::kSeedCpu) &&
-        !(g_sasrt_export_write.cmd == cmd && plume::Deko3DBufferWaits(cmd) <= g_sasrt_export_write.waits)) {
+        !(g_sasrt_export_write.cmd == cmd && banjo::renut_gpu::record::BufferWaits(cmd) <= g_sasrt_export_write.waits)) {
       sasrt::gpu_round::Count(sasrt::gpu_round::kSeedCpu, 1, 1);
       return SeedFromPendingExportsLocked(s, buffer, fresh, fresh_count, fresh_offsets);
     }
@@ -9082,7 +9082,7 @@ bool FinishMemExportLocked(VideoState &s, const MemExportStream *streams, u32 co
   plume::RenderCommandList *cmd = s.command_list;
 #if defined(PLUME_DEKO3D)
   if (IsDeko3D())
-    g_sasrt_export_write = {cmd, plume::Deko3DBufferWaits(cmd)};
+    g_sasrt_export_write = {cmd, banjo::renut_gpu::record::BufferWaits(cmd)};
 #endif
   if (SasrtOrderEvery() > 0 && count) [[unlikely]]  // sasrt-nx (2026-11-08, sasrt_gpu_diag_export_order)
     SasrtOrderToken(count > 1 ? fmt::format("E{:x}/{}", offsets[0] / 256, count) : fmt::format("E{:x}", offsets[0] / 256));
@@ -9175,7 +9175,7 @@ void FlushExportReadbacksLocked() {
         // global-data cache alone.
         const bool trim = sasrt::gpu_round::On(sasrt::gpu_round::kReadbackTrim);
         if (trim) {
-          plume::Deko3DBufferWait(cmd, plume::Deko3DGlobalDataInvalidate, true);
+          banjo::renut_gpu::record::BufferWait(cmd, plume::Deko3DGlobalDataInvalidate, true);
           sasrt::gpu_round::Count(sasrt::gpu_round::kReadbackTrim);
         } else {
           cmd->barriers(plume::RenderBarrierStage::COMPUTE, reads, n);
@@ -9224,7 +9224,7 @@ void FlushExportReadbacksLocked() {
         if (sasrt::gpu_round::On(sasrt::gpu_round::kFenceFlush))
           sasrt::gpu_round::Count(sasrt::gpu_round::kFenceFlush);
         else
-          plume::Deko3DFlushL2(cmd);
+          banjo::renut_gpu::record::FlushL2(cmd);
         // sasrt-nx (2026-11-08, sasrt_gpu_readback_barriers_trim): the list ends next (FinishRecordingLocked); the slot's
         // windows are written again only after its fence was waited (or the CPU waited for this list): no wait after.
         if (!trim) {
@@ -9478,7 +9478,7 @@ bool ConvertExportedStreamsLocked(VideoState &s, const GuestDevice &device, cons
   bool lead = true;
 #if defined(PLUME_DEKO3D)
   if (IsDeko3D() && sasrt::gpu_round::On(sasrt::gpu_round::kConvertLead) && g_sasrt_export_write.cmd == cmd &&
-      plume::Deko3DBufferWaits(cmd) > g_sasrt_export_write.waits) {
+      banjo::renut_gpu::record::BufferWaits(cmd) > g_sasrt_export_write.waits) {
     lead = false;
     sasrt::gpu_round::Count(sasrt::gpu_round::kConvertLead);
   }
@@ -9491,7 +9491,7 @@ bool ConvertExportedStreamsLocked(VideoState &s, const GuestDevice &device, cons
     // windows by storage-buffer loads (the global-data cache) and its push constants from fresh transient memory
     // (Deko3DOptions::freshComputeConstants): the wait drops that cache alone, not the texture and constant caches.
     if (IsDeko3D() && sasrt::gpu_round::On(sasrt::gpu_round::kConvertLeadData)) {
-      plume::Deko3DBufferWait(cmd, plume::Deko3DGlobalDataInvalidate, true);
+      banjo::renut_gpu::record::BufferWait(cmd, plume::Deko3DGlobalDataInvalidate, true);
       sasrt::gpu_round::Count(sasrt::gpu_round::kConvertLeadData);
     } else
 #endif
@@ -9551,7 +9551,7 @@ bool ConvertExportedStreamsLocked(VideoState &s, const GuestDevice &device, cons
     // written past 'used' (fresh in the frame: nothing read them since the last queue flush, which dropped the texture
     // cache): no cache holds their lines, so the wait keeps the texture cache too.
     const bool keep_texture = sasrt::gpu_round::On(sasrt::gpu_round::kConvertTailNoImage);
-    plume::Deko3DBufferWait(cmd, keep_texture ? 0u : uint32_t(DkInvalidateFlags_Image), false);
+    banjo::renut_gpu::record::BufferWait(cmd, keep_texture ? 0u : uint32_t(DkInvalidateFlags_Image), false);
     sasrt::gpu_round::Count(sasrt::gpu_round::kConvertTail);
     if (keep_texture)
       sasrt::gpu_round::Count(sasrt::gpu_round::kConvertTailNoImage);
@@ -10191,7 +10191,7 @@ u32 FurSkinLocked(VideoState &s, plume::RenderCommandList *cmd, const ShaderReco
       cmd->barriers(plume::RenderBarrierStage::GRAPHICS, &barrier, 1);
       g_skin_writes_unseen = false;
     }
-    plume::Deko3DBindStorage(cmd, 13, hit->region, bytes);
+    banjo::renut_gpu::record::BindStorage(cmd, 13, hit->region, bytes);
     banjo::renut_gpu::CountSkinOnce(other + 1);
     return 2;
   }
@@ -10269,7 +10269,7 @@ u32 FurSkinLocked(VideoState &s, plume::RenderCommandList *cmd, const ShaderReco
   for (u32 i = 0; i < fr.count; ++i)
     if (fr.copies[i].src && fr.copies[i].size)
       e.bytes.insert(e.bytes.end(), fr.copies[i].src, fr.copies[i].src + fr.copies[i].size);
-  plume::Deko3DBindStorage(cmd, 13, region, bytes);
+  banjo::renut_gpu::record::BindStorage(cmd, 13, region, bytes);
   g_skin_writes_unseen = true;
   banjo::renut_gpu::CountSkinOnce(other + 0);
   return 1;
@@ -11016,7 +11016,7 @@ void SetSampleMaskLocked(plume::RenderCommandList *cmd, const GuestDevice &devic
     if (mask == all)
       mask = 0xFFFFu;
   }
-  plume::Deko3DSetSampleMask(cmd, mask);
+  banjo::renut_gpu::record::SetSampleMask(cmd, mask);
 #else
   (void)cmd;
   (void)device;
@@ -11727,7 +11727,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     if (sc.vertex_fetch_data) {
       const uint64_t address = sc.vertex_fetch_data;
       const uint64_t base = address & ~uint64_t(0xFF);
-      plume::Deko3DBindFetchData(cmd, base, u32(address - base) + sc.vertex_fetch_bytes);
+      banjo::renut_gpu::record::BindFetchData(cmd, base, u32(address - base) + sc.vertex_fetch_bytes);
       sc.vertex_fetch_data = old_data;  // the word as it was, so that SetShared marks its line only if it changes
       SetShared(sc, sc.vertex_fetch_data, address - base);
     } else if (old_data != 0) {
@@ -11782,7 +11782,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     memexport_address = memexport->getDeviceAddress();
   }
   SetShared(sc, sc.memexport_address, memexport_address);
-  plume::Deko3DBindMemExport(cmd, memexport);
+  banjo::renut_gpu::record::BindMemExport(cmd, memexport);
   PushSharedConstants(cmd, sc);
   banjo::renut_gpu::CountSharedConstants(false);
 #endif
@@ -12070,14 +12070,14 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   // banjo-nx (2026-10-27, render thread night): once while they stay (plume found them bound at every draw after the
   // first: three calls a draw).
   if (!g_bound.pushed_ubos) {
-    plume::Deko3DBindUniform(cmd, 0, g_pushed_buffers.address, kFloatConstantsUboBytes);
-    plume::Deko3DBindUniform(cmd, 1, g_pushed_buffers.address + kPushedFloatStride, kFloatConstantsUboBytes);
-    plume::Deko3DBindUniform(cmd, 2, g_pushed_buffers.address + kPushedSharedOffset, u32(sizeof(SharedConstants)));
+    banjo::renut_gpu::record::BindUniform(cmd, 0, g_pushed_buffers.address, kFloatConstantsUboBytes);
+    banjo::renut_gpu::record::BindUniform(cmd, 1, g_pushed_buffers.address + kPushedFloatStride, kFloatConstantsUboBytes);
+    banjo::renut_gpu::record::BindUniform(cmd, 2, g_pushed_buffers.address + kPushedSharedOffset, u32(sizeof(SharedConstants)));
     std::fill(std::begin(g_bound.constant_sets), std::end(g_bound.constant_sets), nullptr);
     g_bound.pushed_ubos = true;
   }
   if (!g_bound.shared_words_set) {
-    plume::Deko3DSetSharedWords(cmd, &g_bound.pushed_shared, u32(sizeof(SharedConstants)));
+    banjo::renut_gpu::record::SetSharedWords(cmd, &g_bound.pushed_shared, u32(sizeof(SharedConstants)));
     g_bound.shared_words_set = true;
   }
 #endif
@@ -13709,7 +13709,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   } else if (IsDeko3D() && sc.vertex_fetch_data) {
     const uint64_t address = sc.vertex_fetch_data;
     const uint64_t base = address & ~uint64_t(0xFF);
-    plume::Deko3DBindFetchData(s.command_list, base, u32(address - base) + sc.vertex_fetch_bytes);
+    banjo::renut_gpu::record::BindFetchData(s.command_list, base, u32(address - base) + sc.vertex_fetch_bytes);
     SetShared(sc, sc.vertex_fetch_data, address - base);
     fetch_window = base;
     // banjo-nx (2026-10-20): the 16-byte multiples tools/deko3d_glsl_opt.py's aw4 pass relies on.
@@ -13801,7 +13801,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
 #if defined(PLUME_DEKO3D)
   // banjo-nx (deko3d renderer): the deko3d shaders write memexport through a binding of the buffer itself.
   if (memexport && IsDeko3D())
-    plume::Deko3DBindMemExport(s.command_list, memexport);
+    banjo::renut_gpu::record::BindMemExport(s.command_list, memexport);
 #endif
   UploadAllocation sc_alloc;
   if (pushed) {
@@ -14085,7 +14085,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   // whose render state writes nothing (SasrtInertDrawLocked with the vertex shader's exports allowed: no colour channel, no
   // depth write, no stencil operation, no pixel shader exports).
   if (sasrt_export_discard) {  // (export_only_draw implies it)
-    plume::Deko3DDiscardNextDraw(cmd);
+    banjo::renut_gpu::record::DiscardNextDraw(cmd);
     sasrt::gpu_round::Count(sasrt::gpu_round::kExportDiscard);
     // sasrt-nx (2026-11-08, sasrt_gpu_export_list_topology; the fourth GPU round): a point list drawn this way (the
     // skinning exports) as a triangle list (count a multiple of 3) or a line list (even): with the rasterizer off only
@@ -14094,10 +14094,10 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     if (call.primitive == 1 && sasrt::gpu_round::On(sasrt::gpu_round::kExportListTopology)) {
       const u32 n = geometry.indexed ? geometry.index_count : geometry.vertex_count;
       if (n >= 3 && n % 3 == 0) {
-        plume::Deko3DSetNextPrimitive(cmd, DkPrimitive_Triangles);
+        banjo::renut_gpu::record::SetNextPrimitive(cmd, DkPrimitive_Triangles);
         sasrt::gpu_round::Count(sasrt::gpu_round::kExportListTopology);
       } else if (n >= 2 && n % 2 == 0) {
-        plume::Deko3DSetNextPrimitive(cmd, DkPrimitive_Lines);
+        banjo::renut_gpu::record::SetNextPrimitive(cmd, DkPrimitive_Lines);
         sasrt::gpu_round::Count(sasrt::gpu_round::kExportListTopology);
       }
     }
@@ -14161,19 +14161,19 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
 #if defined(PLUME_DEKO3D)
       // banjo-nx (2026-10-19, banjo_deko3d_push_constants): the three fixed buffers (bindings 0, 1, 2), and bound
       // textures read from the renderer's copy of the shared constants.
-      plume::Deko3DBindUniform(cmd, 0, g_pushed_buffers.address, kFloatConstantsUboBytes);
-      plume::Deko3DBindUniform(cmd, 1, g_pushed_buffers.address + kPushedFloatStride, kFloatConstantsUboBytes);
-      plume::Deko3DBindUniform(cmd, 2, g_pushed_buffers.address + kPushedSharedOffset, u32(sizeof(SharedConstants)));
+      banjo::renut_gpu::record::BindUniform(cmd, 0, g_pushed_buffers.address, kFloatConstantsUboBytes);
+      banjo::renut_gpu::record::BindUniform(cmd, 1, g_pushed_buffers.address + kPushedFloatStride, kFloatConstantsUboBytes);
+      banjo::renut_gpu::record::BindUniform(cmd, 2, g_pushed_buffers.address + kPushedSharedOffset, u32(sizeof(SharedConstants)));
       std::fill(std::begin(g_bound.constant_sets), std::end(g_bound.constant_sets), nullptr);  // rebind after
       if (!g_bound.shared_words_set) {
-        plume::Deko3DSetSharedWords(cmd, &g_bound.pushed_shared, u32(sizeof(SharedConstants)));
+        banjo::renut_gpu::record::SetSharedWords(cmd, &g_bound.pushed_shared, u32(sizeof(SharedConstants)));
         g_bound.shared_words_set = true;
       }
 #endif
     } else {
 #if defined(PLUME_DEKO3D)
       if (g_bound.shared_words_set) {
-        plume::Deko3DSetSharedWords(cmd, nullptr, 0);
+        banjo::renut_gpu::record::SetSharedWords(cmd, nullptr, 0);
         g_bound.shared_words_set = false;
       }
 #endif
@@ -14382,7 +14382,7 @@ void QueueResolveReadbackLocked(VideoState &s, HostTexture *dest, uint32_t slice
       if (sasrt::gpu_round::On(sasrt::gpu_round::kFenceFlush))
         sasrt::gpu_round::Count(sasrt::gpu_round::kFenceFlush);
       else
-        plume::Deko3DFlushL2(cmd);
+        banjo::renut_gpu::record::FlushL2(cmd);
       list.push_back({dest->base_page << 12, offset});
       sasrt::gpu_round::Count(sasrt::gpu_round::kTexelReadback);
       g_bound.pipeline = nullptr;
@@ -15384,7 +15384,7 @@ bool ResolveDepth(HostSurface *surface, HostTexture *dest, const ClearRect &src,
   // 0, and Beautiful Katamari's depth of field, which reads this resolve of its 4x depth, blurred the whole scene.
   if (variant == 1 && IsDeko3D()) {
     const uint32_t slots[2] = {source_slot, push.param1 != 0.0f ? push.sampler_index : source_slot};
-    plume::Deko3DBindFragmentTextures(cmd, 0, slots, 2);
+    banjo::renut_gpu::record::BindFragmentTextures(cmd, 0, slots, 2);
   }
 #endif
   cmd->setGraphicsPushConstants(0, &push, 0, sizeof(push));

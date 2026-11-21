@@ -466,7 +466,9 @@ REXCVAR_DEFINE_BOOL(banjo_async_present, true, "Banjo/Enhancements",
                     "one: 2.7 ms a frame in tw2de_nx's heaviest stretch) are made by a helper thread, so the renderer's "
                     "feed thread records the next frame instead of waiting for the compositor's answers. The same calls "
                     "in the same order. false: on the presenting thread, as before");
-REXCVAR_DEFINE_BOOL(banjo_deko3d_kick_submit, true, "Banjo/Enhancements",
+// banjo-nx (2026-11-21): off on the Switch (the user, after console c41: with it the render thread +1.7 % a draw, the GPU
+// +1.65 % a draw, -2.3 % fps in Showdown Town; what it buys is input latency).
+REXCVAR_DEFINE_BOOL(banjo_deko3d_kick_submit, BANJO_SWITCH_DEFAULT(false, true), "Banjo/Enhancements",
                     "deko3d renderer (2026-10-19, input latency): at the game's kicks (several a frame) the command "
                     "list recorded so far is ended and handed to the GPU at the next kick, instead of the whole frame "
                     "at the present: the GPU starts a frame's work while the render thread still records the rest, so "
@@ -1155,6 +1157,7 @@ const char *AbName(int target) {
   case 178: return "fast path: the texture slots' and the pipeline entry's prefetches (banjo-nx 2026-11-21; off half: none)";
   case 179: return "kick submits (banjo_deko3d_kick_submit): lists ended at the game's kicks (banjo-nx 2026-11-21; off half: the frame at the present)";
   case 181: return "Replay: the next draw's store cards prefetched from its record's header words (banjo-nx 2026-11-21; off half: none)";
+  case 182: return "the deko3d command stage (banjo_deko3d_command_stage): lists recorded into a stream played on the system core (banjo-nx 2026-11-21; off half: recorded directly)";
   case 172: return "the fast path's spec answers (fetch spec, plain fetches, clip bit, sasrt words) kept while their inputs hold (banjo-nx 2026-11-21)";
   case 156: return "depth resolves nothing has read left out until something does (vivapinata_depth_resolve_skip_unread; NOT exact in principle; off half: drawn)";
   case 152: return "the pixel shaders' alpha test moved up ahead of the colour arithmetic, constant 977 = 1 (vivapinata_shader_earlykill; off half: the test last)";

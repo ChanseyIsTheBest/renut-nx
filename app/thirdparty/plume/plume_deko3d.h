@@ -112,6 +112,16 @@ namespace plume {
     struct Deko3DDevice;
     struct Deko3DCommandQueue;
 
+    // banjo-nx (2026-11-21, the core-3 command stage): called first by the destructors of the objects a command list's
+    // calls name (buffers, textures, views, framebuffers, descriptor sets, query pools, pipelines): the renderer's
+    // command stage plays what it holds first when such an object goes on the thread that records (a command naming it
+    // may not be played yet). Null: none.
+    extern void (*g_deko3dBeforeDestroyHook)();
+    inline void Deko3DBeforeDestroy() {
+        if (g_deko3dBeforeDestroyHook)
+            g_deko3dBeforeDestroyHook();
+    }
+
     struct Deko3DBuffer : RenderBuffer {
         Deko3DDevice *device = nullptr;
         RenderBufferDesc desc;
@@ -195,6 +205,7 @@ namespace plume {
         // first write. Renut gives every texture slot a view, so this is the cache that serves it.
         mutable DkImageDescriptor sampledDescriptor{};
         mutable std::atomic<bool> sampledDescriptorReady{false};
+        ~Deko3DTextureView() { Deko3DBeforeDestroy(); }  // banjo-nx (2026-11-21)
     };
 
     struct Deko3DSampler : RenderSampler {
@@ -315,6 +326,10 @@ namespace plume {
         std::vector<std::array<uint32_t, 3>> imageSizes;
         // sasrt-nx (2026-11-08, Deko3DOptions::trackedImageInvalidate): per image id, the texture written there (null: none).
         std::vector<const struct Deko3DTexture *> imageTextures;
+        // banjo-nx (2026-11-21, the core-3 command stage): both tables are sized to imageCount when the set is made, so
+        // no later write reallocates them under a reader on another thread (the command lists read them in bindTextures
+        // and markSampled). With Deko3DSetImageTrackHook set, setTexture hands the tables' update to the hook (which
+        // queues it in order with the draws recorded so far, for the thread that plays them) instead of writing it.
 
         Deko3DDescriptorSet(Deko3DDevice *device, const RenderDescriptorSetDesc &desc);
         ~Deko3DDescriptorSet() override;
@@ -413,6 +428,7 @@ namespace plume {
         const DkShader *shader = nullptr;
         bool valid = false;
         uint32_t uboMask = 0, ssboMask = 0;
+        ~Deko3DComputePipeline() { Deko3DBeforeDestroy(); }  // banjo-nx (2026-11-21)
     };
 
     struct Deko3DCommandFence : RenderCommandFence {
@@ -436,6 +452,7 @@ namespace plume {
         bool srgb[8] = {};
         uint32_t getWidth() const override { return width; }
         uint32_t getHeight() const override { return height; }
+        ~Deko3DFramebuffer() { Deko3DBeforeDestroy(); }  // banjo-nx (2026-11-21)
     };
 
     struct Deko3DQueryPool : RenderQueryPool {
@@ -1029,6 +1046,20 @@ namespace plume {
         return Deko3DPushUniformSlow(commandList, address, uboSize, offset, data, size);
     }
     bool Deko3DSetSharedWords(RenderCommandList *commandList, const void *cpu, uint32_t size);
+    // banjo-nx (2026-11-21, the core-3 command stage): a descriptor set's CPU tables' update for image id 'id'
+    // (Deko3DDescriptorSet::imageSizes / imageTextures), as setTexture makes it: 'texture' null empties the id (its size
+    // stays). The hook returns true when it took the update (queued for the thread that plays the command lists, which
+    // applies it with Deko3DApplyImageTrack), false to have setTexture write it now. One hook; null: none.
+    struct Deko3DImageTrack {
+        struct Deko3DDescriptorSet *set;
+        uint32_t id;
+        const struct Deko3DTexture *texture;
+        uint32_t size[3];
+        bool sized;  // 'size' holds the view's size (a valid texture was written)
+    };
+    using Deko3DImageTrackHook = bool (*)(const Deko3DImageTrack &track);
+    void Deko3DSetImageTrackHook(Deko3DImageTrackHook hook);
+    void Deko3DApplyImageTrack(const Deko3DImageTrack &track);
     // banjo-nx: the queue lost (dkQueueIsInErrorState).
     bool Deko3DDeviceLost(RenderDevice *device);
     // banjo-nx (2026-10-21, Deko3DOptions::asyncVariants): a pipeline made while some of its variants were compiled in
