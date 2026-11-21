@@ -604,3 +604,12 @@ toml) 8.70 at night, and c36 (cycle 2, 13:05) 8.70 by day. Not the CPU clock (th
 session (brackets, the fixed save below) or by in-run A/Bs. From 2026-11-21
 13:45 every city run starts from one fixed save (out/card/save_fixed_night_2026-11-21, the user's OK): the same
 in-game time at every start (the town's day/night state decided the draw count before).
+
+The fixed save does not fix the town's time of day: c38 (5d1c60e9) and c39 (cycle 2) started from the same restored
+save and came up night and day. In ~30 runs the state never changed within a run (decided at load; scratchpad
+daynight.py). The same build by day: c36 8.71, c39 8.38 us a draw (4 % apart). Builds are compared by in-run A/Bs.
+Baseline c38 (5d1c60e9, night, 14:00): render thread 41.89 ms a frame, 8.60 us a draw, 4,871 draws, 23.8 fps.
+c39's A/Bs (median of the pairs, render thread a draw with the item on): 174 +1.21 % (17 of 17 pairs higher), 175
++0.12 %, 173 (cached command memory) +0.90 % with GPU -0.9 %. With c36 (174 +1.57, 175 +0.58, 173 +0.11): 174 and 175
+stay off; cached command memory off by default again (8c90ee87): the render thread pays its clean and sets the town's
+frame rate. Cycle 3's console run: A/Bs 176-178 and 56 with 1 ms stack sampling (renut_city_c3ab_s1.toml).
