@@ -212,10 +212,18 @@ REXCVAR_DEFINE_BOOL(banjo_renut_replay_copy_prefetch, false, "Banjo/Enhancements
                     "OFF by default (console c36: +0.47 % render thread a draw with it on). Renut's renderer (2026-10-28): "
                     "ApplyResources prefetches the geometry objects' copies and store cards (off: the answers' lines)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(banjo_renut_replay_card_prefetch, true, "Banjo/Enhancements",
-                    "Renut's renderer (2026-11-21, A/B 181): an op ahead, the replay prefetches the store cards its next "
-                    "draw's geometry proofs read first, from the recorded index and vertex buffer header words alone. "
-                    "Prefetches only")
+// Console c41 (18 pairs, the render thread a draw with it on): +0.31 % (14 of 18 higher): off. Five lines a buffer an op
+// cost more than the card loads they hid.
+REXCVAR_DEFINE_BOOL(banjo_renut_replay_card_prefetch, false, "Banjo/Enhancements",
+                    "OFF by default (console c41: +0.31 % render thread a draw with it on). Renut's renderer (2026-11-21, "
+                    "A/B 181): an op ahead, the replay prefetches the store cards its next draw's geometry proofs read "
+                    "first, from the recorded index and vertex buffer header words alone. Prefetches only")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// Console c35/c40/c41 (A/B 56, the render thread a draw with it on): -0.03 % (mean), +0.36 %, +0.24 % (medians): off.
+REXCVAR_DEFINE_BOOL(banjo_renut_replay_object_prefetch, false, "Banjo/Enhancements",
+                    "OFF by default (console c40/c41: +0.36/+0.24 % render thread a draw with it on). Renut's renderer "
+                    "(2026-10-28, A/B 56): an op ahead, the replay prefetches the lines of the texture and geometry "
+                    "objects its next op's record names. Prefetches only")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_replay_stream, true, "Banjo/Enhancements",
                     "Renut's renderer (2026-10-27, the replay stream): recorded ops are 64-byte aligned and a draw's op "
@@ -3202,7 +3210,8 @@ void CensusPacket(const u8 *state, const OpCall &call, u32 fields) {
           for (u32 at = 0; at < std::min(bytes, kStreamStateBytes); at += 64)
             __builtin_prefetch(s + at);
         }
-        if (next.resources != kNoResources && prefetch_ab != 56)
+        static const bool object_prefetch = REXCVAR_GET(banjo_renut_replay_object_prefetch);  // (2026-11-21: off)
+        if (object_prefetch && next.resources != kNoResources && prefetch_ab != 56)
           PrefetchResourceObjects(arena + next.resources, resources);
         static const bool card_prefetch = REXCVAR_GET(banjo_renut_replay_card_prefetch);  // banjo-nx (2026-11-21)
         if (card_prefetch && next.kind == OpKind::Draw && next.resources != kNoResources && prefetch_ab != 181)
