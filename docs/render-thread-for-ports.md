@@ -22,10 +22,10 @@ every run: docs/banjo-ultimate-notes.md, "The render-thread batch" and "The rend
 
 **SASRT's check (2026-11-21, sasrt-nx runs 340-344: 4 players still at the start, ~3,500 draws a frame at ~17 us,
 18-22 pairs a target):** 174 -0.35 %, 175 -0.06 %, 56 -0.06 % (none of the three prefetches costs there), 173 -0.24 %
-render / GPU +0.03 %, 179 kick submits +1.28 % render thread a draw but all-threads CPU -1.08 % and fps +0.2 % (kept
-on there). So the prefetch removals are N&B's (5,000 draws at ~8 us, and N&B's PrefetchShaderBehind has the later
+render / GPU +0.03 %, 179 kick submits +1.28 % render thread a draw but all-threads CPU -1.08 %, fps flat (+0.2 %,
+noise): kept on there for input latency, at no fps cost). So the prefetch removals are N&B's (5,000 draws at ~8 us, and N&B's PrefetchShaderBehind has the later
 stage-skip), not universal: each port measures them on its own scene before taking them. sasrt-nx's write-up:
-D:\sonic transformed\sasrt-nx\docsender-thread-ideas-1120.md, "Round 5".
+D:\sonic transformed\sasrt-nx\docs\render-thread-ideas-1120.md, "Round 5".
 
 | What | Key / A/B | Console result (render thread a draw, item on vs off, pair median) | Commit |
 |---|---|---|---|
