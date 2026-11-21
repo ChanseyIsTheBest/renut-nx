@@ -632,3 +632,35 @@ input latency (the GPU starts the frame before the present), so it is the user's
 draw's store cards prefetched from its record) +0.31 % (14 of 18 higher): even prefetches with no dependent load cost
 when they are five lines a buffer; off. 56 (the next op's resource objects) +0.24 % (third run: -0.03, +0.36, +0.24):
 off. The prefetches that pay are the few-line ones from the record or a known pointer (176-178, 55).
+
+## The deko3d command stage on core 3 (2026-11-21 evening, the user's "build core 3"; cf8b37ac, 8d74f599)
+
+banjo_deko3d_command_stage (off by default; A/B 182, its off half records directly): package 28b's two-thread recorder
+(banjo_renut_record.cpp) on deko3d. The render thread records its command list into a stream (each plume call copied,
+its arrays and push data with it); a thread on the system core (RexSwitchMoveCurrentThreadToSystemCore: core 3 in 4-core
+mode, priority 0x2E, below the game's audio threads there) plays it into plume and libdeko3d. The list is drained before
+it is ended (every end and submit already called record::Drain). Same commands, same order.
+
+- The renderer's plume calls that take a deko3d list (16: constant pushes, uniform / storage / fetch / export binds,
+  the shared constants' copy and its line marks, buffer waits, L2 flush, sample mask, next primitive, discard, counters,
+  fragment textures) go through banjo_renut_record.h's inline wrappers (recorded on the proxy, plume otherwise).
+- bindTextures reads the shared constants from the renderer's CPU copy (g_bound.pushed_shared), which the next draws
+  change before the stage plays a draw. The stage keeps its own: the whole copy at each recorded SetSharedWords, then
+  every recorded push to the shared buffer (uniform slot 2's address) written in at its offset (every write to the
+  renderer's copy follows a push of the same bytes, PushSharedConstants). Verify key banjo_deko3d_command_stage_verify:
+  a hash of the renderer's copy before every recorded draw, compared by the stage. Emulator run stage_verify2 (8 min,
+  title and the city): 10.6 M draws checked, 0 differ (the first run's 6 were the verify's own error: it kept hashing the
+  renderer's copy at the start of a list, before the list's first pushed draw, where plume reads none: 8d74f599).
+- A descriptor set's image tables (imageSizes for txq, imageTextures for markSampled) are sized once when the set is
+  made, and setTexture hands their update to plume's Deko3DSetImageTrackHook: on the render thread with a stage list
+  open it goes into the stream after the draws recorded so far.
+- plume objects a command can name (buffers, textures, views, framebuffers, descriptor sets, query pools, pipelines) call
+  g_deko3dBeforeDestroyHook first: on the render thread with unplayed commands the stage plays them before the object
+  goes (SMAA's and the frame capture's targets are destroyed at once, not retired with the frame).
+- Deko3DBufferWaits on the proxy: the barriers recorded through it, counted across its lists (a later barrier is later
+  on the one GPU queue whatever its list); the two sasrt tests that read it keep a wait at most once more.
+- Not in 4-core mode (no system core) the stage stays off: on the game's cores it would take their time.
+  banjo_deko3d_command_stage_any_core runs it unpinned for the emulator, where it shares the render thread's emulated
+  core (the emulator's render thread looked 2x slower with it: not a console figure).
+Emulator: no crash, the town drawn right (captures), ~8.5 commands a draw through the stream, every image-table update
+on the render thread. Console: pending (renut_city_stage_s1.toml: A/B 182, 1 ms sampling).
