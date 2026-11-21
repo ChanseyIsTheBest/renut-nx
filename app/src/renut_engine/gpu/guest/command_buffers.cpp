@@ -225,6 +225,7 @@ REXCVAR_DEFINE_BOOL(banjo_renut_replay_object_prefetch, false, "Banjo/Enhancemen
                     "(2026-10-28, A/B 56): an op ahead, the replay prefetches the lines of the texture and geometry "
                     "objects its next op's record names. Prefetches only")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DECLARE(bool, banjo_deko3d_command_stage_any_core);  // (banjo_renut_record.cpp)
 // banjo-nx (2026-11-21, the user's batch 2: the cache-warming helper; A/B 185).
 REXCVAR_DEFINE_BOOL(banjo_renut_warm_helper, true, "Banjo/Enhancements",
                     "Renut's renderer (2026-11-21): a thread on the system core (4-core mode) reads a few ops ahead of the "
@@ -3021,7 +3022,9 @@ std::atomic<uint64_t> g_ops{0}, g_wakes{0}, g_idle{0};
 
 bool On() {
 #if REX_PLATFORM_SWITCH
-  static const bool on = REXCVAR_GET(banjo_renut_warm_helper) && RexSwitchSystemCore() >= 0;
+  // (the emulator has no system core: banjo_deko3d_command_stage_any_core runs it anyway, for its tests)
+  static const bool on = REXCVAR_GET(banjo_renut_warm_helper) &&
+                         (RexSwitchSystemCore() >= 0 || REXCVAR_GET(banjo_deko3d_command_stage_any_core));
   return on;
 #else
   return false;
