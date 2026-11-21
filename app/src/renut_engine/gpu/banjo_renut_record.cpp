@@ -69,6 +69,11 @@ REXCVAR_DEFINE_INT32(banjo_deko3d_command_stage_peek, 8, "Banjo",
     .range(0, 64)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // banjo-nx (2026-11-21, batch 2).
+REXCVAR_DEFINE_INT32(banjo_deko3d_command_stage_stream_ahead, 512, "Banjo",
+                     "deko3d command stage (2026-11-21, its ARM audit): the stream's line this many bytes past each "
+                     "command is prefetched as the command is played (0: none). In-run A/B 188 (its off half: none)")
+    .range(0, 4096)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_deko3d_stage_retired_free, true, "Banjo",
                     "deko3d command stage: the objects retired with a frame slot go at its DrainSlot without draining "
                     "the stage (it has played every command of that frame: the slot's staged submit was waited for). "
@@ -361,6 +366,13 @@ void PeekPrefetch(const uint8_t *q) {
 void Play(plume::RenderCommandList *cmd, const uint8_t *p, const uint8_t *end) {
   static const uint32_t peek = uint32_t(REXCVAR_GET(banjo_deko3d_command_stage_peek));
   const uint32_t ahead_max = g_deko3d_stage && g_ab_off.load(std::memory_order_relaxed) != 187 ? peek : 0u;
+  // banjo-nx (2026-11-21, the stage's ARM audit, banjo_deko3d_command_stage_stream_ahead): the stream's lines were
+  // written on the render thread's core and missed at their first load here (console run c42: a command's header and
+  // its payload's first word were 13 % of the stage's samples). The line 'stream_ahead' bytes past each command is
+  // prefetched: its address needs no load (the peek cursor's headers do), so the misses overlap the playing. PRFM
+  // never faults (past the chunk's end too). 0: none; A/B 188's off half: none.
+  static const uint32_t stream_ahead = uint32_t(REXCVAR_GET(banjo_deko3d_command_stage_stream_ahead));
+  const uint32_t pf = g_deko3d_stage && g_ab_off.load(std::memory_order_relaxed) != 188 ? stream_ahead : 0u;
   const uint8_t *q = p;  // the peek cursor: the next command not peeked yet
   uint32_t ahead = 0;
   while (p < end) {
@@ -373,6 +385,8 @@ void Play(plume::RenderCommandList *cmd, const uint8_t *p, const uint8_t *end) {
       --ahead;
     else
       q = p + reinterpret_cast<const Header *>(p)->size;  // (peek off: the cursor kept past this command)
+    if (pf)
+      __builtin_prefetch(p + pf);
     const Header &h = *reinterpret_cast<const Header *>(p);
     const uint8_t *next = p + h.size;
     p += sizeof(Header);
@@ -395,8 +409,11 @@ void Play(plume::RenderCommandList *cmd, const uint8_t *p, const uint8_t *end) {
     }
     case kSetPipeline: {
       auto *pipeline = static_cast<const plume::RenderPipeline *>(At<Ptr>(p).p);
+#if !defined(PLUME_DEKO3D)
       // banjo_renut_tuning's NVK prefetch hint (the Switch), on the core that binds.
+      // banjo-nx (2026-11-21, the stage's ARM audit): Vulkan's only (NVK): not on deko3d (it tested IsVulkan per bind).
       banjo::renut_gpu::BeforePipelineBind(const_cast<plume::RenderPipeline *>(pipeline));
+#endif
       cmd->setPipeline(pipeline);
       break;
     }

@@ -701,3 +701,10 @@ readback completion (0.03 %). Not built: Replay as a front stage (the draw reads
 for a day's refactor); the look-ahead card proofs (a read-only helper keeps most of the cost).
 Emulator: items 3 and 5 verified (batchA_verify, 10 min: 16.2 M draws' shared copies checked, 0 differ, frames
 presented by the stage, the town drawn right).
+Emulator, the whole batch (batchB_verify, 9 min, verify on): 0 differ, no crash, the town drawn right, the stage polled
+(0 wakes), the warm helper ran. It showed a cost item 5 brought in: with no drain at the frame's end, the destructors
+of the objects retired with a frame slot (DrainSlot, after the slot's fence) found the stage still playing the next
+frame and drained it, 20-300 times in 10 s. 69a5a2f5 (banjo_deko3d_stage_retired_free, on): DrainSlot's destructors
+go without a drain, since WaitSlotLocked has waited for that slot's staged submit (every command naming them is played) and
+no later command names a retired object. Report line: "drains before an object went N (M retired objects went
+without one)".
