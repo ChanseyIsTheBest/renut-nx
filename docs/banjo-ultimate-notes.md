@@ -623,3 +623,12 @@ the PC samples still give lines (fn_lines.py). Top lines: memcpy+memcmp 4.5 %, G
 PrefetchResourceObjects 2.9 %, ApplyState 2.2 %, ApplyResources 1.6 %, PagesClean's card loads 1.5 % (no longer
 prefetched with 175 off), HostShaderOf 1.4 %, TextureBindingEpoch 1.2 %, the spec words 1.6 %; deko3d's own calls:
 PushConstants 2.0 %, the kick's ioctl 0.7 %, BindShaders 0.5 %.
+
+Console c41 (cycle 4, 39354bba, day, sampled; renut_city_c4ab_s1.toml): 8.21 us a draw, 43.17 ms, 5,255 draws, 23.1 fps
+(c39, cycle 2 by day unsampled: 8.38). A/Bs (median of 18-19 pairs, render thread a draw with the item on): 179, the kick
+submits (banjo_deko3d_kick_submit): +1.74 % (18 of 18 higher), GPU +1.65 % a draw, fps -2.3 %: the render thread pays
+about three more submits a frame (each an ioctl and a list's end) and the GPU more, smaller pieces; what they buy is
+input latency (the GPU starts the frame before the present), so it is the user's trade, not changed. 181 (the next
+draw's store cards prefetched from its record) +0.31 % (14 of 18 higher): even prefetches with no dependent load cost
+when they are five lines a buffer; off. 56 (the next op's resource objects) +0.24 % (third run: -0.03, +0.36, +0.24):
+off. The prefetches that pay are the few-line ones from the record or a known pointer (176-178, 55).
