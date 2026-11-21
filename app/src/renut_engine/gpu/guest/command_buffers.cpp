@@ -3014,11 +3014,14 @@ struct Target {
   const u8 *arena = nullptr;
   size_t arena_size = 0;
 };
-std::atomic<uint32_t> g_seq{0};
+// banjo-nx (2026-11-21, the ARM audit): the render thread's line (the target under its sequence, the op index it stores
+// at every op) apart from the helper's counters, whose fetch_adds at each of its wakes took that line from the render
+// thread's core.
+alignas(64) std::atomic<uint32_t> g_seq{0};
 Target g_target;  // the render thread's, written under g_seq
 std::atomic<size_t> g_index{0};
 bool g_started = false;  // render thread
-std::atomic<uint64_t> g_ops{0}, g_wakes{0}, g_idle{0};
+alignas(64) std::atomic<uint64_t> g_ops{0}, g_wakes{0}, g_idle{0};
 
 bool On() {
 #if REX_PLATFORM_SWITCH
