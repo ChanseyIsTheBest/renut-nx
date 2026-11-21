@@ -54,6 +54,10 @@ def wanted(root, rel):
 
 def main():
     mode, root, backup = sys.argv[1:4]
+    # renut-nx (2026-11-22): the emulator SD's game_root is a link to the master game copy: refuse a linked root (or
+    # one under a link), so a test never changes the master's files; pack a separate copy instead.
+    if os.path.realpath(root) != os.path.abspath(root) or os.path.islink(root):
+        raise SystemExit(f'{root} is (or is under) a link to {os.path.realpath(root)}: pack a separate copy')
     opcm = dict(a.split('=', 1) for a in sys.argv[5:]) if '--opcm' in sys.argv else {}
     files = []
     for d, _, names in os.walk(root):
