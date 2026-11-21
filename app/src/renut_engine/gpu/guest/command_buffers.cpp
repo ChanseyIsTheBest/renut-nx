@@ -212,6 +212,11 @@ REXCVAR_DEFINE_BOOL(banjo_renut_replay_copy_prefetch, false, "Banjo/Enhancements
                     "OFF by default (console c36: +0.47 % render thread a draw with it on). Renut's renderer (2026-10-28): "
                     "ApplyResources prefetches the geometry objects' copies and store cards (off: the answers' lines)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_replay_card_prefetch, true, "Banjo/Enhancements",
+                    "Renut's renderer (2026-11-21, A/B 181): an op ahead, the replay prefetches the store cards its next "
+                    "draw's geometry proofs read first, from the recorded index and vertex buffer header words alone. "
+                    "Prefetches only")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_replay_stream, true, "Banjo/Enhancements",
                     "Renut's renderer (2026-10-27, the replay stream): recorded ops are 64-byte aligned and a draw's op "
                     "is two lines (its call without pointers, the UP data by offset, the shaders' words as recorded); "
@@ -2141,6 +2146,36 @@ void PrefetchResourceObjects(const u8 *record, const DrawResources &held) {
       PrefetchGeometryObject(o, true);
   }
 }
+// banjo-nx (2026-11-21, the render thread to 33 ms; A/B 181, banjo_renut_replay_card_prefetch): the next op's index and
+// vertex buffers' store cards and page serials, which the geometry proofs read at a buffer's first draw in a kick interval
+// (PagesClean's card loads: 1.5 % of the render thread in console run c40, not prefetched since 175 went off), worked
+// out from the record's own header words (the index buffer's Address, the vertex buffers' first Format word: their
+// CPU base) with no object read: A/B 175's prefetch read the object's answers first, a miss it waited on. A buffer the
+// replay holds already (the draw before's) is skipped; at most two vertex buffers. Prefetches only.
+void PrefetchRecordCards(const u8 *record, const DrawResources &held) {
+  ResourceHead head;
+  std::memcpy(&head, record, sizeof(head));
+  if ((head.flags & 1) && !(held.ib_valid && held.ib[1] == head.ib[1])) {
+    const u32 at = CardOffsetOfAddress(head.ib[1]);
+    if (at != UINT32_MAX)
+      PrefetchCardsAt(at);
+  }
+  const u8 *from = record + sizeof(head) + size_t(std::popcount(head.slots)) * sizeof(TextureObject *);
+  u32 done = 0;
+  for (u32 bits = head.vb_mask; bits && done < 2; bits &= bits - 1, from += 8) {
+    const u32 s = u32(std::countr_zero(bits));
+    u32 w0;
+    std::memcpy(&w0, from, 4);
+    if (((held.vb_mask >> s) & 1) && held.vb[s][0] == w0)
+      continue;
+    const u32 base = w0 & ~3u;
+    const u32 at = base >= 0x20000000u ? CardOffsetOfAddress(base) : UINT32_MAX;  // (GetStreamSource's CPU base)
+    if (at != UINT32_MAX) {
+      PrefetchCardsAt(at);
+      ++done;
+    }
+  }
+}
 // 'copies' (the stream on): the objects' lines came an op before (PrefetchResourceObjects): the copies their answers
 // name are fetched; else the answers' lines, as before.
 inline void ApplyResources(DrawResources &table, const u8 *record, bool draw, bool copies) {
@@ -3169,6 +3204,9 @@ void CensusPacket(const u8 *state, const OpCall &call, u32 fields) {
         }
         if (next.resources != kNoResources && prefetch_ab != 56)
           PrefetchResourceObjects(arena + next.resources, resources);
+        static const bool card_prefetch = REXCVAR_GET(banjo_renut_replay_card_prefetch);  // banjo-nx (2026-11-21)
+        if (card_prefetch && next.kind == OpKind::Draw && next.resources != kNoResources && prefetch_ab != 181)
+          PrefetchRecordCards(arena + next.resources, resources);
         // banjo-nx (2026-10-28, per-draw night): its shader records' lines, from its words (resources.h), and with a
         // declaration of the device's its record's (a record at its own guest address too: the hash, stream order,
         // used mask and first streams the geometry reads first, a miss at most declaration changes in the d4 profile).

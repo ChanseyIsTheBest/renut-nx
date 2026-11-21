@@ -1153,6 +1153,8 @@ const char *AbName(int target) {
   case 176: return "Replay: the next op's shader memo sets prefetched (PrefetchShaderLocked; banjo-nx 2026-11-21; off half: none)";
   case 177: return "fast path: the shader change's prefetches (device lines, declaration, literal runs, entries; banjo-nx 2026-11-21)";
   case 178: return "fast path: the texture slots' and the pipeline entry's prefetches (banjo-nx 2026-11-21; off half: none)";
+  case 179: return "kick submits (banjo_deko3d_kick_submit): lists ended at the game's kicks (banjo-nx 2026-11-21; off half: the frame at the present)";
+  case 181: return "Replay: the next draw's store cards prefetched from its record's header words (banjo-nx 2026-11-21; off half: none)";
   case 172: return "the fast path's spec answers (fetch spec, plain fetches, clip bit, sasrt words) kept while their inputs hold (banjo-nx 2026-11-21)";
   case 156: return "depth resolves nothing has read left out until something does (vivapinata_depth_resolve_skip_unread; NOT exact in principle; off half: drawn)";
   case 152: return "the pixel shaders' alpha test moved up ahead of the colour arithmetic, constant 977 = 1 (vivapinata_shader_earlykill; off half: the test last)";

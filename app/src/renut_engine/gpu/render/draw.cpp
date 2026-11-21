@@ -1709,10 +1709,16 @@ u32 PhysicalOf(const u8 *data) {
 
 // banjo-nx (2026-10-23, render-thread round): the lines PagesClean reads first for a range: its first pages' cards in
 // the four views and their serials. Prefetches only.
+void PrefetchCardLines(u32 offset);
 void PrefetchCards(const u8 *data, size_t bytes) {
+  const u32 offset = StoreCards() && bytes ? PhysicalOf(data) : UINT32_MAX;
+  if (offset != UINT32_MAX)
+    PrefetchCardLines(offset);
+}
+// banjo-nx (2026-11-21, A/B 181): PrefetchCards from the physical offset (render/draw.h PrefetchCardsAt).
+void PrefetchCardLines(u32 offset) {
   u8 *cards = StoreCards();
-  const u32 offset = cards && bytes ? PhysicalOf(data) : UINT32_MAX;
-  if (offset == UINT32_MAX)
+  if (!cards)
     return;
   const u32 page = (offset >> 12) - ((offset >> 12) != 0);
   __builtin_prefetch(cards + 0xA0000u + page);
@@ -4037,11 +4043,24 @@ inline u32 SlotTextureVa(const GuestDevice &device, u32 r) {
 // shift, and the form Ryujinx's shader translator follows back to the constant buffer (the emulator tests).
 inline u32 SamplerWord(u32 slot) { return IsDeko3D() ? slot << 20 : slot; }
 
+}  // namespace
+
+// banjo-nx (2026-11-21, A/B 181): render/draw.h.
+void PrefetchCardsAt(u32 offset) { PrefetchCardLines(offset); }
+u32 CardOffsetOfAddress(u32 address) {
+  if (address < 0x20000000u)
+    return address;  // AddressPtr's physical memory
+  if (address >= 0xA0000000u)
+    return (address & 0x1FFFFFFFu) + (address >= 0xE0000000u ? 0x1000u : 0u);
+  if (address >= 0x7F000000u && address < 0x80000000u)
+    return address - 0x7F000000u;
+  return UINT32_MAX;
+}
+
 // banjo-nx (2026-10-27, the user's Phase A): a texture object (render/draw.h). Line 0 is its identity, written once by
 // the recording thread that makes it before it is published (and read by the others' lookups); lines 1-2 are the
 // render thread's answer for it (what a memo entry holds: the slot words, the bind's effects, what they hold for).
 // (Outside the anonymous namespace: render/draw.h declares it for command_buffers.cpp.)
-}  // namespace
 struct alignas(64) TextureObject {
   u32 va = 0;
   u32 header[6] = {};  // the header's Format words (raw), when the recording made it

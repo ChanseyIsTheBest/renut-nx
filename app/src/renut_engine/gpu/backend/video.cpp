@@ -1289,7 +1289,9 @@ void Video::KickLocked() {
   // The open list ends here when it holds enough draws; the frame goes on in a kick list of the slot.
   const bool eager = banjo::renut_gpu::EagerKicksOn();
   const bool progressive = !eager && banjo::renut_gpu::ProgressiveSubmitOn();  // port 164
-  if (!banjo::renut_gpu::KickSubmitOn() ||
+  // banjo-nx (2026-11-21, A/B 179's off half: no list ends at a kick, the frame goes at the present: the render thread's
+  // submits a frame against the input latency banjo_deko3d_kick_submit buys).
+  if (!banjo::renut_gpu::KickSubmitOn() || banjo::renut_gpu::g_ab_off_plain == 179 ||
       s.list_draws < (eager ? detail::kEagerKickDraws : progressive ? detail::PieceDraws(s) : detail::kKickSubmitDraws) ||
       s.kick_lists_used[cur] >= (eager || progressive ? VideoState::kKickLists : detail::kKickListsAFrame))
     return;
