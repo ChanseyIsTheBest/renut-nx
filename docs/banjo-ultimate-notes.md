@@ -613,3 +613,13 @@ c39's A/Bs (median of the pairs, render thread a draw with the item on): 174 +1.
 +0.12 %, 173 (cached command memory) +0.90 % with GPU -0.9 %. With c36 (174 +1.57, 175 +0.58, 173 +0.11): 174 and 175
 stay off; cached command memory off by default again (8c90ee87): the render thread pays its clean and sets the town's
 frame rate. Cycle 3's console run: A/Bs 176-178 and 56 with 1 ms stack sampling (renut_city_c3ab_s1.toml).
+
+Console c40 (cycle 3, 8c90ee87, night, fixed save, 1 ms stack sampling on): render thread 40.43 ms a frame, 8.36 us a
+draw, 4,834 draws, 24.6 fps, against c38 (5d1c60e9, night, no sampling) 41.89 ms, 8.60 us, 23.8 fps: -3.5 % a frame
+while carrying the sampling. A/Bs (median of 15 pairs, render thread a draw with the prefetch on): 176 -0.36 %, 177
+-0.60 %, 178 -0.36 % (all three pay: their addresses come without a dependent load); 56 +0.36 % (10 of 15 higher; c35
+gave -0.03 %). With frame pointers omitted the stack samples no longer name the renderer's callers (93 % "_EntryWrap");
+the PC samples still give lines (fn_lines.py). Top lines: memcpy+memcmp 4.5 %, GeometryObjectsHit 3.4 %,
+PrefetchResourceObjects 2.9 %, ApplyState 2.2 %, ApplyResources 1.6 %, PagesClean's card loads 1.5 % (no longer
+prefetched with 175 off), HostShaderOf 1.4 %, TextureBindingEpoch 1.2 %, the spec words 1.6 %; deko3d's own calls:
+PushConstants 2.0 %, the kick's ioctl 0.7 %, BindShaders 0.5 %.
