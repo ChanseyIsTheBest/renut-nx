@@ -225,7 +225,10 @@ REXCVAR_DEFINE_BOOL(banjo_renut_replay_object_prefetch, false, "Banjo/Enhancemen
                     "(2026-10-28, A/B 56): an op ahead, the replay prefetches the lines of the texture and geometry "
                     "objects its next op's record names. Prefetches only")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DECLARE(bool, banjo_deko3d_command_stage_any_core);  // (banjo_renut_record.cpp)
+REXCVAR_DECLARE(bool, banjo_deko3d_command_stage_any_core);
+namespace banjo::renut_gpu::record {
+void FollowStageCores(int &applied);  // banjo-nx (2026-11-22): banjo_renut_record.h
+}  // (banjo_renut_record.cpp)
 // banjo-nx (2026-11-21, the user's batch 2: the cache-warming helper; A/B 185).
 REXCVAR_DEFINE_BOOL(banjo_renut_warm_helper, true, "Banjo/Enhancements",
                     "Renut's renderer (2026-11-21): a thread on the system core (4-core mode) reads a few ops ahead of the "
@@ -3129,7 +3132,9 @@ void Worker() {
   const auto nap = std::chrono::microseconds(REXCVAR_GET(banjo_renut_warm_sleep_us));
   uint32_t seq_done = 0;
   size_t warmed_to = 0;
+  int cores_applied = 1;  // (on core 3: moved above)
   for (;;) {
+    banjo::renut_gpu::record::FollowStageCores(cores_applied);  // banjo-nx (2026-11-22, A/B 189)
     Target t;
     uint32_t seq = 0;
     if (!Read(t, seq) || !t.ops || !t.op_count) {

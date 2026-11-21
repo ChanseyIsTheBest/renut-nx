@@ -43,6 +43,10 @@ bool SetBlendConstants(plume::RenderCommandList *cmd, const float rgba[4]);
 bool IsProxy(const plume::RenderCommandList *cmd);
 // banjo-nx (2026-11-21): the deko3d command stage plays the lists (its key, 4-core mode, not A/B 182's off half).
 bool StageActive();
+// banjo-nx (2026-11-22, banjo_deko3d_command_stage_float, A/B 189): the calling thread on cores 1-3 (core 3 preferred)
+// or on core 3 alone as the key and the A/B half say; 'applied' is the caller's (0 at first), the system call made only
+// when it changes. The stage's thread and the warm helper's call it in their loops.
+void FollowStageCores(int &applied);
 void Shutdown();
 void Report(int seconds);  // the "[renut] record worker" line
 

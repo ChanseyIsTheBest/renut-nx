@@ -77,6 +77,13 @@ REXCVAR_DEFINE_INT32(banjo_deko3d_command_stage_stream_ahead, 512, "Banjo",
                      "command is prefetched as the command is played (0: none). In-run A/B 188 (its off half: none)")
     .range(0, 4096)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// banjo-nx (2026-11-22, the user).
+REXCVAR_DEFINE_BOOL(banjo_deko3d_command_stage_float, true, "Banjo",
+                    "deko3d command stage (and the cache-warming helper): its thread may run on cores 1-3, core 3 (the "
+                    "system core) its preferred one, so Horizon moves it to core 1 or 2 while core 3 is busy (the game's "
+                    "audio threads and the system's outrank it there; it outranks the game's threads on cores 1-2, the "
+                    "render thread outranks it on core 1). Off: on core 3 alone. In-run A/B 189 (its off half: core 3)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // banjo-nx (2026-11-21, batch 3).
 REXCVAR_DEFINE_BOOL(banjo_deko3d_command_stage_notify_waiters, true, "Banjo",
                     "deko3d command stage: after each chunk it signals the render thread only when that thread waits for "
@@ -221,7 +228,10 @@ void Worker() {
 #endif
   static const int poll_us = REXCVAR_GET(banjo_deko3d_command_stage_poll_us);
   static const bool notify_waiters_only = REXCVAR_GET(banjo_deko3d_command_stage_notify_waiters);
+  int cores_applied = g_deko3d_stage ? 1 : 0;  // (moved to core 3 above; the record worker on Vulkan: not followed)
   for (;;) {
+    if (g_deko3d_stage)
+      FollowStageCores(cores_applied);  // banjo-nx (2026-11-22, A/B 189)
     Chunk *c = nullptr;
     {
       std::unique_lock lock(g_mutex);
@@ -1237,6 +1247,28 @@ bool SetBlendConstants(plume::RenderCommandList *cmd, const float rgba[4]) {
 
 bool IsProxy(const plume::RenderCommandList *cmd) {
   return cmd == &g_recorder;
+}
+
+// banjo-nx (2026-11-22, banjo_deko3d_command_stage_float, A/B 189): the calling thread (the stage's, the warm helper's)
+// on cores 1-3 with core 3 preferred, or on core 3 alone, as the key and the A/B's half say; the system call only when
+// that changes (its 'applied' is the thread's own: 0 unset, 1 core 3, 2 cores 1-3).
+void FollowStageCores(int &applied) {
+#if REX_PLATFORM_SWITCH
+  static const bool key = REXCVAR_GET(banjo_deko3d_command_stage_float);
+  const int want = key && g_ab_off.load(std::memory_order_relaxed) != 189 ? 2 : 1;
+  if (want == applied)
+    return;
+  applied = want;
+  const int sys = RexSwitchSystemCore();
+  if (sys < 0)
+    return;
+  if (want == 2)
+    (void)RexSwitchSetCurrentThreadCoresWithSystem(sys, 0xEu);
+  else
+    (void)RexSwitchMoveCurrentThreadToSystemCore(-1);
+#else
+  (void)applied;
+#endif
 }
 
 bool StageActive() { return StageOn(); }
