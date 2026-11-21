@@ -580,7 +580,16 @@ public:
   // A command ends; it goes out once the chunk has enough (the worker starts early in a list).
   void Done() { Publish(false); }
 
-  void begin() override { Emit(kBegin, 0); Done(); }
+  void begin() override {
+    // banjo-nx (2026-11-21): plume's begin() forgets the list's shared constants copy (Deko3DSetSharedWords): so does the
+    // verify form (the renderer's own copy is zeroed with the new list, ResetBound, and set again at its first pushed
+    // draw; a draw before that binds its shared constants from the ring). Emulator run stage_verify: 6 "differ" were
+    // such draws, at the start of a list.
+    shared_cpu_ = nullptr;
+    shared_size_ = 0;
+    Emit(kBegin, 0);
+    Done();
+  }
   void end() override { Emit(kEnd, 0); Done(); }
   void barriers(plume::RenderBarrierStages stages, const plume::RenderBufferBarrier *bb, uint32_t bn,
                 const plume::RenderTextureBarrier *tb, uint32_t tn) override {
