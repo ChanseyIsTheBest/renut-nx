@@ -733,3 +733,22 @@ left out on deko3d (0.45 % of the stage); the warm helper's counters off the cac
 thread stores at every op. The recorder's methods: their hot path is 31 instructions in two lines, the slow path
 after it (no change). libdeko3d (prebuilt) copies push constants with memcpy (7.6 % of the stage): left.
 45da8500: the stage on by default on the Switch (4-core mode only); cached command memory follows the stage.
+
+### Batch 3 on the console (c44, 2026-11-22 00:33-00:58, NRO 4bc78bdf, PGO retrained with batch 3)
+
+Showdown Town by day, fixed save, the GPU profile per shader on (its timestamps cost GPU time: totals not comparable);
+no crash, 22 captures with the picture right. In-run (tools/ab_pairs.py means; medians agree):
+
+| A/B | item | render a draw | GPU | all CPU | fps | default |
+|---|---|---|---|---|---|---|
+| 182 | the command stage with batches 2-3, against none | **-14.9 %** (6.89 vs 8.11 us) | -1.0 % | -1.1 % | +6.4 % | on |
+| 135 | sasrt_gpu_handover_with_smaa | 0 | **-1.1 %** | -0.5 % | +0.3 % | on (Switch) |
+| 189 | stage + helper float on cores 1-3 | -1.5 % | 0 | **+2.5 %** | -3.3 % | off |
+| 188 | the stage's stream prefetch | +0.3 % | +0.4 % | -0.3 % | -0.7 % | off |
+| 102 | tiled cache | 0 | **+12.5 %** | 0 | | off |
+| 104 / 132 / 134 | lazy depth / tracked drops / tracked waits | 0 | 0 | 0 | | off |
+| 156 | skip unread depth resolves (not exact) | 0 | -0.3 % | -1 % | +1.6-2.2 % | off |
+
+fad3603b sets those defaults. GPU by pass (36 ms with the profiler): shadow maps ~6 ms (768x768 ~1,780 draws 4.0 ms,
+1024x1024 ~910 draws 2.1 ms), resolves 2.0 + depth 1.5 ms, three full-screen blended passes 1.5-2.2 ms. The base's
+handoff: out/ultimate_handoff_2026-11-22.{md,patch} (6e974759..fad3603b).
