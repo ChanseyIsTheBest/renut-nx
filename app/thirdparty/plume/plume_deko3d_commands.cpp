@@ -190,7 +190,6 @@ namespace plume {
             cachedChunk = nullptr;
         }
         while (memoryUsed < memory.size() && memory[memoryUsed].second < want)
-        while (memoryUsed < memory.size() && memory[memoryUsed].second < want)
             memoryUsed++;
         if (memoryUsed == memory.size()) {
             DkMemBlock block = device->makeBlock(want, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, "command memory");
