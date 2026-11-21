@@ -77,6 +77,12 @@ REXCVAR_DEFINE_INT32(banjo_deko3d_command_stage_stream_ahead, 512, "Banjo",
                      "command is prefetched as the command is played (0: none). In-run A/B 188 (its off half: none)")
     .range(0, 4096)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// banjo-nx (2026-11-21, batch 3).
+REXCVAR_DEFINE_BOOL(banjo_deko3d_command_stage_notify_waiters, true, "Banjo",
+                    "deko3d command stage: after each chunk it signals the render thread only when that thread waits for "
+                    "it (a drain, a staged submit): a signal is a kernel call on the Switch even with nobody waiting, and "
+                    "it made one after every chunk (about 18 a frame on core 3). Off: after every chunk, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_deko3d_stage_retired_free, true, "Banjo",
                     "deko3d command stage: the objects retired with a frame slot go at its DrainSlot without draining "
                     "the stage (it has played every command of that frame: the slot's staged submit was waited for). "
@@ -147,6 +153,8 @@ struct Chunk {
 std::mutex g_mutex;
 std::condition_variable g_work;   // a chunk queued, or stopping
 std::condition_variable g_done;   // a chunk played
+// banjo-nx (2026-11-21, batch 3, banjo_deko3d_command_stage_notify_waiters): threads waiting on g_done (under g_mutex).
+int g_done_waiters = 0;
 std::deque<Chunk *> g_queue;
 std::vector<Chunk *> g_free;
 bool g_worker_waiting = false;
@@ -212,6 +220,7 @@ void Worker() {
   }
 #endif
   static const int poll_us = REXCVAR_GET(banjo_deko3d_command_stage_poll_us);
+  static const bool notify_waiters_only = REXCVAR_GET(banjo_deko3d_command_stage_notify_waiters);
   for (;;) {
     Chunk *c = nullptr;
     {
@@ -238,6 +247,7 @@ void Worker() {
       g_queue.pop_front();
     }
     const auto t0 = std::chrono::steady_clock::now();
+    bool wake = false;
     Play(c->target, c->bytes.get(), c->bytes.get() + c->used);
     g_worker_busy_us.fetch_add(
         uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count()),
@@ -247,8 +257,10 @@ void Worker() {
       c->used = 0;
       g_free.push_back(c);
       ++g_played;
+      wake = g_done_waiters > 0 || !notify_waiters_only;
     }
-    g_done.notify_all();
+    if (wake)
+      g_done.notify_all();
   }
 }
 
@@ -638,17 +650,25 @@ public:
   plume::RenderCommandList *real = nullptr;
 
   // Makes room for a command of 'payload' bytes and returns where its payload goes.
+  // banjo-nx (2026-11-21, batch 3's recorder trim): the write pointer, the chunk's end and its hand-over point are the
+  // recorder's (the chunk's 'used' is written at Publish), and whether this command reaches the hand-over is decided
+  // here, before the payload's stores (after them Done loaded the chunk, its 'used' and the counts again: a byte store
+  // may alias them).
   uint8_t *Emit(Op op, size_t payload) {
     const size_t size = sizeof(Header) + ((payload + 7) & ~size_t(7));
-    if (!cur_ || cur_->used + size > kChunkBytes)
+    uint8_t *p = wp_;
+    if (__builtin_expect(size_t(end_ - p) < size, 0)) {  // (no chunk yet: both null)
       Publish(true);
-    uint8_t *p = cur_->bytes.get() + cur_->used;
+      p = wp_;
+    }
+    uint8_t *const next = p + size;
+    wp_ = next;
+    const uint32_t n = ++commands_;
+    due_ = next >= publish_at_ || n >= publish_commands_;
     Header &h = *reinterpret_cast<Header *>(p);
     h.op = op;
     h.pad = 0;
     h.size = uint32_t(size);
-    cur_->used += size;
-    ++commands_;
     return p + sizeof(Header);
   }
 
@@ -670,6 +690,8 @@ public:
 
   // Hands the recorded chunk to the worker (always when 'full'; else once enough is recorded).
   void Publish(bool full) {
+    if (cur_)
+      cur_->used = size_t(wp_ - cur_->bytes.get());  // (batch 3: the write pointer is the recorder's)
     if (cur_ && cur_->used && (full || cur_->used >= kPublishBytes || commands_ >= publish_commands_)) {
       Chunk *c = cur_;
       cur_ = nullptr;
@@ -698,6 +720,11 @@ public:
     }
     if (!cur_)
       cur_ = new Chunk();
+    uint8_t *const base = cur_->bytes.get();
+    wp_ = base + cur_->used;
+    end_ = base + kChunkBytes;
+    publish_at_ = base + kPublishBytes;
+    due_ = false;
   }
 
   void Drain() {
@@ -707,7 +734,9 @@ public:
       std::unique_lock lock(g_mutex);
       if (g_played != g_published) {
         ::renut::gpu::render_thread::WaitScope wait;
+        ++g_done_waiters;
         g_done.wait(lock, [] { return g_played == g_published; });
+        --g_done_waiters;
       }
     }
     g_drains.fetch_add(1, std::memory_order_relaxed);
@@ -717,7 +746,10 @@ public:
   }
 
   // A command ends; it goes out once the chunk has enough (the worker starts early in a list).
-  void Done() { Publish(false); }
+  void Done() {
+    if (due_)
+      Publish(false);
+  }
 
   void begin() override {
     // banjo-nx (2026-11-21): plume's begin() forgets the list's shared constants copy (Deko3DSetSharedWords): so does the
@@ -756,7 +788,8 @@ public:
   }
   void drawIndexedInstanced(uint32_t a, uint32_t b, uint32_t c, int32_t d, uint32_t e) override {
     VerifyShared();  // banjo-nx (2026-11-21): banjo_deko3d_command_stage_verify
-    Put(Emit(kDrawIndexed, Size<DrawIndexed>()), DrawIndexed{a, b, c, d, e});
+    // (batch 3: stored in place, not built on the stack and copied)
+    *reinterpret_cast<DrawIndexed *>(Emit(kDrawIndexed, Size<DrawIndexed>())) = DrawIndexed{a, b, c, d, e};
     Done();
   }
   void setPipeline(const plume::RenderPipeline *pipeline) override { PutPtr(kSetPipeline, pipeline); }
@@ -966,7 +999,7 @@ public:
     Done();
   }
 #endif
-  bool Pending() const { return cur_ && cur_->used; }
+  bool Pending() const { return cur_ && wp_ != cur_->bytes.get(); }
   uint64_t calls_ = 0;  // StageCall's serials (render thread)
   uint64_t Call(void (*fn)(const void *), const void *args, uint32_t size) {
     const uint64_t serial = ++calls_;
@@ -982,6 +1015,11 @@ public:
 private:
   Chunk *cur_ = nullptr;
   uint32_t commands_ = 0;
+  // banjo-nx (2026-11-21, batch 3): see Emit.
+  uint8_t *wp_ = nullptr;
+  uint8_t *end_ = nullptr;
+  uint8_t *publish_at_ = nullptr;
+  bool due_ = false;
 
   void PutPtr(Op op, const void *ptr) {
     Put(Emit(op, Size<Ptr>()), Ptr{ptr});
@@ -1162,7 +1200,9 @@ void WaitStageCall(uint64_t serial) {
   {
     std::unique_lock lock(g_mutex);
     ::renut::gpu::render_thread::WaitScope wait;
+    ++g_done_waiters;
     g_done.wait(lock, [serial] { return g_calls_done.load(std::memory_order_acquire) >= serial; });
+    --g_done_waiters;
   }
   g_drain_wait_us.fetch_add(
       uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count()),
@@ -1208,7 +1248,9 @@ void Shutdown() {
   std::unique_lock lock(g_mutex);
   g_stop = true;
   g_work.notify_all();
+  ++g_done_waiters;
   g_done.wait(lock, [] { return g_exited; });
+  --g_done_waiters;
 }
 
 void Report(int seconds) {

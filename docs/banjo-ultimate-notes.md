@@ -708,3 +708,28 @@ frame and drained it, 20-300 times in 10 s. 69a5a2f5 (banjo_deko3d_stage_retired
 go without a drain, since WaitSlotLocked has waited for that slot's staged submit (every command naming them is played) and
 no later command names a retired object. Report line: "drains before an object went N (M retired objects went
 without one)".
+
+### Batch 2 on the console (c43, 2026-11-21 21:29-21:47, NRO 69a5a2f5, PGO retrained in the city with it)
+
+Showdown Town by day (~5,570 draws a frame), fixed save: no crash, no stall, 0 differ; the stage and the warm helper
+on core 3. Render thread 38.41 ms a frame, 6.89 us a draw over every half (c42's stage halves: 7.35 us); 25.16 fps;
+GPU 34.74 ms. In-run medians, render thread a draw with the item on:
+
+| A/B | item | render a draw | render ms | fps | pairs on higher |
+|---|---|---|---|---|---|
+| 186 | the stage polls, never woken | -5.29 % | -5.87 % | +3.26 % | 0/9 |
+| 173 | cached command memory (with the stage) | -1.22 % | -1.06 % | +1.01 % | 0/10 (GPU -1.4 %, CPU -1.8 %) |
+| 185 | warm helper | -0.87 % | -1.36 % | +1.22 % | 1/9 (CPU all -0.2 %) |
+| 184 | constants swapped on the stage | -0.73 % | -0.53 % | -0.55 % | 1/9 |
+| 183 | the stage submits and presents | 0.00 % | +0.57 % | +2.14 % | 4/9 (its gain is the drain wait, outside "busy") |
+| 187 | the stage's peek prefetch | -0.44 % | -0.50 % | -0.20 % | 4/9 (on core 3: setPipeline 14.5 % -> 6.1 %) |
+
+All on: ~6.83 us a draw. 186 is the lesson: about 18 wake system calls a frame cost the render thread 5 %.
+Core 3: the stage ~47 % busy, the helper about a third of that. The stage's profile: one PC, the first load of a
+command header written on the render thread's core, is 17.8 % of the stage (the audit's stream prefetch, A/B 188).
+
+The stage's ARM audit (4c71dec9, 9d24fb6b): stream prefetch 512 bytes ahead (A/B 188); the NVK pipeline-bind hint
+left out on deko3d (0.45 % of the stage); the warm helper's counters off the cache line of the op index the render
+thread stores at every op. The recorder's methods: their hot path is 31 instructions in two lines, the slow path
+after it (no change). libdeko3d (prebuilt) copies push constants with memcpy (7.6 % of the stage): left.
+45da8500: the stage on by default on the Switch (4-core mode only); cached command memory follows the stage.
