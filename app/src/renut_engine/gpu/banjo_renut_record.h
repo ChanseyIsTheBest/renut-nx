@@ -52,6 +52,17 @@ uint64_t StageCall(void (*fn)(const void *args), const void *args, uint32_t size
 void Hand();
 // Render thread: until the stage has made call 'serial' (StageCall's answer; 0: none).
 void WaitStageCall(uint64_t serial);
+// banjo-nx (2026-11-21, batch 2, banjo_deko3d_stage_retired_free): while one is alive with 'played' true, plume's
+// object destructors do not drain the stage: the objects retired with a frame slot whose every command the stage has
+// played (its staged submit waited for, or drained at its submit) go at DrainSlot, and no command after names them.
+// Render thread.
+struct RetiredFreeScope {
+  explicit RetiredFreeScope(bool played);
+  ~RetiredFreeScope();
+  RetiredFreeScope(const RetiredFreeScope &) = delete;
+  RetiredFreeScope &operator=(const RetiredFreeScope &) = delete;
+  bool on;
+};
 
 #if defined(PLUME_DEKO3D)
 // The proxy (null until the first Wrap that returns it): the wrappers' test, inline.

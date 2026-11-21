@@ -68,6 +68,13 @@ REXCVAR_DEFINE_INT32(banjo_deko3d_command_stage_peek, 8, "Banjo",
                      "framebuffers and buffers they name (0: none). In-run A/B 187 (its off half: none)")
     .range(0, 64)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// banjo-nx (2026-11-21, batch 2).
+REXCVAR_DEFINE_BOOL(banjo_deko3d_stage_retired_free, true, "Banjo",
+                    "deko3d command stage: the objects retired with a frame slot go at its DrainSlot without draining "
+                    "the stage (it has played every command of that frame: the slot's staged submit was waited for). "
+                    "Off: each such destructor waits for the stage to play all it has (with the frame-end drain gone "
+                    "(banjo_deko3d_stage_submit) that was 20-300 waits in 10 s in the emulator)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_deko3d_command_stage_any_core, false, "Banjo/Diagnostics",
                     "deko3d command stage without 4-core mode (the emulator's tests): its thread on any core, not pinned")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -991,12 +998,19 @@ std::atomic<uint64_t> g_image_tracks{0}, g_image_tracks_direct{0}, g_image_track
 
 #if defined(PLUME_DEKO3D)
 std::atomic<uint64_t> g_destroy_drains{0};
+// banjo-nx (2026-11-21, batch 2): RetiredFreeScope's flag and the destructors it let go without a drain.
+bool g_retired_free = false;
+std::atomic<uint64_t> g_retired_free_skips{0};
 // plume's object destructors (g_deko3dBeforeDestroyHook): on the render thread with a stage list open and anything
 // recorded not played yet, the stage plays it all first (a command naming the object may be among it). The objects
 // retired with the frame go when the stream is empty (the frame's drain came first): a test, no wait.
 void BeforeDestroyHook() {
   if (!g_stage_list || !t_recording_thread)
     return;
+  if (g_retired_free) {
+    g_retired_free_skips.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   bool busy = g_recorder.Pending();
   if (!busy) {
     std::lock_guard lock(g_mutex);
@@ -1135,6 +1149,25 @@ void WaitStageCall(uint64_t serial) {
       std::memory_order_relaxed);
 }
 
+// banjo-nx (2026-11-21, batch 2): banjo_deko3d_stage_retired_free.
+RetiredFreeScope::RetiredFreeScope(bool played) {
+#if defined(PLUME_DEKO3D)
+  static const bool key = REXCVAR_GET(banjo_deko3d_stage_retired_free);
+  on = played && key && !g_retired_free;
+  if (on)
+    g_retired_free = true;
+#else
+  (void)played;
+  on = false;
+#endif
+}
+RetiredFreeScope::~RetiredFreeScope() {
+#if defined(PLUME_DEKO3D)
+  if (on)
+    g_retired_free = false;
+#endif
+}
+
 bool SetBlendConstants(plume::RenderCommandList *cmd, const float rgba[4]) {
   if (cmd != &g_recorder)
     return false;
@@ -1170,18 +1203,20 @@ void Report(int seconds) {
   const uint64_t wakes = g_wakes.exchange(0, std::memory_order_relaxed);
 #if defined(PLUME_DEKO3D)
   const uint64_t destroy_drains = g_destroy_drains.exchange(0, std::memory_order_relaxed);
+  const uint64_t retired_skips = g_retired_free_skips.exchange(0, std::memory_order_relaxed);
 #else
   const uint64_t destroy_drains = 0;
+  const uint64_t retired_skips = 0;
 #endif
   REXLOG_INFO("[renut] record worker (banjo_renut_record_worker{}): {} lists through it, {} direct; {} commands in {} "
               "chunks ({} wakes); worker playing {:.1f} ms; the render thread waited {:.1f} ms in {} drains; image "
               "tables' updates {} in the stream, {} direct, {} off the render thread with a stage list open; drains "
-              "before an object went {}; shared copies checked {}, differ {}",
+              "before an object went {} ({} retired objects went without one); shared copies checked {}, differ {}",
               g_deko3d_stage ? ", banjo_deko3d_command_stage" : "", lists, direct, commands, chunks, wakes,
               double(busy_us) / 1000.0, double(wait_us) / 1000.0, drains,
               g_image_tracks.exchange(0, std::memory_order_relaxed),
               g_image_tracks_direct.exchange(0, std::memory_order_relaxed),
-              g_image_tracks_other_thread.exchange(0, std::memory_order_relaxed), destroy_drains,
+              g_image_tracks_other_thread.exchange(0, std::memory_order_relaxed), destroy_drains, retired_skips,
               g_shared_checked.exchange(0, std::memory_order_relaxed), g_shared_differ.load(std::memory_order_relaxed));
 }
 

@@ -573,7 +573,15 @@ bool BuildSwapChainTargets(VideoState &s) {
   return count != 0;
 }
 
+namespace {
+// banjo-nx (2026-11-21, batch 2): WaitSlotLocked waited for the slot's submitted frame (DrainSlot's RetiredFreeScope).
+bool g_slot_played[kFramesInFlight] = {};
+}  // namespace
+
 void DrainSlot(VideoState &s, uint32_t slot) {
+  // banjo-nx (2026-11-21, batch 2, banjo_deko3d_stage_retired_free): see WaitSlotLocked.
+  const banjo::renut_gpu::record::RetiredFreeScope retired_free(g_slot_played[slot]);
+  g_slot_played[slot] = false;
   s.retired_framebuffers[slot].clear();
   s.retired_views[slot].clear();
   s.retired_textures[slot].clear();
@@ -992,6 +1000,9 @@ std::string LatencyTrimReport() {
 void WaitSlotLocked(VideoState &s, uint32_t slot) {
   if (!s.submitted[slot])
     return;
+  // banjo-nx (2026-11-21, batch 2): every command of the slot's frame is played once this returns (its staged submit
+  // waited for below, or the stage drained at its submit): its retired objects go at DrainSlot without a drain.
+  g_slot_played[slot] = true;
   // banjo-nx (2026-11-21, item 5): a submit the command stage makes: made before its fence is waited for.
   if (g_stage_submit[slot]) {
     banjo::renut_gpu::record::WaitStageCall(g_stage_submit[slot]);
