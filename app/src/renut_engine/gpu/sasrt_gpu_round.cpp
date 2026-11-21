@@ -500,7 +500,9 @@ REXCVAR_DEFINE_BOOL(sasrt_gpu_export_no_point_gs, true, "SASRT/GPU",
                     "cost ~120 ns a point whatever their vertex shader did. The vertex shader runs once a point either way: "
                     "the same exports, and no pixel either way. Its vertex variant then gets constant 905 (no outputs)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(sasrt_gpu_handover_with_smaa, false, "SASRT/GPU",
+// banjo-nx (2026-11-22, console run c44, N&B with SMAA on): A/B 135 gave GPU -1.1 % a draw (9 of 9 pairs lower),
+// the render thread and fps flat, the town's picture right in 22 captures: on by default on the Switch.
+REXCVAR_DEFINE_BOOL(sasrt_gpu_handover_with_smaa, BANJO_SWITCH_DEFAULT(true, false), "SASRT/GPU",
                     "deko3d renderer (fourth GPU round, item 45, A/B 135): banjo's colour hand-over "
                     "(banjo_deko3d_color_handover: a whole resolve into a texture of its size and format left in the "
                     "target's image, not copied) was off whenever SMAA was on, so every resolve was drawn since the SMAA "

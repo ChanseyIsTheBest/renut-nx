@@ -72,13 +72,18 @@ REXCVAR_DEFINE_INT32(banjo_deko3d_command_stage_peek, 8, "Banjo",
     .range(0, 64)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // banjo-nx (2026-11-21, batch 2).
-REXCVAR_DEFINE_INT32(banjo_deko3d_command_stage_stream_ahead, 512, "Banjo",
+// banjo-nx (2026-11-22, console run c44): A/B 188 gave the render thread +0.3 %, GPU +0.4 % (8 of 10 pairs higher),
+// fps -0.7 %: off by default (0).
+REXCVAR_DEFINE_INT32(banjo_deko3d_command_stage_stream_ahead, 0, "Banjo",
                      "deko3d command stage (2026-11-21, its ARM audit): the stream's line this many bytes past each "
                      "command is prefetched as the command is played (0: none). In-run A/B 188 (its off half: none)")
     .range(0, 4096)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // banjo-nx (2026-11-22, the user).
-REXCVAR_DEFINE_BOOL(banjo_deko3d_command_stage_float, true, "Banjo",
+// banjo-nx (2026-11-22, console run c44): A/B 189 gave the render thread -1.5 % a draw (9 of 9 pairs lower) but all
+// threads' CPU +2.5 % (9 of 9 higher) and fps -3.3 %: on cores 1-2 the stage and the warm helper took the game's
+// threads' time. Off by default (core 3 alone, as before).
+REXCVAR_DEFINE_BOOL(banjo_deko3d_command_stage_float, false, "Banjo",
                     "deko3d command stage (and the cache-warming helper): its thread may run on cores 1-3, core 3 (the "
                     "system core) its preferred one, so Horizon moves it to core 1 or 2 while core 3 is busy (the game's "
                     "audio threads and the system's outrank it there; it outranks the game's threads on cores 1-2, the "
