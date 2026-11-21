@@ -794,7 +794,6 @@ struct StageSubmitArgs {
   plume::RenderCommandFence *fence;
   uint64_t ticket;  // the ring cleaner's, for the frame's ranges
 };
-bool SubmitWasStaged(uint32_t slot) { return g_stage_submit[slot] != 0; }
 void StageSubmitCall(const void *a) {
   StageSubmitArgs args;
   std::memcpy(&args, a, sizeof(args));
@@ -822,6 +821,9 @@ plume::RenderCommandList *SlotList(VideoState &s, uint32_t slot) {
 }
 
 } // namespace
+
+// banjo-nx (2026-11-21, item 5): video_internal.h.
+bool SubmitWasStaged(uint32_t slot) { return g_stage_submit[slot] != 0; }
 
 namespace {
 
