@@ -200,6 +200,18 @@ REXCVAR_DEFINE_BOOL(banjo_renut_replay_record_prefetch, false, "Banjo/Enhancemen
                     "next op's shader and declaration records (at their own guest addresses) from its recorded words. "
                     "In-run A/B target 57 with this key on")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// banjo-nx (2026-11-21, the render thread to 33 ms): the console's in-run A/Bs (c36, Showdown Town, 21-22 pairs, the
+// render thread a draw with the item on against off): PrefetchShaderBehind +1.44 % (on slower in 19 of 21 pairs),
+// ApplyResources' copy and card prefetch +0.47 % (16 of 22). Both read a line to find the next (the record's entry and
+// declaration, the object's answers): a miss the render thread waits on, for lines the draw would wait on as long. Off.
+REXCVAR_DEFINE_BOOL(banjo_renut_replay_shader_behind, false, "Banjo/Enhancements",
+                    "OFF by default (console c36: +1.44 % render thread a draw with it on). Renut's renderer (2026-10-28): "
+                    "at a shader change, the replay prefetches the record's cache entry and declaration lines")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_replay_copy_prefetch, false, "Banjo/Enhancements",
+                    "OFF by default (console c36: +0.47 % render thread a draw with it on). Renut's renderer (2026-10-28): "
+                    "ApplyResources prefetches the geometry objects' copies and store cards (off: the answers' lines)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_replay_stream, true, "Banjo/Enhancements",
                     "Renut's renderer (2026-10-27, the replay stream): recorded ops are 64-byte aligned and a draw's op "
                     "is two lines (its call without pointers, the UP data by offset, the shaders' words as recorded); "
@@ -3131,7 +3143,7 @@ void CensusPacket(const u8 *state, const OpCall &call, u32 fields) {
       }
       // (Without the shader stages, A/B 49: the next op's sets, as c2 did.)
       const size_t sets_at = stream_shaders && op_index + 2 < op_count ? op_index + 2 : op_index + 1;
-      if (sets_at < op_count) {
+      if (sets_at < op_count && prefetch_ab != 176) {  // banjo-nx (2026-11-21): A/B 176's off half, none
         const Op &with = ops[sets_at];
         if (with.kind == OpKind::Draw && (with.fields & kFieldShaders)) {
           PrefetchShaderLocked(with.call.vs_word, RecordKind::VertexShader);
@@ -3184,7 +3196,9 @@ void CensusPacket(const u8 *state, const OpCall &call, u32 fields) {
     // is skipped: its record, cache entry and declaration were read by that op's draw (one record line read and up to
     // five prefetches a stage; the c15 city profile's PrefetchShaderBehind 0.18 us a draw). Prefetches only.
     // banjo-nx (2026-11-21, A/B 174's off half: none of it; prefetches only).
-    if (stream && op.kind == OpKind::Draw && (op.fields & kFieldShaders) && banjo::renut_gpu::g_ab_off_plain != 174) {
+    static const bool shader_behind = REXCVAR_GET(banjo_renut_replay_shader_behind);  // banjo-nx (2026-11-21): off
+    if (shader_behind && stream && op.kind == OpKind::Draw && (op.fields & kFieldShaders) &&
+        banjo::renut_gpu::g_ab_off_plain != 174) {
       static u32 behind_vs = 0, behind_ps = 0;  // render thread
       const bool all = banjo::renut_gpu::g_ab_off_plain == 171;
       if (all || op.call.vs_word != behind_vs)
@@ -3240,8 +3254,10 @@ void CensusPacket(const u8 *state, const OpCall &call, u32 fields) {
       extents.mask &= ~SlotsOfFetchChunks(op.plain_dirty);  // (recorded with the key off: not known)
     if (op.resources != kNoResources) {
       // banjo-nx (2026-11-21, A/B 175's off half: the answers' lines, not the copies' and cards; prefetches only).
+      // Off by default (banjo_renut_replay_copy_prefetch: console c36, +0.47 % a draw with it).
+      static const bool copy_prefetch = REXCVAR_GET(banjo_renut_replay_copy_prefetch);
       ApplyResources(resources, buffer.arena.data() + op.resources, op.kind == OpKind::Draw,
-                     stream && op_index > 0 && banjo::renut_gpu::g_ab_off_plain != 175);
+                     copy_prefetch && stream && op_index > 0 && banjo::renut_gpu::g_ab_off_plain != 175);
     } else {  // nothing recorded: a draw has no index words of its own; slots it changed (key off) are not known
       if (op.kind == OpKind::Draw) {
         resources.ib_valid = false;
@@ -3342,8 +3358,9 @@ void CensusPacket(const u8 *state, const OpCall &call, u32 fields) {
       // banjo-nx (2026-10-27): OFF by default since the console run of 2026-10-27 (+2.15 ms a frame with it, A/B 29):
       // banjo_renut_replay_lookahead. (The op after the ones this draw took, when it took some.)
       const size_t next_index = op_index + 1 + merged;
-      if (next_index < op_count && ops[next_index].kind == OpKind::Draw && ops[next_index].state != kNone &&
-          ReplayLookAheadOn()) {
+      // (2026-11-21: the key first, so that with it off the next op's line is not read here.)
+      if (ReplayLookAheadOn() && next_index < op_count && ops[next_index].kind == OpKind::Draw &&
+          ops[next_index].state != kNone) {
         const Op &next = ops[next_index];
         const u8 *next_state = buffer.arena.data() + next.state;
         __builtin_prefetch(next_state);

@@ -594,9 +594,12 @@ void RefreshEffective() {
 }
 
 // banjo-nx (2026-11-21, the render thread to 33 ms; A/B 173): plume's Deko3DOptions::cachedCommands (see there).
-REXCVAR_DEFINE_BOOL(banjo_deko3d_cached_commands, false, "Banjo/Enhancements",
+// Console c36 (Showdown Town, 21 pairs): render thread +0.2 % a draw (noise), GPU -1.0 % a draw (19 of 21 pairs),
+// all threads' CPU -0.9 %: on by default on the Switch.
+REXCVAR_DEFINE_BOOL(banjo_deko3d_cached_commands, BANJO_SWITCH_DEFAULT(false, true), "Banjo/Enhancements",
                     "deko3d renderer (2026-11-21, A/B 173): command memory CPU-cached, each list's written ranges cleaned "
-                    "to memory at its end (uncached before: every command word a store to the bus). The same commands")
+                    "to memory at its end (uncached before: every command word a store to the bus). The same commands. "
+                    "Console c36: GPU -1.0 % a draw, all threads' CPU -0.9 %")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 void ApplyPlume() {

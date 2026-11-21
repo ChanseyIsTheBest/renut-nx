@@ -11103,7 +11103,8 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     // banjo-nx (2026-10-28, cache-miss audit 2): what a shader change reads further down whatever the fields say: the
     // device snapshot's bools and alpha test lines (written by the replay only when they change), and the bound
     // declaration's first three lines (its hash, stream order and used mask; its first streams).
-    {
+    // banjo-nx (2026-11-21, A/B 177's off half: none of the shader change's prefetches here and below).
+    if (ab != 177) {
       const d3d::Device &snap = device.dev();
       __builtin_prefetch(&snap.m_Constants.VertexShaderB[0]);
       __builtin_prefetch(&snap.m_ControlPacket);
@@ -11161,11 +11162,13 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
       [[unlikely]] return FastMiss(kFastSpecial);
     // banjo-nx (2026-10-27, constants): the new shaders' literal runs, which the constants' push reads (a heap object a
     // shader, cold at a shader change), fetched while the declaration, geometry and textures are worked out.
-    if (const void *lr = DrawSummaryOf(*vs).literal_runs)
-      __builtin_prefetch(lr);
-    if (device_ps) {
-      if (const void *lr = DrawSummaryOf(*device_ps).literal_runs)
+    if (ab != 177) {  // banjo-nx (2026-11-21, A/B 177)
+      if (const void *lr = DrawSummaryOf(*vs).literal_runs)
         __builtin_prefetch(lr);
+      if (device_ps) {
+        if (const void *lr = DrawSummaryOf(*device_ps).literal_runs)
+          __builtin_prefetch(lr);
+      }
     }
     if (device_ps) {
       const uint64_t h = device_ps->hash;
@@ -11189,7 +11192,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
                           ps_entry_now != (f.ps ? f.ps->entry : nullptr));
   // banjo-nx (round 4, ARM): the shader entries' lines (the texture masks, the constant summaries, the key's inputs),
   // fetched now and read after the geometry's work.
-  if (shaders_changed) {
+  if (shaders_changed && ab != 177) {  // (2026-11-21: A/B 177's off half, none)
     if (vs_entry_now) {
       __builtin_prefetch(vs_entry_now);
       __builtin_prefetch(reinterpret_cast<const char *>(vs_entry_now) + 64);
@@ -11313,7 +11316,10 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
       fetches[r] = DeviceTextureFetch(dev, r);
       // banjo-nx (round 4, ARM): the header and the memo entry FillTextures reads for the slot, fetched now.
       // banjo-nx (2026-10-27, Phase A): the slot's object's answer lines instead, when the recording gave it.
-      if (textures_inputs && r < d3d::kTextureFetchSlots && g_draw_resources && ((g_draw_resources->mask >> r) & 1)) {
+      // banjo-nx (2026-11-21): A/B 178's off half, none of these, the headers' below nor the pipeline entry's.
+      if (ab == 178) {
+      } else if (textures_inputs && r < d3d::kTextureFetchSlots && g_draw_resources &&
+                 ((g_draw_resources->mask >> r) & 1)) {
         __builtin_prefetch(reinterpret_cast<const char *>(g_draw_resources->slot[r]) + 64);
         __builtin_prefetch(reinterpret_cast<const char *>(g_draw_resources->slot[r]) + 128);
       } else if (textures_inputs && r < d3d::kTextureFetchSlots) {
@@ -11330,7 +11336,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   // headers, below).
   const u32 tex_slots_mask = texture_mask & ((1u << d3d::kTextureFetchSlots) - 1u);
   const bool tex_objects = memo_on_objects(g_draw_resources) && (g_draw_resources->mask & tex_slots_mask) == tex_slots_mask;
-  if (!textures_inputs && !tex_objects) {
+  if (!textures_inputs && !tex_objects && ab != 178) {
     for (u32 bits = tex_slots_mask; bits; bits &= bits - 1) {
       const u32 va = f.texture_va[std::countr_zero(bits)];
       if (const auto *header = va ? GuestPtr<const d3d::BaseTexture>(va) : nullptr)
@@ -11339,7 +11345,8 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   }
   // banjo-nx (round 4, ARM): the pipeline cache's entry this draw most likely reads (its tag with the draw before's
   // alpha test and render-state epoch), fetched now.
-  if (entries_changed || (fields & (kFieldBools | kFieldDest | kFieldViewPackets | kFieldDecl)) || targets_changed) {
+  if ((entries_changed || (fields & (kFieldBools | kFieldDest | kFieldViewPackets | kFieldDecl)) || targets_changed) &&
+      ab != 178) {
     const ShaderCacheEntry *const guess_ps = depth_only ? nullptr : (device_ps ? device_ps->entry : nullptr);
     const u32 guess_misc = call.primitive | u32(geometry.per_instance) << 8 | f.alpha_test_func << 9 |
                            u32(ab) << 16;
