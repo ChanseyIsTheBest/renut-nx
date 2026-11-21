@@ -68,3 +68,20 @@ N&B's structure offsets. Not started.
   is scripted (scratchpad port_media_sdk.sh), applied after the render-thread batch's use build.
 - **Tests to do**: an install made by the page (test/browser.html) run in Ryujinx from the packed files (loads, the
   music plays), then the console.
+
+## First test (2026-11-22, Ryujinx, NRO a8e1aa3a with rr6-nx's readers)
+
+The game folder packed as the installer packs it (tools/pack_game_root.py: 951 files 3,178 -> 2,071 MB as .lz4b) and
+Bundle/50/685374 as NAME.opcm (tools/xwb_opcm_pack.py with ffmpeg's libopus: 819.5 -> 361.2 MB, the 24 PCM sounds as
+Opus, the 15 music tracks ~4 MB each instead of ~41 MB): boot, title and Showdown Town as usual (the city at the
+emulator's usual 13-16 fps), 0 errors; 53 [lz4b] reads logged; Bundle(85374 opened and read through its .opcm
+(reads in the music region, ~500 MB in). Its open took 0.8-1.1 s (the .opcm's tables): worth trimming. Music at the title
+comes from Bundlef85374 (9 MB, a compressed bundle: stays as it is).
+
+**Caution, learned the hard way:** the emulator SD's game_root is a link to D:\Banjo kazooie port\game (the master
+copy). pack_game_root.py packed the master in place for this test; everything was moved back with its restore (952
+files, the classification identical to before) and the tool now refuses a linked root. Test packed installs in a
+separate copy.
+
+Still to do: the installer end to end in Chromium (test/browser.html) into a separate SD folder, the console (after the
+user's word: held until the next render-thread round), the movies (H.265, the named CCalWmvDecoder / Codec* hooks).
