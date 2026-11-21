@@ -599,8 +599,8 @@ A/B 175 (ApplyResources' copy and card prefetch) +0.47 % (se 0.16, 16 of 22); A/
 have. Cycle 3 (6a90503d): both off by default, cached command memory on by default, A/Bs 176-178 for the prefetches
 left. (scratchpad ab_pairs.py: per-pair means; tools/ab_halves.py's totals let one slow half weigh in.)
 
-The runs of one build differ between sessions: c35 (08:42, the overlay's CPU at 1044 MHz) 8.33 us a draw by day; c37
-(13:30, the same NRO and toml, CPU 1016-1019 MHz) 8.70 at night, and c36 (cycle 2, 13:05) 8.70 by day. Compare builds
-within one session (brackets) or by in-run A/Bs; note the overlay's clocks in every run's screenshot. From 2026-11-21
+The runs of one build differ between sessions: c35 (08:42) 8.33 us a draw by day; c37 (13:30, the same NRO and
+toml) 8.70 at night, and c36 (cycle 2, 13:05) 8.70 by day. Not the CPU clock (the user). Compare builds within one
+session (brackets, the fixed save below) or by in-run A/Bs. From 2026-11-21
 13:45 every city run starts from one fixed save (out/card/save_fixed_night_2026-11-21, the user's OK): the same
 in-game time at every start (the town's day/night state decided the draw count before).
