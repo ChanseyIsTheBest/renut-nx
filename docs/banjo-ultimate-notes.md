@@ -674,3 +674,30 @@ what those calls cost on the render thread (core 3 has none of their lines); the
 frame at the list's drain. Next batch (the user, 19:30): the constant byte-swap and the fetch-data copies to the
 stage, the stage ending and submitting the list itself, a look-ahead helper for the copies' card proofs and the texture
 epochs, the memexport readback copies to a worker, and Replay as a front stage.
+
+### Batch 2 (the user's, 2026-11-21 evening; 28424311, 59b688c4, f39da13a, f9110ce0)
+
+Each item behind its key and in-run A/B:
+- 183 banjo_deko3d_stage_submit: the stage ends the frame's list, waits for the ring cleaner's ticket, submits and
+  presents (record::StageCall: a function with its arguments, played in stream order); the render thread hands the
+  frame over and goes on (no drain at the frame's end). WaitSlotLocked waits for the slot's staged submit before its
+  fence; the acquire (a queue operation) waits for the last staged present (a frame of recording earlier: no wait in
+  practice), so the queue is one thread's at a time; RebuildSwapChain drains the stage.
+- 184 banjo_deko3d_stage_swap: float constant runs go into the stream as the guest has them; the stage swaps them in
+  place (NaN flush rule kept).
+- 173 cached command memory, now with its clean on the stage (the list's end is the stage's).
+- 185 banjo_renut_warm_helper: a thread on the system core (priority 0x2F) reads 24 ops ahead of the replay and touches
+  what their draws read (state lines, records, texture and geometry objects with their copies and cards, shader records
+  with their entries and declarations): the prefetch helpers that cost the render thread (174/175/56/181) run their
+  dependent loads there; the lines land in the shared L2. Replay publishes its buffer under a sequence lock and its op
+  index at each op. Reads and prefetches only; geometry objects checked against their pool.
+- 186 banjo_deko3d_command_stage_poll_us (200): the idle stage looks for work every 200 us; the render thread never
+  wakes it (about 18 wake system calls a frame before).
+- 187 banjo_deko3d_command_stage_peek (8): the stage prefetches the pipeline, framebuffer and buffer objects of the next
+  commands (its setPipeline was 14.5 % of its thread in c42).
+- The recorder copies push payloads inline.
+Not built, measured as nothing to move: the fetch-data copies (already batched at the kick, 0.02 %), the memexport
+readback completion (0.03 %). Not built: Replay as a front stage (the draw reads the state the replay writes: ~2-4 %
+for a day's refactor); the look-ahead card proofs (a read-only helper keeps most of the cost).
+Emulator: items 3 and 5 verified (batchA_verify, 10 min: 16.2 M draws' shared copies checked, 0 differ, frames
+presented by the stage, the town drawn right).
