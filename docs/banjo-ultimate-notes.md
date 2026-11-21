@@ -590,3 +590,17 @@ line moves to the next touch of the same cache line: the render thread waits on 
 what the item saves. Cycle 2 (849e7a3f): cached command memory (banjo_deko3d_cached_commands, A/B 173: the command
 buffers in CPU-cached memory, cleaned at end(); memcpy into the uncached blocks ran at ~0.9 GB/s), the spec-word
 compares inline, the shader-behind prefetch (A/B 174) and ApplyResources' copy prefetch (A/B 175) as A/Bs.
+
+Console c36 (849e7a3f, day, in-run A/B pairs: the render thread a draw with the item on against off, mean of the
+pairs, halves above 20 us a draw left out): A/B 174 (PrefetchShaderBehind) +1.44 % (se 0.21, on slower in 19 of 21);
+A/B 175 (ApplyResources' copy and card prefetch) +0.47 % (se 0.16, 16 of 22); A/B 173 (cached command memory) +0.21 %
+(noise) but GPU -1.03 % a draw (19 of 21) and all threads' CPU -0.9 %. Both prefetches read a line to find the next
+(the record's entry and declaration, the object's answers): the render thread waited on that miss as the draw would
+have. Cycle 3 (6a90503d): both off by default, cached command memory on by default, A/Bs 176-178 for the prefetches
+left. (scratchpad ab_pairs.py: per-pair means; tools/ab_halves.py's totals let one slow half weigh in.)
+
+The runs of one build differ between sessions: c35 (08:42, the overlay's CPU at 1044 MHz) 8.33 us a draw by day; c37
+(13:30, the same NRO and toml, CPU 1016-1019 MHz) 8.70 at night, and c36 (cycle 2, 13:05) 8.70 by day. Compare builds
+within one session (brackets) or by in-run A/Bs; note the overlay's clocks in every run's screenshot. From 2026-11-21
+13:45 every city run starts from one fixed save (out/card/save_fixed_night_2026-11-21, the user's OK): the same
+in-game time at every start (the town's day/night state decided the draw count before).
