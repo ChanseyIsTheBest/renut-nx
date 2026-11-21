@@ -41,6 +41,8 @@ void Drain();
 bool SetBlendConstants(plume::RenderCommandList *cmd, const float rgba[4]);
 // True when 'cmd' is the proxy: banjo_renut_tuning's NVK prefetch hint is then given by the worker before it binds.
 bool IsProxy(const plume::RenderCommandList *cmd);
+// banjo-nx (2026-11-21): the deko3d command stage plays the lists (its key, 4-core mode, not A/B 182's off half).
+bool StageActive();
 void Shutdown();
 void Report(int seconds);  // the "[renut] record worker" line
 

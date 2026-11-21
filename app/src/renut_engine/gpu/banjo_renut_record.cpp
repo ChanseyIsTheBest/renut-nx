@@ -22,6 +22,7 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 
+#include "banjo_switch_default.h"  // banjo-nx (2026-11-21): the stage's Switch default
 #include "cpu/banjo_enhancements.h"
 #include "me/me_platform_compat.h"  // RexSwitchPinCurrentThreadToCore and the priority helper (no-ops off the Switch)
 #include "renut_engine/gpu/backend/backend.h"
@@ -40,7 +41,9 @@ REXCVAR_DEFINE_INT32(banjo_renut_record_worker_core, 0, "Banjo",
                      "the render thread has banjo_ring_core, the pipeline workers banjo_background_compile_core)")
     .range(-1, 2);
 // banjo-nx (2026-11-21, the user's "build core 3"): banjo_renut_record.h.
-REXCVAR_DEFINE_BOOL(banjo_deko3d_command_stage, false, "Banjo/Enhancements",
+// banjo-nx (2026-11-21): on by default on the Switch after console runs c42 (A/B 182: render thread -5.0 % a draw,
+// 68 of 68 pairs; fps +2.8 %) and c43 (batch 2 with it: 6.83 us a draw by day against 7.35). 4-core mode only.
+REXCVAR_DEFINE_BOOL(banjo_deko3d_command_stage, BANJO_SWITCH_DEFAULT(true, false), "Banjo/Enhancements",
                     "deko3d renderer (2026-11-21, the core-3 command stage): the render thread records its command "
                     "list into a stream and a thread on the system core (core 3, 4-core mode only) plays it into "
                     "deko3d (plume's command list and libdeko3d's encoding move off the render thread). Same "
@@ -1195,6 +1198,8 @@ bool SetBlendConstants(plume::RenderCommandList *cmd, const float rgba[4]) {
 bool IsProxy(const plume::RenderCommandList *cmd) {
   return cmd == &g_recorder;
 }
+
+bool StageActive() { return StageOn(); }
 
 void Shutdown() {
   if (!g_started)

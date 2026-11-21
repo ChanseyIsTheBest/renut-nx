@@ -563,6 +563,8 @@ REXCVAR_DEFINE_BOOL(sasrt_rt_cached_export_seeds, true, "SASRT/RenderThread",
 
 #if defined(PLUME_DEKO3D)
 #include <plume_deko3d.h>
+
+#include "renut_engine/gpu/banjo_renut_record.h"  // banjo-nx (2026-11-21): StageActive
 #endif
 
 namespace sasrt::gpu_round {
@@ -602,13 +604,21 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_cached_commands, false, "Banjo/Enhancements",
                     "to memory at its end (uncached before: every command word a store to the bus). The same commands. "
                     "Console c36/c39: GPU -1 % a draw, render thread +0.1/+0.9 % a draw (off: the town is render-bound)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// banjo-nx (2026-11-21, console run c43): with the core-3 command stage the list's end, and so the clean, is the
+// stage's: A/B 173 then gave render thread -1.2 % a draw (10 of 10 pairs lower), GPU -1.4 %, all threads' CPU -1.8 %.
+REXCVAR_DEFINE_BOOL(banjo_deko3d_cached_commands_with_stage, true, "Banjo/Enhancements",
+                    "deko3d renderer: command memory CPU-cached (banjo_deko3d_cached_commands) whenever the core-3 "
+                    "command stage plays the lists (banjo_deko3d_command_stage), its clean then off the render thread")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 void ApplyPlume() {
 #if defined(PLUME_DEKO3D)
   {
     static const bool cached = REXCVAR_GET(banjo_deko3d_cached_commands);
+    static const bool with_stage = REXCVAR_GET(banjo_deko3d_cached_commands_with_stage);
     plume::g_deko3dOptions.cachedCommands =
-        cached && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 173;  // banjo-nx (2026-11-21)
+        (cached || (with_stage && banjo::renut_gpu::record::StageActive())) &&
+        banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 173;  // banjo-nx (2026-11-21)
   }
   plume::g_deko3dCounts = banjo::renut_gpu::Latch().counts;  // banjo-nx (2026-11-20): plume's stats bumps
   plume::g_deko3dOptions.preciseDepthResolve = On(kPreciseDepth);
