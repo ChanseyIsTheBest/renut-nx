@@ -582,3 +582,11 @@ the words they read, masked to the bits read); sasrt_gpu_vs_input_mask off for N
 -fomit-frame-pointer (BANJO_SWITCH_RENUT_OMIT_FRAME_POINTER, out/switch_pgo_use_fp.bat). Ryujinx verify run (11 min,
 banjo_renut_fast_draw_verify): 0 kept answers differ; kept 40 % of the fast draws (a fifth of those by the word
 check). The rest change shaders (the pipeline changes at ~60 % of the draws), which a last-draw keep cannot answer.
+
+Console c35 (3d554cc0, day, 5,250 draws a frame, A/B 172/56/55): 8.33 us a draw against 5d1c60e9's 8.30 by day. A/B 172
+(spec answers kept) -0.2 % a draw, 56 (next op's resource objects prefetched) -0.3 %, 55 within 0.3 %. The cycle's
+items together (172, vs input mask off, no frame pointer) made no visible change. On the A57 a sample on a removed
+line moves to the next touch of the same cache line: the render thread waits on memory, and a profile share is not
+what the item saves. Cycle 2 (849e7a3f): cached command memory (banjo_deko3d_cached_commands, A/B 173: the command
+buffers in CPU-cached memory, cleaned at end(); memcpy into the uncached blocks ran at ~0.9 GB/s), the spec-word
+compares inline, the shader-behind prefetch (A/B 174) and ApplyResources' copy prefetch (A/B 175) as A/Bs.
