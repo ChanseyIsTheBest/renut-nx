@@ -752,3 +752,10 @@ no crash, 22 captures with the picture right. In-run (tools/ab_pairs.py means; m
 fad3603b sets those defaults. GPU by pass (36 ms with the profiler): shadow maps ~6 ms (768x768 ~1,780 draws 4.0 ms,
 1024x1024 ~910 draws 2.1 ms), resolves 2.0 + depth 1.5 ms, three full-screen blended passes 1.5-2.2 ms. The base's
 handoff: out/ultimate_handoff_2026-11-22.{md,patch} (6e974759..fad3603b).
+
+### The final build, clean (2026-11-22 07:48-08:16, NRO a8e1aa3a, no A/B, no profiler, the user's settings)
+
+Showdown Town, fixed save, three launches (the time of day is the game's pick): warm sky (37 windows) 24.73 fps, render
+thread 38.26 ms, GPU 34.42 ms, 5,573 draws a frame, 6.86 us a draw; blue midday sky (36 windows) 25.24 fps, render
+36.22 ms, GPU 33.10 ms, 5,114 draws, 7.08 us a draw; the third warm again. The ~4,850-draw state of the earlier
+"night" runs did not come up. The start of the 24 hours (5d1c60e9): 23.09 fps, render 42.36 ms, GPU 35.42 ms.
