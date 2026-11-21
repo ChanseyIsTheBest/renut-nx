@@ -664,3 +664,13 @@ it is ended (every end and submit already called record::Drain). Same commands, 
   core (the emulator's render thread looked 2x slower with it: not a console figure).
 Emulator: no crash, the town drawn right (captures), ~8.5 commands a draw through the stream, every image-table update
 on the render thread. Console: pending (renut_city_stage_s1.toml: A/B 182, 1 ms sampling).
+
+Console c42 (stage build 4326cf95, kick submits off, day, 1 ms sampling, A/B 182 alone, 68 pairs): the stage ON
+against OFF: render thread -5.02 % a draw (lower in 68 of 68 pairs), fps +2.8 %, GPU +0.65 % a draw (60/68 higher),
+all-threads CPU +3.7 %. Halves: on 38.88 ms a frame, 7.35 us a draw, 24.9 fps; off 40.57 ms, 7.66 us, 24.5 fps
+(5,290 draws). The stage thread on core 3 at 0x2E (core 3 39 % busy averaged over both halves: the game's XAudio
+supervisor 20 %, audio worker 7 %, the stage ~20 % in its halves); it plays ~11 ms of commands a frame, about twice
+what those calls cost on the render thread (core 3 has none of their lines); the render thread still waits ~0.85 ms a
+frame at the list's drain. Next batch (the user, 19:30): the constant byte-swap and the fetch-data copies to the
+stage, the stage ending and submitting the list itself, a look-ahead helper for the copies' card proofs and the texture
+epochs, the memexport readback copies to a worker, and Replay as a front stage.
