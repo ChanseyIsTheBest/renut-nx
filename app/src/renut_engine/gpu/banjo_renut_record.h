@@ -44,6 +44,15 @@ bool IsProxy(const plume::RenderCommandList *cmd);
 void Shutdown();
 void Report(int seconds);  // the "[renut] record worker" line
 
+// banjo-nx (2026-11-21, the next batch's item 5, banjo_deko3d_stage_submit): a call the stage makes in stream order
+// (the list's end and its submit, the present): 'fn' gets a copy of the 'size' bytes at 'args' (at most 256), on the
+// stage's thread. Returns the call's serial (1, 2, ...). Render thread, on the proxy (IsProxy).
+uint64_t StageCall(void (*fn)(const void *args), const void *args, uint32_t size);
+// Render thread: what is recorded so far handed to the stage now, without waiting for it.
+void Hand();
+// Render thread: until the stage has made call 'serial' (StageCall's answer; 0: none).
+void WaitStageCall(uint64_t serial);
+
 #if defined(PLUME_DEKO3D)
 // The proxy (null until the first Wrap that returns it): the wrappers' test, inline.
 extern plume::RenderCommandList *g_proxy;
@@ -64,6 +73,12 @@ void SetNextPrimitive(uint32_t primitive);
 void BufferWait(uint32_t invalidate, bool countsAsBufferWait);
 uint64_t BufferWaits();
 void ReportCounter(const plume::RenderQueryPool *pool, uint32_t index, uint32_t counter);
+// banjo-nx (2026-11-21, the next batch's item 3, banjo_deko3d_stage_swap): a constant push whose 'size' bytes the
+// caller writes at the answer as the guest has them (big-endian words); the stage swaps them (and with 'nanFlush'
+// zeroes a word whose exponent is all ones, as CopyAndSwapGroup does) and pushes them. The caller writes the bytes,
+// then calls PushUniformRawEnd, with no other call on the proxy between. Render thread, on the proxy.
+uint8_t *PushUniformRawBegin(uint64_t address, uint32_t uboSize, uint32_t offset, uint32_t size, bool nanFlush);
+void PushUniformRawEnd();
 }  // namespace detail
 
 // plume's deko3d calls that take a command list, recorded when 'cmd' is the proxy (the bool ones then answer true: no

@@ -90,6 +90,8 @@ enum Op : uint16_t {
   kD3PushUniform, kD3BindUniform, kD3BindStorage, kD3SetSharedWords, kD3SharedLines, kD3BindFragTextures,
   kD3BindMemExport, kD3BindFetchData, kD3FlushL2, kD3DiscardNextDraw, kD3SampleMask, kD3NextPrimitive, kD3BufferWait,
   kD3ReportCounter, kD3ImageTrack, kD3VerifyShared,
+  kStageCall,  // banjo-nx (2026-11-21, item 5): StageCall
+  kD3PushUniformRaw,  // banjo-nx (2026-11-21, item 3): detail::PushUniformRawBegin
   kOpCount
 };
 
@@ -255,6 +257,30 @@ struct FetchHead { uint64_t address; uint32_t size, pad; };
 struct BufferWaitHead { uint32_t invalidate, counts; };
 struct ReportHead { const void *pool; uint32_t index, counter; };
 struct VerifyHead { uint64_t hash; uint32_t size, pad; };
+struct CallHead { void (*fn)(const void *); uint64_t serial; uint32_t size, pad; };
+// banjo-nx (2026-11-21, item 3): the guest's big-endian words swapped in place (the chunk is the stage's while it plays),
+// and with 'nan_flush' a word whose exponent is all ones zeroed (CopyAndSwapGroup's rule). 'n' a multiple of 16.
+void SwapWordsInPlace(uint8_t *p, uint32_t n, bool nan_flush) {
+#if defined(__aarch64__)
+  const uint32x4_t exponent = vdupq_n_u32(0x7F800000u);
+  for (uint32_t i = 0; i + 16 <= n; i += 16) {
+    uint32x4_t w = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(p + i)));
+    if (nan_flush)
+      w = vbicq_u32(w, vceqq_u32(vandq_u32(w, exponent), exponent));
+    vst1q_u8(p + i, vreinterpretq_u8_u32(w));
+  }
+#else
+  for (uint32_t i = 0; i + 4 <= n; i += 4) {
+    uint32_t w;
+    std::memcpy(&w, p + i, 4);
+    w = __builtin_bswap32(w);
+    if (nan_flush && (w & 0x7F800000u) == 0x7F800000u)
+      w = 0;
+    std::memcpy(p + i, &w, 4);
+  }
+#endif
+}
+std::atomic<uint64_t> g_calls_done{0};  // banjo-nx (2026-11-21, item 5): the last StageCall the stage made
 #if defined(PLUME_DEKO3D)
 static_assert(kPod<plume::Deko3DImageTrack>, "the stream copies an image track as bytes");
 // The stage's own copy of the shared constants that plume's bindTextures reads (the render thread's, g_bound.pushed_shared,
@@ -474,6 +500,20 @@ void Play(plume::RenderCommandList *cmd, const uint8_t *p, const uint8_t *end) {
       break;
     }
     case kD3ImageTrack: plume::Deko3DApplyImageTrack(At<plume::Deko3DImageTrack>(p)); break;
+    case kD3PushUniformRaw: {
+      const PushUniformHead &u = At<PushUniformHead>(p);
+      uint8_t *data = const_cast<uint8_t *>(Array<uint8_t>(p, u.size));
+      SwapWordsInPlace(data, u.size, u.pad != 0);
+      plume::Deko3DPushUniform(cmd, u.address, u.ubo_size, u.offset, data, u.size);
+      break;
+    }
+    case kStageCall: {
+      const CallHead &call = At<CallHead>(p);
+      const uint8_t *args = Array<uint8_t>(p, call.size);
+      call.fn(args);
+      g_calls_done.store(call.serial, std::memory_order_release);
+      break;
+    }
     case kD3VerifyShared: {
       const VerifyHead &v = At<VerifyHead>(p);
       g_shared_checked.fetch_add(1, std::memory_order_relaxed);
@@ -814,6 +854,17 @@ public:
   }
 #endif
   bool Pending() const { return cur_ && cur_->used; }
+  uint64_t calls_ = 0;  // StageCall's serials (render thread)
+  uint64_t Call(void (*fn)(const void *), const void *args, uint32_t size) {
+    const uint64_t serial = ++calls_;
+    uint8_t *p = Emit(kStageCall, Size<CallHead>() + Size<uint8_t>(size));
+    PutArray(Put(p, CallHead{fn, serial, size, 0}), static_cast<const uint8_t *>(args), size);
+    Done();
+    return serial;
+  }
+  void HandNow() { Publish(true); }
+  uint8_t *EmitPublic(Op op, size_t payload) { return Emit(op, payload); }  // (item 3: the caller writes the payload)
+  void DonePublic() { Done(); }
 
 private:
   Chunk *cur_ = nullptr;
@@ -958,12 +1009,44 @@ uint64_t BufferWaits() { return g_recorder.buffer_waits_; }
 void ReportCounter(const plume::RenderQueryPool *pool, uint32_t index, uint32_t counter) {
   g_recorder.D3ReportCounter(pool, index, counter);
 }
+uint8_t *PushUniformRawBegin(uint64_t address, uint32_t uboSize, uint32_t offset, uint32_t size, bool nanFlush) {
+  uint8_t *p = g_recorder.EmitPublic(kD3PushUniformRaw, (sizeof(PushUniformHead) + 7) / 8 * 8 + (size + 7u) / 8 * 8);
+  const PushUniformHead head{address, uboSize, offset, size, nanFlush ? 1u : 0u};
+  std::memcpy(p, &head, sizeof(head));
+  return p + (sizeof(PushUniformHead) + 7) / 8 * 8;
+}
+void PushUniformRawEnd() { g_recorder.DonePublic(); }
 }  // namespace detail
 #endif
 
 void Drain() {
   if (g_started)
     g_recorder.Drain();
+}
+
+uint64_t StageCall(void (*fn)(const void *args), const void *args, uint32_t size) {
+  return g_recorder.Call(fn, args, size);
+}
+
+void Hand() {
+  if (g_started && g_recorder.Pending())
+    g_recorder.HandNow();
+}
+
+void WaitStageCall(uint64_t serial) {
+  if (!serial || g_calls_done.load(std::memory_order_acquire) >= serial)
+    return;
+  if (g_recorder.Pending())
+    g_recorder.HandNow();  // (the call may be in the chunk still being recorded)
+  const auto t0 = std::chrono::steady_clock::now();
+  {
+    std::unique_lock lock(g_mutex);
+    ::renut::gpu::render_thread::WaitScope wait;
+    g_done.wait(lock, [serial] { return g_calls_done.load(std::memory_order_acquire) >= serial; });
+  }
+  g_drain_wait_us.fetch_add(
+      uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count()),
+      std::memory_order_relaxed);
 }
 
 bool SetBlendConstants(plume::RenderCommandList *cmd, const float rgba[4]) {

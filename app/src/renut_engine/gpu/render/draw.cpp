@@ -149,6 +149,10 @@ REXCVAR_DEFINE_BOOL(banjo_renut_fetch_slots_skip, true, "Banjo/Enhancements",
                     "Renut's renderer on deko3d: a draw without vertex fetches skips the compare of the shared "
                     "constants' fetch slots when the last push had none either (both zero)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_deko3d_stage_swap, true, "Banjo/Enhancements",
+                    "deko3d command stage (2026-11-21, item 3): a float constant run goes into the stage's stream as the "
+                    "guest has it and the stage swaps it (no swap and no copy on the render thread). In-run A/B 184")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_diag_repeat_census, false, "Banjo/Diagnostics",
                     "Renut's renderer (2026-10-23, batch 6b): two frames in every 32 hashed draw by draw, and the 10 s "
                     "report's repeat census line says how many draws repeat from one frame to the next: their state "
@@ -3172,6 +3176,25 @@ constexpr u32 kConstantGroupBytes = 4 * 16;
 // kameo-nx (2026-11-04, banjo_renut_const_nan_flush; the rule from Kameo: RePowered's constant_buffers.cpp SwapConstantChunk,
 // MIT): a word with every exponent bit set goes to the shader as 0. Xenos multiplies anything by 0 to 0, NaN and infinity
 // included; the host's GPU keeps the NaN. 'held' keeps the guest's bytes (the next compare is against those).
+// banjo-nx (2026-11-21, item 3, banjo_deko3d_stage_swap): the group into the held copy and into the command stage's
+// stream as the guest has it (the stage swaps it: banjo_renut_record.h PushUniformRawBegin).
+[[gnu::always_inline]] inline void CopyGroupRaw(const u8 *guest, u8 *held, u8 *raw) {
+  static_assert(kConstantGroupBytes == 64);
+#if defined(__aarch64__)
+  const uint8x16_t a = vld1q_u8(guest), b = vld1q_u8(guest + 16), c = vld1q_u8(guest + 32), d = vld1q_u8(guest + 48);
+  vst1q_u8(held, a);
+  vst1q_u8(held + 16, b);
+  vst1q_u8(held + 32, c);
+  vst1q_u8(held + 48, d);
+  vst1q_u8(raw, a);
+  vst1q_u8(raw + 16, b);
+  vst1q_u8(raw + 32, c);
+  vst1q_u8(raw + 48, d);
+#else
+  std::memcpy(held, guest, kConstantGroupBytes);
+  std::memcpy(raw, guest, kConstantGroupBytes);
+#endif
+}
 [[gnu::always_inline]] inline void CopyAndSwapGroup(const u8 *guest, u8 *held, u8 *swapped, bool nan_flush) {
   static_assert(kConstantGroupBytes == 64);
 #if defined(__aarch64__)
@@ -3576,6 +3599,11 @@ inline void DiagPushLines(u32 first, u32 run) {
     for (u32 l = first; l < first + run && l < 22; ++l)
       ++g_diag_push_lines[l];
 }
+// banjo-nx (2026-11-21, item 3): banjo_deko3d_stage_swap and not A/B 184's off half.
+inline bool StageSwapOn() {
+  static const bool on = REXCVAR_GET(banjo_deko3d_stage_swap);
+  return on && banjo::renut_gpu::g_ab_off_plain != 184;
+}
 // One stage's float constants (see above); 'ubo' its buffer's address.
 // banjo-nx (2026-11-20, N&B's render thread against renut-nx 1.0.2 in Showdown Town): one copy (noclone): LTO's
 // constant propagation made two 6 KB copies of it, and both ran every draw (the instruction cache; 1.0.2 had one).
@@ -3665,12 +3693,27 @@ inline void DiagPushLines(u32 first, u32 run) {
     const u32 count = u32(std::countl_one(remaining << first));
     alignas(16) u32 lanes[64 * kConstantGroupBytes / 4];
     const bool nan_flush = banjo::renut_gpu::ConstNanFlushOn();  // banjo-nx (2026-11-20): once, not a call a group
+#if defined(PLUME_DEKO3D)
+    // banjo-nx (2026-11-21, item 3): on the command stage's proxy the run goes into its stream as the guest has it
+    // (the stage swaps it): no swap here and no copy from 'lanes'.
+    u8 *const raw = cmd == banjo::renut_gpu::record::g_proxy && StageSwapOn()
+                        ? banjo::renut_gpu::record::detail::PushUniformRawBegin(
+                              ubo, kFloatConstantsUboBytes, first * kConstantGroupBytes, count * kConstantGroupBytes,
+                              nan_flush)
+                        : nullptr;
+#else
+    u8 *const raw = nullptr;
+#endif
     for (u32 k = 0; k < count; ++k) {
       const u32 group = first + k;
       // banjo-nx (2026-10-27, render thread night): swapped on the way (a separate pass over the run before);
       // banjo-nx (2026-10-28): both copies from one NEON load (CopyAndSwapGroup).
-      CopyAndSwapGroup(constants.Register(group * 4), last.bytes + group * kConstantGroupBytes,
-                       reinterpret_cast<u8 *>(lanes + k * (kConstantGroupBytes / 4)), nan_flush);
+      if (raw)
+        CopyGroupRaw(constants.Register(group * 4), last.bytes + group * kConstantGroupBytes,
+                     raw + k * kConstantGroupBytes);
+      else
+        CopyAndSwapGroup(constants.Register(group * 4), last.bytes + group * kConstantGroupBytes,
+                         reinterpret_cast<u8 *>(lanes + k * (kConstantGroupBytes / 4)), nan_flush);
       last.valid[group / 8] |= 0xFu << (group % 8 * 4);
       for (u32 q = 0; q < 4; ++q)
         last.lit_owner[group * 4 + q] = nullptr;  // banjo-nx (2026-10-27): the device's bytes now
@@ -3681,8 +3724,13 @@ inline void DiagPushLines(u32 first, u32 run) {
       }
       remaining &= ~(uint64_t(1) << (63 - group));
     }
-    banjo::renut_gpu::record::PushUniform(cmd, ubo, kFloatConstantsUboBytes, first * kConstantGroupBytes, lanes,
-                             count * kConstantGroupBytes);
+#if defined(PLUME_DEKO3D)
+    if (raw)
+      banjo::renut_gpu::record::detail::PushUniformRawEnd();
+    else
+#endif
+      banjo::renut_gpu::record::PushUniform(cmd, ubo, kFloatConstantsUboBytes, first * kConstantGroupBytes, lanes,
+                                            count * kConstantGroupBytes);
     pushed_bytes += count * kConstantGroupBytes;
   }
   // The literal registers: after the groups (a group may hold one, and its update overwrote it).
