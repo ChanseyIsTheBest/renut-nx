@@ -17,18 +17,135 @@
 #include <rex/filesystem/device.h>
 #include <rex/filesystem/devices/host_path_device.h>
 #include <rex/filesystem/lz4_blocks.h>
+#include <rex/filesystem/opus_pcm.h>
+#include <rex/filesystem/sfd_hevc.h>
 #include <rex/logging.h>
 #include <rex/math.h>
 #include <rex/memory/mapped_memory.h>
 #include <rex/string.h>
+#include <rex/cvar.h>
+
+#include <algorithm>
+#include <atomic>
+#include <list>
+#include <mutex>
+
+/*
+ * culdcept-nx (2026-11-20): keep the game's data files open (HostPathEntry::Park). The console profile of a board
+ * replay (out/console_runs/prof1) had 18 % of the game thread's slow frames in file-system requests: Culdcept Saga
+ * reopens DATA00.RSP, its layout*.RSL and se_*.xma banks every few seconds, and each open on Horizon is _fsFsOpenCommon
+ * plus fsFsGetFileTimeStampRaw (inside fsdev_open) and each close _fsObjectClose, 4-5 ms an open on average, the worst
+ * over 100 ms. Only read-only opens of a read-only device are kept (the game data, never a save). A handle is just a
+ * descriptor read with pread at an offset, so a reused one returns the same bytes as a fresh one.
+ */
+REXCVAR_DEFINE_BOOL(filesystem_keep_open, true, "Filesystem",
+                    "Keep the host handles of read-only game files open after the guest closes them and reuse "
+                    "them on the next open (no open, timestamp or close request to the file system).");
+REXCVAR_DEFINE_INT32(filesystem_keep_open_max, 32, "Filesystem",
+                     "How many closed read-only handles stay open at most (the oldest is closed beyond it).");
+
+#if REX_PLATFORM_SWITCH
+namespace rex::filesystem {
+// (rr6-nx's TruncateOpenFile, port 203: not in this branch's base)
+}
+#endif
 
 namespace rex::filesystem {
+
+namespace {
+
+struct ParkedHandle {
+  const HostPathEntry* entry;
+  std::unique_ptr<FileHandle> handle;
+};
+
+// Never destroyed: a device torn down during static destruction at exit still finds them.
+struct Parked {
+  std::mutex mutex;
+  std::list<ParkedHandle> list;  // newest first
+};
+Parked& P() {
+  static Parked* p = new Parked();
+  return *p;
+}
+std::atomic<uint64_t> g_keep_reused{0};
+std::atomic<uint64_t> g_keep_parked{0};
+std::atomic<uint64_t> g_keep_evicted{0};
+std::atomic<uint64_t> g_keep_restats_skipped{0};
+std::atomic<uint64_t> g_keep_retries{0};
+
+// Closes every parked handle; how many there were.
+size_t DropAllParked() {
+  std::list<ParkedHandle> all;  // closed after the lock is let go
+  {
+    std::lock_guard lock(P().mutex);
+    all.swap(P().list);
+  }
+  return all.size();
+}
+
+}  // namespace
+
+StatsKeepOpen ReadStatsKeepOpen() {
+  StatsKeepOpen s;
+  s.reused = g_keep_reused.load(std::memory_order_relaxed);
+  s.parked = g_keep_parked.load(std::memory_order_relaxed);
+  s.evicted = g_keep_evicted.load(std::memory_order_relaxed);
+  s.restats_skipped = g_keep_restats_skipped.load(std::memory_order_relaxed);
+  std::lock_guard lock(P().mutex);
+  s.live = P().list.size();
+  return s;
+}
+
+void NoteRestatSkipped() {
+  g_keep_restats_skipped.fetch_add(1, std::memory_order_relaxed);
+}
+
+std::unique_ptr<FileHandle> HostPathEntry::TakeParked() {
+  std::lock_guard lock(P().mutex);
+  for (auto it = P().list.begin(); it != P().list.end(); ++it) {
+    if (it->entry == this) {
+      auto handle = std::move(it->handle);
+      P().list.erase(it);
+      g_keep_reused.fetch_add(1, std::memory_order_relaxed);
+      return handle;
+    }
+  }
+  return nullptr;
+}
+
+void HostPathEntry::Park(std::unique_ptr<FileHandle> handle) {
+  static const bool keep = REXCVAR_GET(filesystem_keep_open);
+  static const size_t keep_max = size_t(std::max(0, int(REXCVAR_GET(filesystem_keep_open_max))));
+  if (!handle || !keep || !keep_max) {
+    return;  // closed here
+  }
+  std::unique_ptr<FileHandle> evicted;  // closed after the lock is let go (declared first, destroyed last)
+  std::lock_guard lock(P().mutex);
+  P().list.push_front(ParkedHandle{this, std::move(handle)});
+  g_keep_parked.fetch_add(1, std::memory_order_relaxed);
+  if (P().list.size() > keep_max) {
+    evicted = std::move(P().list.back().handle);
+    P().list.pop_back();
+    g_keep_evicted.fetch_add(1, std::memory_order_relaxed);
+  }
+}
 
 HostPathEntry::HostPathEntry(Device* device, Entry* parent, const std::string_view path,
                              const std::filesystem::path& host_path)
     : Entry(device, parent, path), host_path_(host_path) {}
 
-HostPathEntry::~HostPathEntry() = default;
+HostPathEntry::~HostPathEntry() {
+  std::list<ParkedHandle> mine;  // closed after the lock is let go (declared first, destroyed last)
+  std::lock_guard lock(P().mutex);
+  for (auto it = P().list.begin(); it != P().list.end();) {
+    auto next = std::next(it);
+    if (it->entry == this) {
+      mine.splice(mine.end(), P().list, it);
+    }
+    it = next;
+  }
+}
 
 HostPathEntry* HostPathEntry::Create(Device* device, Entry* parent,
                                      const std::filesystem::path& full_path,
@@ -41,7 +158,29 @@ HostPathEntry* HostPathEntry::Create(Device* device, Entry* parent,
    */
   bool lz4_blocks = false;
   uint64_t lz4_size = 0;
-  if (file_info.type == rex::filesystem::FileInfo::Type::kFile && HasLz4BlocksSuffix(name)) {
+  // rr6-nx (2026-11-21): NAME.hevc.lz4b (rex/filesystem/sfd_hevc.h, a .hevc movie stored as ZXC blocks) is the game's
+  // NAME as NAME.hevc is, unless a plain NAME lies next to it; OpenSfdHevc reads it through OpenLz4Blocks.
+  const bool packed_hevc_name =
+      file_info.type == rex::filesystem::FileInfo::Type::kFile && HasLz4BlocksSuffix(name) &&
+      HasSfdHevcSuffix(std::string_view(name).substr(0, name.size() - kLz4BlocksSuffix.size()));
+  bool packed_hevc = false;
+  uint64_t packed_hevc_size = 0;
+  if (packed_hevc_name) {
+    std::filesystem::path plain = full_path;
+    plain.replace_extension();  // NAME.hevc
+    plain.replace_extension();  // NAME
+    rex::filesystem::FileInfo plain_info;
+    if (rex::filesystem::GetInfo(plain, &plain_info)) {
+      REXFS_WARN("{} and {} are both in the game folder: the plain file is used (delete one of them)",
+                 rex::path_to_utf8(plain), rex::path_to_utf8(full_path));
+    } else if (ReadSfdHevcSize(full_path, &packed_hevc_size)) {
+      packed_hevc = true;
+      name.resize(name.size() - kPackedSfdHevcSuffix.size());
+    } else {
+      REXFS_WARN("{} is not a valid packed .hevc movie: left as it is", rex::path_to_utf8(full_path));
+    }
+  }
+  if (!packed_hevc_name && file_info.type == rex::filesystem::FileInfo::Type::kFile && HasLz4BlocksSuffix(name)) {
     std::filesystem::path plain = full_path;
     plain.replace_extension();
     rex::filesystem::FileInfo plain_info;
@@ -55,10 +194,48 @@ HostPathEntry* HostPathEntry::Create(Device* device, Entry* parent,
       REXFS_WARN("{} is not a valid .lz4b file: left as it is", rex::path_to_utf8(full_path));
     }
   }
+  // rr6-nx (2026-11-21): NAME.opcm (rex/filesystem/opus_pcm.h, the music as Opus) the same way.
+  bool opus_pcm = false;
+  if (file_info.type == rex::filesystem::FileInfo::Type::kFile && HasOpusPcmSuffix(name)) {
+    std::filesystem::path plain = full_path;
+    plain.replace_extension();
+    rex::filesystem::FileInfo plain_info;
+    if (rex::filesystem::GetInfo(plain, &plain_info)) {
+      REXFS_WARN("{} and {} are both in the game folder: the plain file is used (delete one of them)",
+                 rex::path_to_utf8(plain), rex::path_to_utf8(full_path));
+    } else if (ReadOpusPcmSize(full_path, &lz4_size)) {
+      opus_pcm = true;
+      name.resize(name.size() - kOpusPcmSuffix.size());
+    } else {
+      REXFS_WARN("{} is not a valid .opcm file: left as it is", rex::path_to_utf8(full_path));
+    }
+  }
+  // rr6-nx (2026-11-21): NAME.hevc (rex/filesystem/sfd_hevc.h, a movie as H.265) the same way.
+  bool sfd_hevc = false;
+  if (file_info.type == rex::filesystem::FileInfo::Type::kFile && HasSfdHevcSuffix(name)) {
+    std::filesystem::path plain = full_path;
+    plain.replace_extension();
+    rex::filesystem::FileInfo plain_info;
+    if (rex::filesystem::GetInfo(plain, &plain_info)) {
+      REXFS_WARN("{} and {} are both in the game folder: the plain file is used (delete one of them)",
+                 rex::path_to_utf8(plain), rex::path_to_utf8(full_path));
+    } else if (ReadSfdHevcSize(full_path, &lz4_size)) {
+      sfd_hevc = true;
+      name.resize(name.size() - kSfdHevcSuffix.size());
+    } else {
+      REXFS_WARN("{} is not a valid .hevc movie: left as it is", rex::path_to_utf8(full_path));
+    }
+  }
+  if (packed_hevc) {
+    sfd_hevc = true;
+    lz4_size = packed_hevc_size;
+  }
   auto path = rex::string::utf8_join_guest_paths(parent->path(), name);
   auto entry = new HostPathEntry(device, parent, path, full_path);
   entry->lz4_blocks_ = lz4_blocks;
-  if (lz4_blocks) {
+  entry->opus_pcm_ = opus_pcm;
+  entry->sfd_hevc_ = sfd_hevc;
+  if (lz4_blocks || opus_pcm || sfd_hevc) {
     file_info.total_size = size_t(lz4_size);
   }
 
@@ -103,8 +280,8 @@ X_STATUS HostPathEntry::Open(uint32_t desired_access, File** out_file) {
     return X_STATUS_SUCCESS;
   }
 
-  // rr6-nx (2026-11-10): an .lz4b file is read only.
-  if (lz4_blocks_ && (desired_access & (FileAccess::kGenericWrite | FileAccess::kFileWriteData |
+  // rr6-nx (2026-11-10): an .lz4b file is read only (2026-11-21: and an .opcm).
+  if (packed() && (desired_access & (FileAccess::kGenericWrite | FileAccess::kFileWriteData |
                                         FileAccess::kFileAppendData | FileAccess::kGenericAll))) {
     return X_STATUS_ACCESS_DENIED;
   }
@@ -113,11 +290,29 @@ X_STATUS HostPathEntry::Open(uint32_t desired_access, File** out_file) {
   std::unique_ptr<rex::filesystem::FileHandle> file_handle;
   if (is_read_only() && !(desired_access & (FileAccess::kGenericWrite | FileAccess::kFileWriteData |
                                             FileAccess::kFileAppendData | FileAccess::kGenericAll))) {
+    // culdcept-nx (2026-11-20): or the one a previous open of this file left parked (already wrapped for an .lz4b).
+    file_handle = TakeParked();
+    if (file_handle) {
+      *out_file = new HostPathFile(desired_access, this, std::move(file_handle));
+      return X_STATUS_SUCCESS;
+    }
     file_handle = startup_trace::TakePreopened(static_cast<HostPathDevice*>(device_), path());
   }
   if (!file_handle) {
     file_handle = rex::filesystem::FileHandle::OpenExisting(
         host_path_, desired_access, static_cast<HostPathDevice*>(device_)->allow_share_delete());
+  }
+  // culdcept-nx (2026-11-20, filesystem_keep_open): an open that fails while handles are parked gives them all up and is
+  // tried once more, on any device (game data or saves): whatever limit the system puts on open files, the parked
+  // handles never take a slot a real open needs.
+  if (!file_handle) {
+    if (const size_t dropped = DropAllParked()) {
+      file_handle = rex::filesystem::FileHandle::OpenExisting(
+          host_path_, desired_access, static_cast<HostPathDevice*>(device_)->allow_share_delete());
+      if (g_keep_retries.fetch_add(1, std::memory_order_relaxed) < 20)
+        REXFS_WARN("[io] keep-open: opening '{}' failed with {} handles parked; all closed, opened again: {}",
+                   rex::path_to_utf8(host_path_), dropped, file_handle ? "opened" : "failed again");
+    }
   }
   if (!file_handle) {
     // TODO(benvanik): pick correct response.
@@ -128,6 +323,16 @@ X_STATUS HostPathEntry::Open(uint32_t desired_access, File** out_file) {
     if (!file_handle) {
       return X_STATUS_NO_SUCH_FILE;
     }
+  } else if (opus_pcm_) {
+    file_handle = OpenOpusPcm(std::move(file_handle));  // logs why when it is not a valid .opcm file
+    if (!file_handle) {
+      return X_STATUS_NO_SUCH_FILE;
+    }
+  } else if (sfd_hevc_) {
+    file_handle = OpenSfdHevc(std::move(file_handle));  // logs why when it is not a valid .hevc movie
+    if (!file_handle) {
+      return X_STATUS_NO_SUCH_FILE;
+    }
   }
   *out_file = new HostPathFile(desired_access, this, std::move(file_handle));
   return X_STATUS_SUCCESS;
@@ -135,7 +340,7 @@ X_STATUS HostPathEntry::Open(uint32_t desired_access, File** out_file) {
 
 std::unique_ptr<memory::MappedMemory> HostPathEntry::OpenMapped(memory::MappedMemory::Mode mode,
                                                                 size_t offset, size_t length) {
-  if (lz4_blocks_) {
+  if (packed()) {
     return nullptr;  // rr6-nx: the host file is the packed one
   }
   return memory::MappedMemory::Open(host_path_, mode, offset, length);
@@ -145,6 +350,8 @@ bool HostPathEntry::Truncate() {
   if (is_read_only() || (attributes_ & kFileAttributeDirectory)) {
     return false;
   }
+  // banjo-nx-ult (2026-11-22): rr6-nx's port 203 branch (TruncateOpenFile, the base's later port) left out: this
+  // branch's base predates port 203.
   auto file = rex::filesystem::OpenFile(host_path_, "wb");
   if (!file) {
     return false;
@@ -217,6 +424,18 @@ void HostPathEntry::update() {
     if (lz4_blocks_) {  // rr6-nx: the size of the file it holds
       uint64_t size = 0;
       if (!ReadLz4BlocksSize(host_path_, &size)) {
+        return;
+      }
+      file_info.total_size = size_t(size);
+    } else if (opus_pcm_) {  // rr6-nx (2026-11-21): the same for an .opcm
+      uint64_t size = 0;
+      if (!ReadOpusPcmSize(host_path_, &size)) {
+        return;
+      }
+      file_info.total_size = size_t(size);
+    } else if (sfd_hevc_) {  // and a .hevc movie
+      uint64_t size = 0;
+      if (!ReadSfdHevcSize(host_path_, &size)) {
         return;
       }
       file_info.total_size = size_t(size);
