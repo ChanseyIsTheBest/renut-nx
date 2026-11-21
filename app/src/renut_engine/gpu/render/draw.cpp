@@ -9867,6 +9867,9 @@ void PrefetchGeometryCopies(const GeometryObject *o, bool index) {
     }
   }
 }
+bool GeometryObjectPooled(const GeometryObject *o) {  // banjo-nx (2026-11-21): render/draw.h
+  return o >= g_geometry_objects && o < g_geometry_objects + kGeometryObjects;
+}
 bool GeometryObjectsRecorded() {
   static const bool on = REXCVAR_GET(banjo_renut_geometry_objects);
   return on;

@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <vector>
 
@@ -54,6 +55,18 @@ REXCVAR_DEFINE_INT32(banjo_deko3d_command_stage_batch, 1024, "Banjo",
                      "deko3d command stage: commands recorded before a hand-over to its thread (each a possible wake: "
                      "fewer, larger hand-overs cost the render thread less; the frame's last part waits for its play)")
     .range(64, 16384)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// banjo-nx (2026-11-21, the user's batch 2).
+REXCVAR_DEFINE_INT32(banjo_deko3d_command_stage_poll_us, 200, "Banjo",
+                     "deko3d command stage: with nothing to play its thread looks for work every this many microseconds "
+                     "and the render thread never wakes it (each wake was a system call on the render thread, about 18 a "
+                     "frame); 0: woken at each hand-over, as before. In-run A/B 186 (its off half: woken)")
+    .range(0, 5000)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(banjo_deko3d_command_stage_peek, 8, "Banjo",
+                     "deko3d command stage: commands it reads ahead of the one it plays, prefetching the pipelines, "
+                     "framebuffers and buffers they name (0: none). In-run A/B 187 (its off half: none)")
+    .range(0, 64)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_deko3d_command_stage_any_core, false, "Banjo/Diagnostics",
                     "deko3d command stage without 4-core mode (the emulator's tests): its thread on any core, not pinned")
@@ -183,11 +196,20 @@ void Worker() {
               core < 0 ? std::string("not pinned") : fmt::format("core {}{}", core, core_ok ? "" : " (NOT accepted)"));
   }
 #endif
+  static const int poll_us = REXCVAR_GET(banjo_deko3d_command_stage_poll_us);
   for (;;) {
     Chunk *c = nullptr;
     {
       std::unique_lock lock(g_mutex);
       while (g_queue.empty() && !g_stop) {
+        // banjo-nx (2026-11-21, batch 2): the stage looks for work every poll_us instead of being woken (A/B 186's off
+        // half, and the record worker on Vulkan: woken).
+        if (g_deko3d_stage && poll_us > 0 && g_ab_off.load(std::memory_order_relaxed) != 186) {
+          lock.unlock();
+          std::this_thread::sleep_for(std::chrono::microseconds(poll_us));
+          lock.lock();
+          continue;
+        }
         g_worker_waiting = true;
         g_work.wait(lock);
         g_worker_waiting = false;
@@ -292,8 +314,58 @@ uint64_t g_stage_shared_address = 0;
 constexpr uint32_t kSharedUboSlot = 2;  // plume_deko3d_commands.cpp SharedUboSlot
 #endif
 
+// banjo-nx (2026-11-21, batch 2): the objects a command names, prefetched while the commands before it are played (the
+// stage's setPipeline was 14.5 % of its thread in console run c42, most of it the pipeline object's first lines).
+void PeekPrefetch(const uint8_t *q) {
+  const Header &h = *reinterpret_cast<const Header *>(q);
+  const uint8_t *payload = q + sizeof(Header);
+  switch (Op(h.op)) {
+  case kSetPipeline: {
+    const char *pp = static_cast<const char *>(reinterpret_cast<const Ptr *>(payload)->p);
+    if (pp) {
+      __builtin_prefetch(pp);
+      __builtin_prefetch(pp + 64);
+      __builtin_prefetch(pp + 128);
+      __builtin_prefetch(pp + 192);
+    }
+    break;
+  }
+  case kSetFramebuffer:
+  case kD3BindMemExport: {
+    const char *pp = static_cast<const char *>(reinterpret_cast<const Ptr *>(payload)->p);
+    if (pp) {
+      __builtin_prefetch(pp);
+      __builtin_prefetch(pp + 64);
+    }
+    break;
+  }
+  case kSetIndexBuffer: {
+    plume::RenderIndexBufferView v;
+    std::memcpy(&v, payload, sizeof(v));
+    if (v.buffer.ref)
+      __builtin_prefetch(v.buffer.ref);
+    break;
+  }
+  default:
+    break;
+  }
+}
+
 void Play(plume::RenderCommandList *cmd, const uint8_t *p, const uint8_t *end) {
+  static const uint32_t peek = uint32_t(REXCVAR_GET(banjo_deko3d_command_stage_peek));
+  const uint32_t ahead_max = g_deko3d_stage && g_ab_off.load(std::memory_order_relaxed) != 187 ? peek : 0u;
+  const uint8_t *q = p;  // the peek cursor: the next command not peeked yet
+  uint32_t ahead = 0;
   while (p < end) {
+    while (ahead < ahead_max && q < end) {
+      PeekPrefetch(q);
+      q += reinterpret_cast<const Header *>(q)->size;
+      ++ahead;
+    }
+    if (ahead)
+      --ahead;
+    else
+      q = p + reinterpret_cast<const Header *>(p)->size;  // (peek off: the cursor kept past this command)
     const Header &h = *reinterpret_cast<const Header *>(p);
     const uint8_t *next = p + h.size;
     p += sizeof(Header);
@@ -797,8 +869,22 @@ public:
   uint64_t buffer_waits_ = 0;
   void D3PushUniform(uint64_t address, uint32_t ubo_size, uint32_t offset, const void *data, uint32_t size) {
     uint8_t *p = Emit(kD3PushUniform, Size<PushUniformHead>() + Size<uint8_t>(size));
-    PutArray(Put(p, PushUniformHead{address, ubo_size, offset, size, 0}), static_cast<const uint8_t *>(data), size);
+    p = Put(p, PushUniformHead{address, ubo_size, offset, size, 0});
+    CopyPayload(p, static_cast<const uint8_t *>(data), size);
     Done();
+  }
+  // banjo-nx (2026-11-21, batch 2's ARM audit): the renderer's pushes are 16-byte multiples of at most a few hundred
+  // bytes (shared constant lines, literal runs): copied inline, not by a library call each.
+  static void CopyPayload(uint8_t *to, const uint8_t *from, uint32_t size) {
+#if defined(__aarch64__)
+    if ((size & 15u) == 0 && size <= 1024u) {
+      for (uint32_t at = 0; at < size; at += 16)
+        vst1q_u8(to + at, vld1q_u8(from + at));
+      return;
+    }
+#endif
+    if (size)
+      std::memcpy(to, from, size);
   }
   void D3BindBuf(Op op, uint32_t slot, uint64_t address, uint32_t size) {
     Put(Emit(op, Size<BindBufHead>()), BindBufHead{address, slot, size});

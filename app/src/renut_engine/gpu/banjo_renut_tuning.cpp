@@ -1158,6 +1158,11 @@ const char *AbName(int target) {
   case 179: return "kick submits (banjo_deko3d_kick_submit): lists ended at the game's kicks (banjo-nx 2026-11-21; off half: the frame at the present)";
   case 181: return "Replay: the next draw's store cards prefetched from its record's header words (banjo-nx 2026-11-21; off half: none)";
   case 182: return "the deko3d command stage (banjo_deko3d_command_stage): lists recorded into a stream played on the system core (banjo-nx 2026-11-21; off half: recorded directly)";
+  case 183: return "the command stage ends, submits and presents the frame (banjo_deko3d_stage_submit; banjo-nx 2026-11-21; off half: the render thread drains and submits)";
+  case 184: return "float constants into the stage's stream as the guest has them, swapped by the stage (banjo_deko3d_stage_swap; banjo-nx 2026-11-21)";
+  case 185: return "the cache-warming helper on the system core (banjo_renut_warm_helper; banjo-nx 2026-11-21; off half: given nothing)";
+  case 186: return "the command stage looks for work every poll_us, never woken by the render thread (banjo-nx 2026-11-21; off half: woken)";
+  case 187: return "the command stage prefetches the objects of the commands ahead (banjo_deko3d_command_stage_peek; banjo-nx 2026-11-21)";
   case 172: return "the fast path's spec answers (fetch spec, plain fetches, clip bit, sasrt words) kept while their inputs hold (banjo-nx 2026-11-21)";
   case 156: return "depth resolves nothing has read left out until something does (vivapinata_depth_resolve_skip_unread; NOT exact in principle; off half: drawn)";
   case 152: return "the pixel shaders' alpha test moved up ahead of the colour arithmetic, constant 977 = 1 (vivapinata_shader_earlykill; off half: the test last)";

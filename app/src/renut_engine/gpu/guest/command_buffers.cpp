@@ -225,6 +225,22 @@ REXCVAR_DEFINE_BOOL(banjo_renut_replay_object_prefetch, false, "Banjo/Enhancemen
                     "(2026-10-28, A/B 56): an op ahead, the replay prefetches the lines of the texture and geometry "
                     "objects its next op's record names. Prefetches only")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// banjo-nx (2026-11-21, the user's batch 2: the cache-warming helper; A/B 185).
+REXCVAR_DEFINE_BOOL(banjo_renut_warm_helper, true, "Banjo/Enhancements",
+                    "Renut's renderer (2026-11-21): a thread on the system core (4-core mode) reads a few ops ahead of the "
+                    "replay and touches what their draws will read (the ops' state and records, the texture and geometry "
+                    "objects, the vertex copies and their store cards, the shader records and their entries and "
+                    "declarations), so the render thread finds those lines in the shared L2 instead of main memory. "
+                    "Reads only (the image is the same). In-run A/B 185 (its off half: the helper is given nothing)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(banjo_renut_warm_ahead, 24, "Banjo",
+                     "The cache-warming helper: ops it keeps warmed ahead of the replay")
+    .range(2, 256)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(banjo_renut_warm_sleep_us, 100, "Banjo",
+                     "The cache-warming helper: its sleep when it is that far ahead (or has nothing)")
+    .range(10, 5000)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_replay_stream, true, "Banjo/Enhancements",
                     "Renut's renderer (2026-10-27, the replay stream): recorded ops are 64-byte aligned and a draw's op "
                     "is two lines (its call without pointers, the UP data by offset, the shaders' words as recorded); "
@@ -2979,6 +2995,192 @@ void CensusPacket(const u8 *state, const OpCall &call, u32 fields) {
 // (see SetReplayPredicationLocked).
 // banjo-nx (2026-11-20, N&B's render thread against renut-nx 1.0.2 in Showdown Town): one copy (noclone): LTO's
 // constant propagation made two 18 KB copies of it, and both ran every draw (the instruction cache; 1.0.2 had one).
+// banjo-nx (2026-11-21, the user's batch 2): the cache-warming helper (banjo_renut_warm_helper). Replay publishes the
+// buffer it plays (a sequence lock: the count is odd while the target is written) and its op index at each op; the
+// helper, on the system core, reads up to banjo_renut_warm_ahead ops ahead of it and touches what their draws read (the
+// prefetch helpers that cost the render thread when it ran them itself, A/B 174/175/56/181: their loads stall only the
+// helper here). The lines it brings land in the L2 the cores share. Reads and prefetches only, every pointer it follows
+// checked (arena offsets against the arena's size, geometry objects against their pool, shader records by their own
+// address word): a buffer freed under it is read as stale bytes, and the target's count tells it to stop.
+#if REX_PLATFORM_SWITCH
+extern "C" int RexSwitchSystemCore(void);
+extern "C" bool RexSwitchMoveCurrentThreadToSystemCore(int priority);
+#endif
+namespace warm {
+struct Target {
+  const Op *ops = nullptr;
+  size_t op_count = 0;
+  const u8 *arena = nullptr;
+  size_t arena_size = 0;
+};
+std::atomic<uint32_t> g_seq{0};
+Target g_target;  // the render thread's, written under g_seq
+std::atomic<size_t> g_index{0};
+bool g_started = false;  // render thread
+std::atomic<uint64_t> g_ops{0}, g_wakes{0}, g_idle{0};
+
+bool On() {
+#if REX_PLATFORM_SWITCH
+  static const bool on = REXCVAR_GET(banjo_renut_warm_helper) && RexSwitchSystemCore() >= 0;
+  return on;
+#else
+  return false;
+#endif
+}
+
+void Publish(const Target &t) {
+  const uint32_t s = g_seq.load(std::memory_order_relaxed);
+  g_seq.store(s + 1, std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_release);
+  g_target = t;
+  g_index.store(0, std::memory_order_relaxed);
+  g_seq.store(s + 2, std::memory_order_release);
+}
+
+bool Read(Target &t, uint32_t &seq) {
+  const uint32_t s0 = g_seq.load(std::memory_order_acquire);
+  if (s0 & 1)
+    return false;
+  t = g_target;
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (g_seq.load(std::memory_order_relaxed) != s0)
+    return false;
+  seq = s0;
+  return true;
+}
+
+void WarmOp(const Target &t, size_t j) {
+  const Op &op = t.ops[j];
+  const char *line = reinterpret_cast<const char *>(&op);
+  __builtin_prefetch(line);
+  __builtin_prefetch(line + 64);
+  const u8 *arena = t.arena;
+  const size_t size = t.arena_size;
+  if (op.state != kNone && op.state < size) {
+    const u32 bytes = std::min<u32>(u32(std::popcount(op.plain_dirty)) * kChunkBytes +
+                                        u32(std::popcount(op.vs_dirty) + std::popcount(op.ps_dirty)) * kConstantGroupBytes,
+                                    4096u);
+    for (u32 at = 0; at < bytes && op.state + at < size; at += 64)
+      __builtin_prefetch(arena + op.state + at);
+  }
+  if (op.extents != kNoExtents && op.extents < size)
+    __builtin_prefetch(arena + op.extents);
+  if (op.resources != kNoResources && size_t(op.resources) + sizeof(ResourceHead) <= size) {
+    ResourceHead head;
+    std::memcpy(&head, arena + op.resources, sizeof(head));
+    const u8 *from = arena + op.resources + sizeof(head);
+    const u8 *const end = arena + size;
+    for (u32 bits = head.slots; bits && from + sizeof(TextureObject *) <= end; bits &= bits - 1) {
+      TextureObject *obj;
+      std::memcpy(&obj, from, sizeof(obj));
+      from += sizeof(obj);
+      if (obj)
+        PrefetchTextureObject(obj);  // (prefetches only: no load through it)
+    }
+    from += size_t(std::popcount(head.vb_mask)) * 8;
+    if ((head.flags & 2) && from + 8 <= end) {
+      u32 object_mask;
+      std::memcpy(&object_mask, from, 4);
+      from += 8;
+      for (u32 bits = object_mask; bits && from + sizeof(GeometryObject *) <= end; bits &= bits - 1) {
+        GeometryObject *o;
+        std::memcpy(&o, from, sizeof(o));
+        from += sizeof(o);
+        if (GeometryObjectPooled(o)) {
+          PrefetchGeometryObject(o, false);
+          PrefetchGeometryCopies(o, false);  // (reads the pooled object; its copies and cards prefetched)
+        }
+      }
+    }
+    if ((head.flags & 4) && from + sizeof(GeometryObject *) <= end) {
+      GeometryObject *o;
+      std::memcpy(&o, from, sizeof(o));
+      if (GeometryObjectPooled(o)) {
+        PrefetchGeometryObject(o, true);
+        PrefetchGeometryCopies(o, true);
+      }
+    }
+  }
+  if (op.kind == OpKind::Draw) {
+    if (op.fields & kFieldShaders) {
+      PrefetchShaderRecordAt(op.call.vs_word);
+      PrefetchShaderRecordAt(op.call.ps_word);
+      PrefetchShaderBehind(op.call.vs_word);  // (checks the record's own address word before it reads further)
+      PrefetchShaderBehind(op.call.ps_word);
+    }
+    if (op.call.decl_word)
+      PrefetchShaderRecordAt(op.call.decl_word);
+  }
+}
+
+void Worker() {
+#if REX_PLATFORM_SWITCH
+  const bool moved = RexSwitchMoveCurrentThreadToSystemCore(0x2F);
+  RGPU_INFO("[renut] cache-warming helper (banjo_renut_warm_helper): on the system core {}{} at priority 0x2F",
+            RexSwitchSystemCore(), moved ? "" : " (NOT accepted)");
+#endif
+  const size_t ahead = size_t(REXCVAR_GET(banjo_renut_warm_ahead));
+  const auto nap = std::chrono::microseconds(REXCVAR_GET(banjo_renut_warm_sleep_us));
+  uint32_t seq_done = 0;
+  size_t warmed_to = 0;
+  for (;;) {
+    Target t;
+    uint32_t seq = 0;
+    if (!Read(t, seq) || !t.ops || !t.op_count) {
+      g_idle.fetch_add(1, std::memory_order_relaxed);
+      std::this_thread::sleep_for(nap);
+      continue;
+    }
+    if (seq != seq_done) {
+      seq_done = seq;
+      warmed_to = 0;
+    }
+    const size_t at = g_index.load(std::memory_order_relaxed);
+    const size_t from = std::max(warmed_to, at + 1);
+    const size_t to = std::min(t.op_count, at + 1 + ahead);
+    if (from >= to) {
+      g_idle.fetch_add(1, std::memory_order_relaxed);
+      std::this_thread::sleep_for(nap);
+      continue;
+    }
+    g_wakes.fetch_add(1, std::memory_order_relaxed);
+    size_t j = from;
+    for (; j < to; ++j) {
+      if (g_seq.load(std::memory_order_relaxed) != seq)
+        break;  // the replay moved to another buffer (or left this one)
+      WarmOp(t, j);
+    }
+    g_ops.fetch_add(j - from, std::memory_order_relaxed);
+    warmed_to = j;
+  }
+}
+
+// Render thread: the helper started (once) and this buffer its target; Leave puts the outer one back.
+struct Scope {
+  bool active = false;
+  Target saved;
+  size_t saved_index = 0;
+  Scope(const HostCommandBuffer &buffer) {
+    if (!On() || banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) == 185)
+      return;
+    if (!g_started) {
+      g_started = true;
+      banjo::renut_gpu::StartLongLivedThread(&Worker, 64u << 10);
+    }
+    active = true;
+    saved = g_target;
+    saved_index = g_index.load(std::memory_order_relaxed);
+    Publish(Target{buffer.ops.data(), buffer.ops.size(), buffer.arena.data(), buffer.arena.size()});
+  }
+  ~Scope() {
+    if (!active)
+      return;
+    Publish(saved);
+    g_index.store(saved_index, std::memory_order_relaxed);
+  }
+};
+}  // namespace warm
+
 [[gnu::noclone]] void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, u32 depth,
             u32 predication) {
   if (depth >= kMaxRunDepth)
@@ -2989,6 +3191,7 @@ void CensusPacket(const u8 *state, const OpCall &call, u32 fields) {
   // Only this thread touches a captured buffer: the game records into a new
   // one (BeginRecording).
   HostCommandBuffer &buffer = *it->second;
+  warm::Scope warm_scope(buffer);  // banjo-nx (2026-11-21, batch 2): the cache-warming helper's target
   // halo3-nx (2026-11-03, banjo_renut_replay_inherits): see BuildInheritRuns.
   static const bool inherits_on = REXCVAR_GET(banjo_renut_replay_inherits);
   if (inherits_on && !buffer.inherit_built)
@@ -3062,6 +3265,8 @@ void CensusPacket(const u8 *state, const OpCall &call, u32 fields) {
                          banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 40;
   size_t sort_cursor = 0;
   for (size_t op_index = 0; op_index < op_count; ++op_index) {
+    if (warm_scope.active)
+      warm::g_index.store(op_index, std::memory_order_relaxed);  // banjo-nx (2026-11-21): the helper's pace
     if (sort_runs && sort_cursor < buffer.sort_runs.size()) {
       while (sort_cursor < buffer.sort_runs.size() && buffer.sort_runs[sort_cursor].begin < op_index)
         ++sort_cursor;  // (a merged draw took a run's first op)
