@@ -111,3 +111,24 @@ reference build); zip 5,332,559,140 bytes, 1,999 entries, end records good; 951 
 Opus, 105 s); 1,029 entries stored as they are, all equal; 0 bad. Then the 52 movies into the same folder as H.265
 (test/movie_browser.html, above). Next: the folder in Ryujinx (the packed reads, the music, the movies' remux), the
 WMV3 path compared with the game's decoder (banjo_wmv_ffmpeg 2) on the disc's movies.
+
+## The movies in Ryujinx (2026-11-22, NRO 97b39427: out/builds/renut-nx_movies_97b39427)
+
+Title screen, no input, 4-5 minutes (out/emu/emu_movie_*.toml; runs in out/emu_runs/emu_movie_*):
+
+- **The disc's WMV3, banjo_wmv_ffmpeg 2** (the game's decoder shown, FFmpeg's compared): the two boot movies (265 and
+  499 frames) decoded by both; all 80 compared frames (40 a movie, I and P) **bit-identical** (0 samples differ in Y, U
+  and V), 0 failed, 0 damaged.
+- **The disc's WMV3, banjo_wmv_ffmpeg 1** (FFmpeg's picture shown, the default): both movies played through (265 / 499
+  frames, 0 failed, 0 damaged), the picture right. FFmpeg 32-49 ms a frame under Ryujinx's JIT (native on the console).
+  A 15 s stall in the first movie was the render thread printing its 10 s report (Ryujinx's slow log writes; the
+  whole game waited), not the movie path: logs-off builds print none.
+- **The installer's folder** (game_root_inst swapped in: the packed files, the music as .opcm, the 52 movies as the
+  browser's H.265): boot, title and the attract movie with 0 failed frames; the .lz4b reads (56 logged) and the .opcm
+  (its open 0.48 s) as before. Ryujinx has no H.265 on NVDEC ("Nvdec Decode: Unsupported codec Hevc" in its own log):
+  the first movie's 265 "NVDEC" frames were empty pictures nxvideo could not tell from real ones; the later movies
+  went to nxvideo's software decoder (FFmpeg 7.1's HEVC: 20-53 ms a frame under the JIT) and played right: the
+  picture clean (the browser's 35 % bitrate), each movie as long as the WMV's (499 frames in 18.5 s against 22-26.5 s
+  for the WMV3 runs), so the remux's pacing holds (culdcept-nx's bug was slow, silent movies). The sound and NVDEC
+  are for the console (held until the user's next render-thread round).
+
