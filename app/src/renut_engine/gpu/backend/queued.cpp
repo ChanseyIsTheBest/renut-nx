@@ -789,6 +789,8 @@ HeldTwin g_twin_held;                    // under g_twin_mutex
 std::atomic<bool> g_twin_holding{false};  // a capture is held (the hook's check without the lock)
 thread_local bool t_twin_queueing = false;  // this thread queues under g_twin_mutex: its hook call has nothing to do
 std::atomic<uint64_t> g_twin_pairs_queued{0};
+// banjo-nx (2026-11-23, the first console run): the holds and how each ended (the 10 s twin line, TwinQueueCensus).
+std::atomic<uint64_t> g_twin_holds{0}, g_twin_flush_hook{0}, g_twin_flush_draw{0}, g_twin_flush_draw_tess{0};
 
 // The one tile the device's draws are predicated to while tiling (vivapinata_tiles_once's test), or -1.
 int TwinTileOf(u32 device_va, u32 &tiles) {
@@ -873,6 +875,7 @@ void FlushHeldTwin() {
   DrawCapture *held = g_twin_held.capture;
   g_twin_held = {};
   g_twin_holding.store(false, std::memory_order_release);
+  g_twin_flush_hook.fetch_add(1, std::memory_order_relaxed);
   t_twin_queueing = true;
   QueueCapture(held);
   t_twin_queueing = false;
@@ -889,8 +892,9 @@ bool TakeTwinCapture(u32 device_va, const DrawCall &call, DrawCapture *capture) 
   if (!on)
     return false;
   u32 tiles = 0;
+  // A/B 320 (banjo_renut_ab_target): the off half holds nothing (a draw held when it starts goes alone).
   const int tile = call.tessellation && !call.up_vertices && !call.up_indices && capture->vertices.empty() &&
-                           capture->indices.empty()
+                           capture->indices.empty() && banjo::renut_gpu::g_ab_off_plain != 320
                        ? TwinTileOf(device_va, tiles)
                        : -1;
   if (tile < 0 && !g_twin_holding.load(std::memory_order_acquire))
@@ -915,9 +919,13 @@ bool TakeTwinCapture(u32 device_va, const DrawCall &call, DrawCapture *capture) 
       t_twin_queueing = false;
       return true;
     }
+    g_twin_flush_draw.fetch_add(1, std::memory_order_relaxed);
+    if (call.tessellation)
+      g_twin_flush_draw_tess.fetch_add(1, std::memory_order_relaxed);
     QueueCapture(held);
   }
   if (tile >= 0 && u32(tile) + 1 < tiles) {
+    g_twin_holds.fetch_add(1, std::memory_order_relaxed);
     g_twin_held = {capture, device_va, tile};
     g_twin_holding.store(true, std::memory_order_release);
     t_twin_queueing = false;
@@ -1169,6 +1177,16 @@ DrawCapture *CaptureDelta(u32 device_va, const DrawCall &call) {
 }
 
 } // namespace
+
+// banjo-nx (2026-11-23, banjo_renut_tile_twin_merge): the game thread's side, for render/draw.cpp's 10 s twin line.
+std::string TwinQueueCensus() {
+  return fmt::format("; held {}: queued with its twin {}, alone before another draw {} ({} tessellated), alone before "
+                     "other work {}",
+                     g_twin_holds.load(std::memory_order_relaxed), g_twin_pairs_queued.load(std::memory_order_relaxed),
+                     g_twin_flush_draw.load(std::memory_order_relaxed),
+                     g_twin_flush_draw_tess.load(std::memory_order_relaxed),
+                     g_twin_flush_hook.load(std::memory_order_relaxed));
+}
 
 void SnapshotDeltasNewFrame() {
   if (!DeltasOn())

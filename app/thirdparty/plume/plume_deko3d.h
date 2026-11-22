@@ -247,6 +247,9 @@ namespace plume {
         // banjo-nx (2026-11-23, banjo_renut_tile_twin_merge): a pixel shader's banjo-dk "twin=R" (tools/deko3d_glsl_opt.py
         // twinsel): R + 1, the float register the lower predicated tile's value replaces below a row; 0: none.
         uint32_t twinRegPlusOne = 0;
+        // banjo-nx (2026-11-23): a pixel shader whose text names gl_FragCoord (it may read the pixel position, VPOS); true
+        // for any other stage.
+        bool readsFragCoord = true;
         // blur-nx (2026-11-12): a vertex or geometry shader whose text names gl_ClipDistance (true for the other stages).
         // One that does not writes no clip distance in any variant, and its pipelines draw with the clip slot off
         // (Deko3DGraphicsPipeline::noUserClip).
@@ -1075,6 +1078,8 @@ namespace plume {
     bool Deko3DShaderWritesVertexKill(const RenderShader *shader);
     // banjo-nx (2026-11-23): a pixel shader's twin register + 1 (Deko3DShaderUsage::twinRegPlusOne); 0 for none or null.
     uint32_t Deko3DShaderTwinRegPlusOne(const RenderShader *shader);
+    // banjo-nx (2026-11-23): whether a pixel shader may read gl_FragCoord (Deko3DShaderUsage::readsFragCoord); true for null.
+    bool Deko3DShaderReadsFragCoord(const RenderShader *shader);
     // banjo-nx (2026-10-21, asyncVariants): this thread does not draw (Renut's pipeline prebuild workers): the variants it
     // asks for are compiled after the draws' ones, and only so many wait at a time (the rest when a draw needs them).
     void Deko3DSetBackgroundThread(bool background);

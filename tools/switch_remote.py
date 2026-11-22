@@ -398,8 +398,9 @@ def main():
         ftp_retry(host, lambda f: f.storbinary('STOR ' + remote, io.BytesIO(b'')))
         print('requested a stall dump:', remote, time.strftime('%H:%M:%S'))
     elif cmd in ('ls', 'get', 'put', 'mv', 'append'):
-        # Refused before any connection is made: the card path is rest[1] for put, rest[0] for the others (both for mv).
-        sd_path(rest[1] if cmd == 'put' else (rest[0] if rest else ''))
+        # Refused before any connection is made: the card path is rest[1] for put and append, rest[0] for the others (both
+        # for mv).
+        sd_path(rest[1] if cmd in ('put', 'append') else (rest[0] if rest else ''))
         if cmd == 'mv':
             sd_path(rest[1])
         if cmd == 'ls':

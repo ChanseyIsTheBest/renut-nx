@@ -13282,13 +13282,27 @@ bool TileTwinMergeOn() {
   static const bool on = REXCVAR_GET(banjo_renut_tile_twin_merge);
   return on;
 }
-constexpr const char *kTwinWhy[10] = {"not a twinsel pixel shader", "another call",
-                                      "the devices differ",         "the vertex shader's bools differ",
-                                      "a specialised bool differs", "the vertex shader's registers differ",
-                                      "another pixel shader register differs", "the register is a literal",
-                                      "the viewports differ",       "the scissors do not join"};
-uint64_t g_twin_merged = 0, g_twin_why[10] = {};
+// banjo-nx (2026-11-23, the first console run's census): a pixel shader without twinsel's register is drawn once too
+// when everything of the two draws it reads is the same (N&B's shore twins, all the same in banjo_renut_diag_tile_twins)
+// and its text never names gl_FragCoord (the pixel position has the tile's corner taken off): no tail, the same pixels.
+constexpr u32 kTwinWhyCount = 12;
+constexpr const char *kTwinWhy[kTwinWhyCount] = {
+    "not a candidate (no twin device, no pixel shader, not tessellated, vertices of its own, exports)",
+    "another call",
+    "the devices differ",
+    "the vertex shader's bools differ",
+    "a specialised bool differs",
+    "the vertex shader's registers differ",
+    "a pixel shader register differs",
+    "the register is a literal",
+    "the viewports differ",
+    "the scissors do not join",
+    "a pixel shader without twinsel that reads the pixel position",
+    "the pixel shader's bools differ (without twinsel)"};
+uint64_t g_twin_merged = 0, g_twin_merged_plain = 0, g_twin_why[kTwinWhyCount] = {};
 u32 g_twin_merge_logged = 0;
+
+std::string TwinQueueCensus();  // backend/queued.cpp: the game thread's holds, pairs and flushes
 
 void TileTwinReport() {
   static auto last = std::chrono::steady_clock::now();
@@ -13297,39 +13311,50 @@ void TileTwinReport() {
     return;
   last = now;
   std::string why;
-  for (u32 i = 0; i < 10; ++i)
+  for (u32 i = 0; i < kTwinWhyCount; ++i)
     if (g_twin_why[i])
       why += fmt::format("{}{} {}", why.empty() ? "" : ", ", g_twin_why[i], kTwinWhy[i]);
-  RGPU_INFO("[renut] tile twins merged (banjo_renut_tile_twin_merge), since the start: {} drawn once for both tiles{}{}",
-            g_twin_merged, why.empty() ? "" : "; drawn apart: ", why);
+  RGPU_INFO("[renut] tile twins merged (banjo_renut_tile_twin_merge), since the start: {} drawn once for both tiles ({} "
+            "of them the same in every value, without twinsel){}{}{}",
+            g_twin_merged, g_twin_merged_plain, why.empty() ? "" : "; drawn apart: ", why, TwinQueueCensus());
 }
 
-// The twin checks (the comment above) and, when it can be one draw, its scissor over both tiles and the tail.
+// The twin checks (the comment above) and, when it can be one draw, its scissor over both tiles (g_tile_twin.merged) and
+// with twinsel the tail: true when a tail was set (cleared after the draw).
 bool TileTwinPrepareLocked(const GuestDevice &device, const DrawCall &call, const ShaderRecord *vs,
                            const ShaderRecord *ps, plume::RenderShader *host_ps, const FloatConstants &vsc,
                            const FloatConstants &psc, const u32 *vs_used, const u32 *ps_used, const Targets &targets,
                            ViewportState &viewport, SharedConstants &sc) {
   TileTwinReport();
-  const auto refuse = [](u32 why, u32 at) {
+  u32 reg_plus_one = 0;
+  const auto refuse = [&](u32 why, u32 at) {
     ++g_twin_why[why];
-    if (g_twin_merge_logged < 12) {
+    if (g_twin_merge_logged < 16) {
       ++g_twin_merge_logged;
-      RGPU_INFO("[renut] tile twin drawn apart: {} (at 0x{:X})", kTwinWhy[why], at);
+      RGPU_INFO("[renut] tile twin drawn apart: {} (at 0x{:X}); vs {:016X} ps {:016X}, twinsel register + 1 = {}",
+                kTwinWhy[why], at, vs ? vs->hash : 0, ps ? ps->hash : 0, reg_plus_one);
     }
     return false;
   };
   const u8 *b = g_tile_twin.device_b;
   if (!b || !ps || !ps->entry || !call.tessellation || call.up_vertices || call.up_indices)
     return refuse(0, 0);
-#if defined(PLUME_DEKO3D)
-  const u32 reg_plus_one = plume::Deko3DShaderTwinRegPlusOne(host_ps);
-#else
-  (void)host_ps;
-  const u32 reg_plus_one = 0;
-#endif
-  if (!reg_plus_one || reg_plus_one > 256)
+  // A draw that exports to memory exports once per draw: two draws' exports, never one.
+  if (vs->export_only || !vs->entry) [[unlikely]]
     return refuse(0, 0);
-  const u32 reg = reg_plus_one - 1;
+  for (u32 w = 0; w < 8; ++w)
+    if (vs->entry->memExportConstants[w] || ps->entry->memExportConstants[w]) [[unlikely]]
+      return refuse(0, 0);
+#if defined(PLUME_DEKO3D)
+  reg_plus_one = plume::Deko3DShaderTwinRegPlusOne(host_ps);
+  const bool reads_position = plume::Deko3DShaderReadsFragCoord(host_ps);
+#else
+  const bool reads_position = true;
+#endif
+  const bool twinsel = reg_plus_one && reg_plus_one <= 256;
+  if (!twinsel && reads_position)
+    return refuse(10, 0);
+  const u32 reg = twinsel ? reg_plus_one - 1 : ~0u;
   const DrawCall &cb = g_tile_twin.call_b;
   if (cb.primitive != call.primitive || cb.indexed != call.indexed || cb.start_vertex != call.start_vertex ||
       cb.count != call.count || cb.base_vertex != call.base_vertex || cb.start_index != call.start_index ||
@@ -13374,7 +13399,11 @@ bool TileTwinPrepareLocked(const GuestDevice &device, const DrawCall &call, cons
     bools_a[i] = __builtin_bswap32(wa);
     bools_b[i] = __builtin_bswap32(wb);
   }
-  if (banjo::renut_gpu::BoolSpecOn()) {
+  if (!twinsel) {  // the pixel shader reads its bools as they are (SharedConstants::booleans[4-7])
+    for (u32 w = 4; w < 8; ++w)
+      if (bools_a[w] != bools_b[w])
+        return refuse(11, kVsBools + 4 * w);
+  } else if (banjo::renut_gpu::BoolSpecOn()) {
     const u32 *vm = BoolSpecMask(vs);
     const u32 *pm = BoolSpecMask(ps);
     for (u32 w = 0; w < 8; ++w)
@@ -13389,7 +13418,7 @@ bool TileTwinPrepareLocked(const GuestDevice &device, const DrawCall &call, cons
     if (r != reg && ((ps_used[r / 32] >> (r % 32)) & 1u) && std::memcmp(psc.Register(r), psb.Register(r), 16) != 0)
       return refuse(6, kFloatBegin + 0x1000 + r * 16);
   }
-  for (u32 i = 0; i < ps->entry->literalCount; ++i)
+  for (u32 i = 0; twinsel && i < ps->entry->literalCount; ++i)
     if (g_shaderLiterals[ps->entry->literalOffset + i].reg == reg)
       return refuse(7, reg);
   // The lower tile's viewport: the same but for the scissor (and the pixel origin), the scissors joined.
@@ -13405,7 +13434,15 @@ bool TileTwinPrepareLocked(const GuestDevice &device, const DrawCall &call, cons
   if (sa.left != sb.left || sa.right != sb.right || sa.bottom != sb.top || sa.top >= sa.bottom ||
       sb.top >= sb.bottom || sb.top <= 0)
     return refuse(9, u32(sb.top));
-  // One draw: both tiles' rows, the lower tile's values in the tail.
+  // One draw: both tiles' rows (without twinsel the two draws read the same values: no tail).
+  viewport.scissor.bottom = sb.bottom;
+  ++g_twin_merged;
+  g_tile_twin.merged = true;
+  if (!twinsel) {
+    ++g_twin_merged_plain;
+    return false;  // no tail to clear after the draw
+  }
+  // The lower tile's values in the tail.
   float tail[10] = {};
   tail[0] = float(sb.top);
   const bool nan_flush = banjo::renut_gpu::ConstNanFlushOn();
@@ -13419,10 +13456,7 @@ bool TileTwinPrepareLocked(const GuestDevice &device, const DrawCall &call, cons
     std::memcpy(&tail[2 + k], &w, 4);
     std::memcpy(&tail[6 + k], &bools_b[4 + k], 4);
   }
-  viewport.scissor.bottom = sb.bottom;
   SetShared(sc, sc.pad_1512, tail);
-  ++g_twin_merged;
-  g_tile_twin.merged = true;
   return true;
 }
 
