@@ -13460,6 +13460,104 @@ bool TileTwinPrepareLocked(const GuestDevice &device, const DrawCall &call, cons
   return true;
 }
 
+// banjo-nx (2026-11-23, the Nutty Acres GPU work, banjo_renut_diag_rtt_static): the draws into small targets (256x256
+// or less: N&B's 128x128 HUD render, PS 58BAC5FD, 44 draws and 0.64 ms a frame) the same as the frame before's? Each
+// such draw's inputs (its shaders, call and counts, pipeline key, fetch constants, bools, the float registers its shaders
+// read) hashed in order per frame; at the next frame the sequence compared with the previous one, part by part. Needs
+// every draw on the full path (banjo_renut_fast_draw = false). Diagnostic: nothing drawn changes.
+REXCVAR_DEFINE_BOOL(banjo_renut_diag_rtt_static, false, "Banjo/Diagnostics",
+                    "Diagnostic (2026-11-23): whether the draws into small targets (256x256 or less) read the same as the "
+                    "frame before's (the 10 s line and the first frames logged); with banjo_renut_fast_draw = false");
+bool RttStaticDiagOn() {
+  static const bool on = REXCVAR_GET(banjo_renut_diag_rtt_static);
+  return on;
+}
+struct RttDrawHash {
+  const void *target = nullptr;
+  uint64_t shaders = 0, key = 0, fetch = 0, vs_regs = 0, ps_regs = 0, call = 0;
+  bool operator==(const RttDrawHash &) const = default;
+};
+std::vector<RttDrawHash> g_rtt_now, g_rtt_prev;
+uint64_t g_rtt_frame = 0, g_rtt_same = 0, g_rtt_differ = 0;
+uint64_t g_rtt_differ_part[6] = {};
+u32 g_rtt_logged = 0;
+uint64_t Fnv64(const void *data, size_t n, uint64_t h = 0xcbf29ce484222325ull) {
+  const u8 *p = static_cast<const u8 *>(data);
+  for (size_t i = 0; i < n; ++i)
+    h = (h ^ p[i]) * 0x100000001b3ull;
+  return h;
+}
+void RttFrameEndLocked() {
+  if (!g_rtt_now.empty() || !g_rtt_prev.empty()) {
+    if (g_rtt_now.size() == g_rtt_prev.size() && g_rtt_now == g_rtt_prev) {
+      ++g_rtt_same;
+    } else {
+      ++g_rtt_differ;
+      size_t i = 0;
+      while (i < g_rtt_now.size() && i < g_rtt_prev.size() && g_rtt_now[i] == g_rtt_prev[i])
+        ++i;
+      int part = 5;  // another count of draws
+      if (i < g_rtt_now.size() && i < g_rtt_prev.size()) {
+        const RttDrawHash &a = g_rtt_prev[i], &b = g_rtt_now[i];
+        part = a.shaders != b.shaders ? 0 : a.key != b.key ? 1 : a.fetch != b.fetch ? 2 : a.vs_regs != b.vs_regs ? 3
+                                                                                           : a.ps_regs != b.ps_regs ? 4
+                                                                                                                    : 5;
+      }
+      ++g_rtt_differ_part[part];
+      if (g_rtt_logged < 8) {
+        ++g_rtt_logged;
+        constexpr const char *kPart[6] = {"shaders", "pipeline key", "fetch constants", "vertex shader registers",
+                                          "pixel shader registers", "the call, its counts or the draws' number"};
+        RGPU_INFO("[renut] small-target draws: frame {}: {} draws (before {}), the first that differs is {}: {}",
+                  g_rtt_frame, g_rtt_now.size(), g_rtt_prev.size(), i, kPart[part]);
+      }
+    }
+  }
+  std::swap(g_rtt_now, g_rtt_prev);
+  g_rtt_now.clear();
+  static auto last = std::chrono::steady_clock::now();
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last >= std::chrono::seconds(10)) {
+    last = now;
+    RGPU_INFO("[renut] small-target draws (banjo_renut_diag_rtt_static), since the start: {} frames the same as the "
+              "frame before, {} not (first difference: shaders {}, key {}, fetch {}, vs registers {}, ps registers {}, "
+              "call or count {})",
+              g_rtt_same, g_rtt_differ, g_rtt_differ_part[0], g_rtt_differ_part[1], g_rtt_differ_part[2],
+              g_rtt_differ_part[3], g_rtt_differ_part[4], g_rtt_differ_part[5]);
+  }
+}
+void NoteRttDrawLocked(const GuestDevice &device, const DrawCall &call, const Geometry &geometry,
+                       const ShaderRecord *vs, const ShaderRecord *ps, const FloatConstants &vsc,
+                       const FloatConstants &psc, const u32 *vs_used, const u32 *ps_used, const PipelineKey &key,
+                       const void *target) {
+  const uint64_t frame = TextureFrameLocked();
+  if (frame != g_rtt_frame) {
+    RttFrameEndLocked();
+    g_rtt_frame = frame;
+  }
+  RttDrawHash h;
+  h.target = target;
+  const uint64_t sh[2] = {vs ? vs->hash : 0, ps ? ps->hash : 0};
+  h.shaders = Fnv64(sh, sizeof(sh));
+  h.key = Fnv64(&key, sizeof(key));
+  h.fetch = Fnv64(device.Bytes(u32(offsetof(d3d::Device, m_Constants))), 0x300);
+  h.fetch = Fnv64(device.Bytes(u32(offsetof(d3d::Device, m_Constants) + offsetof(d3d::Constants, VertexShaderB))), 32,
+                  h.fetch);
+  uint64_t vr = 0xcbf29ce484222325ull, pr = 0xcbf29ce484222325ull;
+  for (u32 r = 0; r < 256; ++r) {
+    if ((vs_used[r / 32] >> (r % 32)) & 1u)
+      vr = Fnv64(vsc.Register(r), 16, vr);
+    if ((ps_used[r / 32] >> (r % 32)) & 1u)
+      pr = Fnv64(psc.Register(r), 16, pr);
+  }
+  h.vs_regs = vr;
+  h.ps_regs = pr;
+  const u32 c[8] = {call.primitive, u32(call.indexed), call.start_vertex, call.count, u32(call.base_vertex),
+                    call.start_index, geometry.index_count, geometry.vertex_count};
+  h.call = Fnv64(c, sizeof(c));
+  g_rtt_now.push_back(h);
+}
+
 bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayConstants *replay) {
   ::renut::gpu::census::Scope census_scope(::renut::gpu::census::kDrawState);  // blur-nx (2026-11-17)
   if (TileTwinsDiagOn()) [[unlikely]]  // banjo-nx (2026-11-23): before the fast path, every draw
@@ -14792,6 +14890,10 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     DrawLog(call, geometry, vs, ps, targets, key, sc, export_count);
   // banjo-nx (2026-11-23, the Nutty Acres GPU work, banjo_renut_diag_tile_twins): N&B draws its sea once per predicated
   // tile (sub_82386BF8), the same tessellated draw twice in a row; what the twins' shaders read that differs.
+  if (RttStaticDiagOn() && targets.color_count && targets.colors[0] && targets.colors[0]->width <= 256 &&
+      targets.colors[0]->height <= 256) [[unlikely]]  // banjo-nx (2026-11-23): banjo_renut_diag_rtt_static
+    NoteRttDrawLocked(GuestDevice(device_state), call, geometry, vs, ps, vs_constants, ps_constants, vs_used, ps_used,
+                      key, targets.colors[0]);
   if (TileTwinsDiagOn() && call.tessellation) [[unlikely]]
     NoteTileTwin(GuestDevice(device_state), call, geometry, *vs, ps, vs_constants, ps_constants, vs_used, ps_used, key);
   // banjo-nx (2026-10-19, banjo_renut_resolve_skip): the targets this draw can write.
