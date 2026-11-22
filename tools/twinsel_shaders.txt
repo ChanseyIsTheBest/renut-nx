@@ -2,3 +2,4 @@
 # constants differ in the listed registers alone (banjo_renut_diag_tile_twins), which render/draw.cpp draws once over
 # both tiles (banjo_renut_tile_twin_merge); tools/deko3d_glsl_opt.py pass twinsel. HASH REGISTER (one)
 9ED9E1A8E6A44361 222  # Nutty Acres' sea (sub_82386BF8, VS F09B139EE9188255 / 8EDDB32357201CD0): c222, the tile's screen remap
+3277104CE11D8635 222  # the same sea's other pixel shader (VS F09B139EE9188255; 0.7 ms in 4 draws a frame in some views)
