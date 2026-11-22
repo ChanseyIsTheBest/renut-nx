@@ -4700,6 +4700,9 @@ void QueueRunCommandBuffer(u32 device_va, u32 command_buffer_va) {
       NoteCommandBufferRun(reinterpret_cast<const void *>(uintptr_t(recording->id)), draws, swap);
     }
   }
+  // banjo-nx (2026-11-23): a draw held for its tile twin (backend/queued.cpp, banjo_renut_tile_twin_merge) goes first,
+  // before TilesOnce may hold this run: at most one thing held at a time.
+  render_thread::RunBeforePushHook(2);
   // vivapinata-nx (2026-11-11, vivapinata_tiles_once): a tile's run may wait for its twin (TilesOnce).
   if (TilesOnce(device_va, device, command_buffer_va, run))
     return;

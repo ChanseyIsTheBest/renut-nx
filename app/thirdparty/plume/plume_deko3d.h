@@ -244,6 +244,9 @@ namespace plume {
         uint32_t txqMask = 0;
         // vivapinata-nx (2026-11-03): a vertex shader that has the kill's constant 914 (tools/deko3d_glsl_opt.py vskill).
         bool writesVertexKill = false;
+        // banjo-nx (2026-11-23, banjo_renut_tile_twin_merge): a pixel shader's banjo-dk "twin=R" (tools/deko3d_glsl_opt.py
+        // twinsel): R + 1, the float register the lower predicated tile's value replaces below a row; 0: none.
+        uint32_t twinRegPlusOne = 0;
         // blur-nx (2026-11-12): a vertex or geometry shader whose text names gl_ClipDistance (true for the other stages).
         // One that does not writes no clip distance in any variant, and its pipelines draw with the clip slot off
         // (Deko3DGraphicsPipeline::noUserClip).
@@ -1070,6 +1073,8 @@ namespace plume {
     bool Deko3DShaderReadsVertexId(const RenderShader *shader);
     // vivapinata-nx (2026-11-03): whether a vertex shader has the kill's constant 914 (Deko3DShaderUsage::writesVertexKill).
     bool Deko3DShaderWritesVertexKill(const RenderShader *shader);
+    // banjo-nx (2026-11-23): a pixel shader's twin register + 1 (Deko3DShaderUsage::twinRegPlusOne); 0 for none or null.
+    uint32_t Deko3DShaderTwinRegPlusOne(const RenderShader *shader);
     // banjo-nx (2026-10-21, asyncVariants): this thread does not draw (Renut's pipeline prebuild workers): the variants it
     // asks for are compiled after the draws' ones, and only so many wait at a time (the rest when a draw needs them).
     void Deko3DSetBackgroundThread(bool background);

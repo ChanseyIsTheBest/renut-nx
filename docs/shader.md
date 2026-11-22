@@ -188,3 +188,34 @@ to the display's resolution for the menus' 3D icons drawn after the composite: n
 36z2: scalecodes reads the heights instead of constants: codes 4 and 6 are `float(v[84].w & 65535) / 720` and
 `float(v[84].w >> 16) / 720` (SharedConstants pad_1352[1]: handheld | docked << 16), so any internal height needs no
 new package. Package out/deko3d_shaders/glsl_opt_any, DKSH cache 58 (the 168 chain shaders' variants; the rest merged).
+
+## The sea once for both tiles (2026-11-23, pass twinsel, banjo_renut_tile_twin_merge)
+
+N&B draws Nutty Acres' sea (sub_82386BF8; PS `9ED9E1A8E6A44361`, VS `F09B139EE9188255` / `8EDDB32357201CD0`) once per
+predicated tile. Each tessellated draw comes twice in a row, cut to the tile's rows, so the tessellation and vertex work
+ran twice: the sea was 2.7 ms of the 20.8 ms frame at the overclock. `banjo_renut_diag_tile_twins` (two console runs)
+found how the two draws differ:
+- the predication;
+- the pixel shader's `c222` (which tile's screen remap of the refraction): (1,0,0,0) above, (0,1,0,0) below;
+- its bools (`PixelShaderB[0]`).
+Everything else is the same: the vertex shader's registers, the fetch constants and the pipeline key. Every sea draw
+comes through the snapshot chain (the queued draws).
+
+- Pass `twinsel` (`tools/deko3d_glsl_opt.py`, the shaders and register in `tools/twinsel_shaders.txt`) works on the
+  listed pixel shaders. Every read of the register and of the pixel shader's bools (`v[33]`) goes through a choice by
+  row: below the first host row in `SharedConstants::pad_1512[0]` (`v[94].z`), the values in `v[95]` (the register)
+  and `v[96]` (the bools); otherwise the shader's own.
+  - Every other draw leaves `v[94].z` at 0, so the shader reads its own values.
+  - The pass adds `twin=R` to the shader's banjo-dk line; plume reads it (`Deko3DShaderTwinRegPlusOne`).
+  - It leaves alone shaders that read `gl_FragCoord` already (they could read the tile's pixel origin) or index the
+    float constants.
+  - Cost: +320 bytes of the sea shader's 21.7 KB of code (uam).
+- Exact: a pixel's centre is at its row + 0.5, so `gl_FragCoord.y >= row` holds for exactly the pixels the lower
+  tile's own scissor kept. `render/draw.cpp` merges only when:
+  - the two devices are the same but for the predication words, the float constants and the pixel shader's bools;
+  - the bools the pipeline specialises are the same;
+  - the vertex shader's registers are the same, and the pixel shader's are the same but for the listed one (as its own
+    draw would have uploaded it: swapped, the NaN flush; not a literal);
+  - the viewports are the same but for the scissor, and the scissors join.
+- The card needs the NRO (its embedded GLSL package: only this shader's text changed) and the shader's 80 DKSH variants
+  (new text, new keys), appended to `deko3d_shaders.bin`.

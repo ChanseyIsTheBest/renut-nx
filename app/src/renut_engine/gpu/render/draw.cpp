@@ -13250,6 +13250,182 @@ void NoteAnyTwin(const u8 *device_state, const DrawCall &call, const ReplayConst
   }
 }
 
+// ---------------------------------------------------------------------------
+// banjo-nx (2026-11-23, the Nutty Acres GPU work): banjo_renut_tile_twin_merge
+// ---------------------------------------------------------------------------
+// N&B draws Nutty Acres' sea (sub_82386BF8) once per predicated tile: each tessellated draw twice in a row, the second
+// for the lower tile, the same in everything (banjo_renut_diag_tile_twins: the vertex shader's registers, the fetch
+// constants, the pipeline key) but the predication, the pixel shader's c222 (which tile's screen remap) and its bools
+// (PixelShaderB[0]). Each draw is cut to its tile's rows, so the tessellation and the vertex work ran twice (the sea:
+// 2.7 ms of the 20.8 ms frame at the overclock, 2026-11-22). backend/queued.cpp holds such an upper-tile draw back until
+// the next draw comes and hands both to the render thread together; here the first is drawn once over both tiles' rows
+// when it can be: its pixel shader is one tools/deko3d_glsl_opt.py's twinsel pass made (the banjo-dk "twin=R"), which
+// takes that register and the pixel shader's bools from the shared block's tail (SharedConstants::pad_1512: [0] the
+// lower tile's first host row, [2-5] its register R, [6-9] its bools) for the pixels at or below that row; and the two
+// devices are the same but for the predication words (TilePredication, RunPredication, the device's predication), the
+// device header (the command writer's bookkeeping), the float constants and the pixel shader's bools, where the vertex
+// shader's registers it reads are the same, the pixel shader's the same but for R (the twin's value as its own draw
+// would have uploaded it: its bytes swapped, the NaN flush; not a literal of the shader), and each bool the pipeline
+// specialises the same (the others are what the shader takes by row); the two viewports are the same but for the
+// scissor and the pixel origin (which the pixel shader cannot read: twinsel leaves shaders with gl_FragCoord alone), the
+// scissors one above the other with the same columns. The pixels are then the same: the same vertices and primitives in
+// the same order, each pixel shaded with its own tile's constants, the tiles' pixels apart. Otherwise both are drawn
+// as before.
+REXCVAR_DEFINE_BOOL(banjo_renut_tile_twin_merge, true, "Banjo/Enhancements",
+                    "N&B's sea (2026-11-23, the Nutty Acres GPU work): a tessellated draw repeated for the next "
+                    "predicated tile, the same but for one pixel shader register and its bools, drawn once over both "
+                    "tiles (the pixel shader takes the lower tile's values below its first row: tools/deko3d_glsl_opt.py "
+                    "twinsel). The same pixels; the vertex and tessellation work once")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+TileTwin g_tile_twin;
+bool TileTwinMergeOn() {
+  static const bool on = REXCVAR_GET(banjo_renut_tile_twin_merge);
+  return on;
+}
+constexpr const char *kTwinWhy[10] = {"not a twinsel pixel shader", "another call",
+                                      "the devices differ",         "the vertex shader's bools differ",
+                                      "a specialised bool differs", "the vertex shader's registers differ",
+                                      "another pixel shader register differs", "the register is a literal",
+                                      "the viewports differ",       "the scissors do not join"};
+uint64_t g_twin_merged = 0, g_twin_why[10] = {};
+u32 g_twin_merge_logged = 0;
+
+void TileTwinReport() {
+  static auto last = std::chrono::steady_clock::now();
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last < std::chrono::seconds(10))
+    return;
+  last = now;
+  std::string why;
+  for (u32 i = 0; i < 10; ++i)
+    if (g_twin_why[i])
+      why += fmt::format("{}{} {}", why.empty() ? "" : ", ", g_twin_why[i], kTwinWhy[i]);
+  RGPU_INFO("[renut] tile twins merged (banjo_renut_tile_twin_merge), since the start: {} drawn once for both tiles{}{}",
+            g_twin_merged, why.empty() ? "" : "; drawn apart: ", why);
+}
+
+// The twin checks (the comment above) and, when it can be one draw, its scissor over both tiles and the tail.
+bool TileTwinPrepareLocked(const GuestDevice &device, const DrawCall &call, const ShaderRecord *vs,
+                           const ShaderRecord *ps, plume::RenderShader *host_ps, const FloatConstants &vsc,
+                           const FloatConstants &psc, const u32 *vs_used, const u32 *ps_used, const Targets &targets,
+                           ViewportState &viewport, SharedConstants &sc) {
+  TileTwinReport();
+  const auto refuse = [](u32 why, u32 at) {
+    ++g_twin_why[why];
+    if (g_twin_merge_logged < 12) {
+      ++g_twin_merge_logged;
+      RGPU_INFO("[renut] tile twin drawn apart: {} (at 0x{:X})", kTwinWhy[why], at);
+    }
+    return false;
+  };
+  const u8 *b = g_tile_twin.device_b;
+  if (!b || !ps || !ps->entry || !call.tessellation || call.up_vertices || call.up_indices)
+    return refuse(0, 0);
+#if defined(PLUME_DEKO3D)
+  const u32 reg_plus_one = plume::Deko3DShaderTwinRegPlusOne(host_ps);
+#else
+  (void)host_ps;
+  const u32 reg_plus_one = 0;
+#endif
+  if (!reg_plus_one || reg_plus_one > 256)
+    return refuse(0, 0);
+  const u32 reg = reg_plus_one - 1;
+  const DrawCall &cb = g_tile_twin.call_b;
+  if (cb.primitive != call.primitive || cb.indexed != call.indexed || cb.start_vertex != call.start_vertex ||
+      cb.count != call.count || cb.base_vertex != call.base_vertex || cb.start_index != call.start_index ||
+      !cb.tessellation || cb.up_vertices || cb.up_indices)
+    return refuse(1, 0);
+  const u8 *a = device.Bytes(0);
+  constexpr u32 kConstants = u32(offsetof(d3d::Device, m_Constants));
+  constexpr u32 kFloatBegin = kConstants + u32(offsetof(d3d::Constants, VertexShaderF));
+  constexpr u32 kVsBools = kConstants + u32(offsetof(d3d::Constants, VertexShaderB));
+  constexpr u32 kPsBools = kConstants + u32(offsetof(d3d::Constants, PixelShaderB));
+  constexpr u32 kPsBoolsEnd = kPsBools + 16;
+  static_assert(kVsBools + 16 == kPsBools && kFloatBegin < kVsBools);
+  static_assert(kPsBoolsEnd <= native::off::TilePredication && native::off::TilePredication < native::off::RunPredication &&
+                native::off::RunPredication < d3d::kDeviceOffsetPredication &&
+                d3d::kDeviceOffsetPredication + 4 == d3d::kDeviceSnapshotSize);
+  const auto first_differ = [a, b](u32 begin, u32 end) -> u32 {
+    if (begin >= end || std::memcmp(a + begin, b + begin, end - begin) == 0)
+      return ~0u;
+    for (u32 i = begin; i < end; ++i)
+      if (a[i] != b[i])
+        return i;
+    return ~0u;
+  };
+  // The header's end (0x38, SameButPredication's) to the float constants, the vertex shader's bools (16 bytes: the
+  // same), from the pixel shader's bools' end to the predication words, between them, and nothing after the last.
+  constexpr u32 kHeaderEnd = 0x38;
+  const u32 runs[5][2] = {{kHeaderEnd, kFloatBegin},
+                          {kVsBools, kPsBools},
+                          {kPsBoolsEnd, native::off::TilePredication},
+                          {native::off::TilePredication + 4, native::off::RunPredication},
+                          {native::off::RunPredication + 4, d3d::kDeviceOffsetPredication}};
+  for (const auto &run : runs) {
+    if (const u32 at = first_differ(run[0], run[1]); at != ~0u)
+      return refuse(run[0] == kVsBools ? 3 : 2, at);
+  }
+  // The bools as the shaders read them (SharedConstants::booleans): the pipeline's specialised ones the same.
+  u32 bools_a[8], bools_b[8];
+  for (u32 i = 0; i < 8; ++i) {
+    u32 wa, wb;
+    std::memcpy(&wa, a + kVsBools + 4 * i, 4);
+    std::memcpy(&wb, b + kVsBools + 4 * i, 4);
+    bools_a[i] = __builtin_bswap32(wa);
+    bools_b[i] = __builtin_bswap32(wb);
+  }
+  if (banjo::renut_gpu::BoolSpecOn()) {
+    const u32 *vm = BoolSpecMask(vs);
+    const u32 *pm = BoolSpecMask(ps);
+    for (u32 w = 0; w < 8; ++w)
+      if ((bools_a[w] ^ bools_b[w]) & (vm[w] | pm[w]))
+        return refuse(4, kVsBools + 4 * w);
+  }
+  // The float constants the shaders read (every one in the device: the queued draws' chain).
+  const FloatConstants vsb = DrawFloatConstants(b, nullptr, false), psb = DrawFloatConstants(b, nullptr, true);
+  for (u32 r = 0; r < 256; ++r) {
+    if (((vs_used[r / 32] >> (r % 32)) & 1u) && std::memcmp(vsc.Register(r), vsb.Register(r), 16) != 0)
+      return refuse(5, kFloatBegin + r * 16);
+    if (r != reg && ((ps_used[r / 32] >> (r % 32)) & 1u) && std::memcmp(psc.Register(r), psb.Register(r), 16) != 0)
+      return refuse(6, kFloatBegin + 0x1000 + r * 16);
+  }
+  for (u32 i = 0; i < ps->entry->literalCount; ++i)
+    if (g_shaderLiterals[ps->entry->literalOffset + i].reg == reg)
+      return refuse(7, reg);
+  // The lower tile's viewport: the same but for the scissor (and the pixel origin), the scissors joined.
+  const ViewportState vb = ComputeViewport(GuestDevice(b), targets);
+  if (std::memcmp(&viewport.viewport, &vb.viewport, sizeof(vb.viewport)) != 0 ||
+      std::memcmp(viewport.guest_size, vb.guest_size, sizeof(vb.guest_size)) != 0 ||
+      viewport.screen_space != vb.screen_space ||
+      std::memcmp(viewport.screen_scale, vb.screen_scale, sizeof(vb.screen_scale)) != 0 ||
+      std::memcmp(viewport.screen_offset, vb.screen_offset, sizeof(vb.screen_offset)) != 0 ||
+      std::memcmp(viewport.depth_remap, vb.depth_remap, sizeof(vb.depth_remap)) != 0)
+    return refuse(8, 0);
+  const plume::RenderRect &sa = viewport.scissor, &sb = vb.scissor;
+  if (sa.left != sb.left || sa.right != sb.right || sa.bottom != sb.top || sa.top >= sa.bottom ||
+      sb.top >= sb.bottom || sb.top <= 0)
+    return refuse(9, u32(sb.top));
+  // One draw: both tiles' rows, the lower tile's values in the tail.
+  float tail[10] = {};
+  tail[0] = float(sb.top);
+  const bool nan_flush = banjo::renut_gpu::ConstNanFlushOn();
+  const u8 *alt = psb.Register(reg);
+  for (u32 k = 0; k < 4; ++k) {
+    u32 w;
+    std::memcpy(&w, alt + 4 * k, 4);
+    w = __builtin_bswap32(w);
+    if (nan_flush && (w & 0x7F800000u) == 0x7F800000u)  // as CopyAndSwapGroup (banjo_renut_const_nan_flush)
+      w = 0;
+    std::memcpy(&tail[2 + k], &w, 4);
+    std::memcpy(&tail[6 + k], &bools_b[4 + k], 4);
+  }
+  viewport.scissor.bottom = sb.bottom;
+  SetShared(sc, sc.pad_1512, tail);
+  ++g_twin_merged;
+  g_tile_twin.merged = true;
+  return true;
+}
+
 bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayConstants *replay) {
   ::renut::gpu::census::Scope census_scope(::renut::gpu::census::kDrawState);  // blur-nx (2026-11-17)
   if (TileTwinsDiagOn()) [[unlikely]]  // banjo-nx (2026-11-23): before the fast path, every draw
@@ -14060,6 +14236,22 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   static constexpr u32 kNoRegisters[8] = {};
   const u32 *vs_used = vs->entry ? vs->entry->floatConstants : kAllRegisters;
   const u32 *ps_used = !ps ? kNoRegisters : ps->entry ? ps->entry->floatConstants : kAllRegisters;
+  // banjo-nx (2026-11-23, banjo_renut_tile_twin_merge): this draw for its lower tile's twin too, when it can be (the
+  // scissor over both tiles and the tail set before the shared block is pushed below); the tail back to zeros after the
+  // draw (every other draw's: the twinsel shaders' pixels then take their own registers and bools).
+  struct TwinTailReset {
+    SharedConstants *sc = nullptr;
+    ~TwinTailReset() {
+      static constexpr float kZero10[10] = {};
+      if (sc)
+        SetShared(*sc, sc->pad_1512, kZero10);
+    }
+  } twin_tail_reset;
+  if (g_tile_twin.active) [[unlikely]] {
+    if (TileTwinPrepareLocked(device, call, vs, ps, host_ps, vs_constants, ps_constants, vs_used, ps_used, targets,
+                              viewport, sc))
+      twin_tail_reset.sc = &sc;
+  }
   // banjo-nx (2026-10-19, banjo_deko3d_push_constants): pushed, except for draws point_sprite_gs expands (it reads
   // SharedConstants through its address).
   // bangaio-nx (2026-10-29, banjo_renut_point_fast_draw / A/B 69): those too: on deko3d point_sprite_gs reads

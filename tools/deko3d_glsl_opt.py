@@ -3166,6 +3166,86 @@ def pass_clamp7e3(text):
     return insert_globals(insert_before_main(text, CLAMP7E3_FN), CLAMP7E3_DECL)
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: twinsel — a tile's constants by the pixel's row, for one draw over both predicated tiles (2026-11-23)
+
+_TWIN_LIST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'twinsel_shaders.txt')
+
+
+def _twin_list():
+    out = {}
+    try:
+        for ln in open(_TWIN_LIST_PATH, encoding='utf-8'):
+            parts = ln.split('#')[0].split()
+            if len(parts) >= 2:
+                out[parts[0].upper()] = [int(p) for p in parts[1:2]]
+    except OSError:
+        pass
+    return out
+
+
+_TWIN = _twin_list()
+
+
+def pass_twinsel(text, name=None):
+    """N&B draws its sea (sub_82386BF8) once per predicated tile: the same tessellated draw twice in a row, each cut to
+    its tile's rows, the pixel shader's constants differing in one register (c222: which tile's screen remap), so the
+    vertex and tessellation work runs twice (banjo_renut_diag_tile_twins, 2026-11-23). render/draw.cpp
+    (banjo_renut_tile_twin_merge) draws such a pair once over both tiles' rows; the listed pixel shaders
+    (tools/twinsel_shaders.txt: the hash and the register that differs) then read the listed register from the
+    shared block's tail for the pixels of the lower tile: v[94].z (SharedConstants::pad_1512[0]) holds the first host row
+    of the lower tile's scissor, v[95] that tile's value of the register (the bits its own draw would have uploaded) and
+    v[96] its pixel shader bools (v[33], SharedConstants::booleans[4-7]: the sea's twins differ in PixelShaderB[0] too,
+    banjo_renut_diag_tile_twins' second run), every read of v[33] taken through the same choice. A pixel's centre is at its row + 0.5 (gl_FragCoord, the upper-left origin the shaders' VPOS
+    uses), so the row is the lower tile's exactly when gl_FragCoord.y >= that first row: the pixels its own scissor kept.
+    Every other draw leaves v[94].z at 0: the register as before. A shader with a relative read of the float constants
+    (one that could reach a listed register) is left as it was."""
+    regs = _TWIN.get(name.upper()) if name else None
+    if not regs or 'dk_twin_lower' in text:
+        return text
+    # gl_FragCoord read already: the shader may read the pixel position (VPOS, which has the tile's corner,
+    # SharedConstants::pixel_origin, taken off: one tile's alone), so it is not one for both tiles.
+    if re.search(r'g_UboPixel\.v\[(?!\d+u\])', text) or 'gl_FragCoord' in text:
+        return text
+    header = re.search(r'^// banjo-dk ([^\n]*)$', text, re.M)
+    if not header or ' twin=' in header.group(0):
+        return text
+    span = main_span(text)
+    if not span:
+        return text
+    start, end = span
+    for r in regs:
+        token = f'g_UboPixel.v[{r}u]'
+        if token in text[:start] or token in text[end:]:
+            return text
+    body = text[start:end]
+    decl = ('\n    float dk_twin_split = uintBitsToFloat(g_UboShared.v[94u].z);\n'
+            '    bool dk_twin_lower = (dk_twin_split != 0.0) && (gl_FragCoord.y >= dk_twin_split);')
+    for k, r in enumerate(regs):
+        token = f'g_UboPixel.v[{r}u]'
+        if token not in body:
+            continue
+        body = body.replace(token, f'dk_twin_c{k}')
+        decl += f'\n    vec4 dk_twin_c{k} = dk_twin_lower ? uintBitsToFloat(g_UboShared.v[{95 + k}u]) : {token};'
+    if 'dk_twin_c' not in body:
+        return text
+    if 'g_UboShared.v[33u]' in body:
+        body = body.replace('g_UboShared.v[33u]', 'dk_twin_b')
+        decl += '\n    uvec4 dk_twin_b = dk_twin_lower ? g_UboShared.v[96u] : g_UboShared.v[33u];'
+    used = [r for k, r in enumerate(regs) if f'dk_twin_c{k}' in body]
+    # main_span's start is right after the body's opening brace: the declarations first.
+    text = text[:start] + decl + body + text[end:]
+    # The banjo-dk line says which registers the lower tile's values replace (plume_deko3d parseUsage: twin=R[,R]),
+    # the shared block (UBO binding 2) in its UBO mask: a draw is merged only for a pixel shader that says so.
+    line = header.group(0)
+    ubo = re.search(r'ubo=(0x[0-9a-fA-F]+)', line)
+    new_line = line
+    if ubo:
+        new_line = new_line.replace(ubo.group(0), 'ubo=0x%x' % (int(ubo.group(1), 16) | 0x4), 1)
+    new_line += ' twin=' + ','.join(str(r) for r in used)
+    return text.replace(line, new_line, 1)
+
+
 PASSES = [
     ('scalecodes', pass_scalecodes),
     ('scale1', pass_scale1),
@@ -3214,6 +3294,7 @@ PASSES = [
     ('vskill', pass_vskill),  # vivapinata-nx (2026-11-03): last
     ('expwin', pass_expwin),  # sasrt-nx (2026-11-08): the fourth GPU round, constant 944
     ('expparts', pass_expparts),  # sasrt-nx (2026-11-09): an EXPERIMENT, constant 945 (0: as before)
+    ('twinsel', pass_twinsel),  # banjo-nx (2026-11-23): the listed pixel shaders (tools/twinsel_shaders.txt), no constant
     ('clamp7e3', pass_clamp7e3),  # dishonored-nx (2026-10-31; port 106): constant 990, the last pixel pass
     ('invariant', pass_invariant),  # dishonored-nx (2026-10-30; port 100): vertex shaders, no constant
 ]
@@ -3228,6 +3309,7 @@ STAGE_OF = {'earlykill': 'frag', 'noearly': 'frag', 'facesign': 'frag', 'clipspe
             'vsepi': 'vert', 'expwin': 'vert', 'expparts': 'vert', 'stack3d': 'frag', 'fetchendian': 'vert', 'expfmt': 'vert', 'skinonce': 'vert', 'bonesel': 'vert', 'aw4': 'vert', 'lightbranch': 'frag', 'nullps': 'frag', 'gpr32': 'frag', 'earlyz': 'frag', 'txq': 'frag', 'alpha': 'frag', 'alphamask': 'frag', 'earlyhoist': 'frag', 'tess': 'vert', 'vsout': 'vert', 'vszero': 'vert', 'pszero': 'frag'}
 STAGE_OF['invariant'] = 'vert'  # dishonored-nx (port 100)
 STAGE_OF['clamp7e3'] = 'frag'  # dishonored-nx (port 106)
+STAGE_OF['twinsel'] = 'frag'  # banjo-nx (2026-11-23)
 
 
 def optimise(text, passes=DEFAULT, stage=None, name=None):
@@ -3239,7 +3321,7 @@ def optimise(text, passes=DEFAULT, stage=None, name=None):
     for pname, fn in PASSES:
         if pname in names and STAGE_OF.get(pname, stage) == stage:
             text = fn(text, name) if fn in (pass_gpr32, pass_lightbranch, pass_nullps, pass_skinonce, pass_nofxaa,
-                                            pass_noearly) else fn(text)
+                                            pass_noearly, pass_twinsel) else fn(text)
     return text
 
 

@@ -517,9 +517,15 @@ void WakeForWaitLocked() {
 
 // vivapinata-nx (2026-11-11, vivapinata_tiles_once): SetBeforePushHook's function.
 std::atomic<void (*)()> g_before_push{nullptr};
+// banjo-nx (2026-11-23, banjo_renut_tile_twin_merge): a second one (queued.cpp's held tile twin), called first.
+std::atomic<void (*)()> g_before_push2{nullptr};
 
 [[gnu::always_inline]] inline void BeforePush() {
-  if (void (*hook)() = g_before_push.load(std::memory_order_relaxed); hook && !t_render_thread) [[unlikely]]
+  if (t_render_thread)
+    return;
+  if (void (*hook)() = g_before_push2.load(std::memory_order_relaxed)) [[unlikely]]
+    hook();
+  if (void (*hook)() = g_before_push.load(std::memory_order_relaxed)) [[unlikely]]
     hook();
 }
 
@@ -632,6 +638,15 @@ void Push(std::function<void()> work, bool locked, const void *prefetch0 = nullp
 
 void SetBeforePushHook(void (*hook)()) {
   g_before_push.store(hook, std::memory_order_relaxed);
+}
+
+void SetBeforePushHook2(void (*hook)()) {
+  g_before_push2.store(hook, std::memory_order_relaxed);
+}
+
+void RunBeforePushHook(int which) {
+  if (void (*hook)() = (which == 2 ? g_before_push2 : g_before_push).load(std::memory_order_relaxed))
+    hook();
 }
 
 void Queue(std::function<void()> work) {

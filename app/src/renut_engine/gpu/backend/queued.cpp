@@ -5,6 +5,7 @@
 #include "renut_engine/gpu/host_batch.h"  // blur-nx (2026-11-18, the Renut host batch)
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cstddef>
@@ -26,6 +27,7 @@
 #include "renut_engine/gpu/shaders/shader_cache.h"  // blur-nx (2026-11-13, #13): ShaderCacheEntry::floatConstants
 #include "renut_engine/gpu/guest/command_buffers.h"
 #include "renut_engine/gpu/d3d/d3d.h"
+#include "renut_engine/gpu/d3d/d3d_native.h"  // banjo-nx (2026-11-23): TileCount, Flags (banjo_renut_tile_twin_merge)
 #include "renut_engine/gpu/guest/guest_memory.h"
 #include "renut_engine/gpu/log.h"
 #include "renut_engine/gpu/render/surfaces.h"  // blur-nx (2026-11-10, port 76; its key 215): StackHeaderSet
@@ -768,6 +770,163 @@ void QueueCapture(DrawCapture *capture) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// banjo-nx (2026-11-23, the Nutty Acres GPU work): banjo_renut_tile_twin_merge (render/draw.cpp says what is drawn)
+// ---------------------------------------------------------------------------
+// On the game thread: a tessellated draw predicated to one tile that is not the last (N&B's sea, sub_82386BF8: the
+// upper tile's draw) is held back instead of queued. The next draw, when it is the same call for another single tile
+// of the same device, goes with it as one item; anything else first queues the held one alone: another draw (here,
+// under the chain's lock, before it is queued), any other queue or wait (render_thread's before-push hook), so the
+// render thread gets the draws and everything else in the order the game made them. The pair's item rebuilds both
+// devices from the chain, draws the first for both tiles when DrawStateLocked can, and else draws the two as before.
+struct HeldTwin {
+  DrawCapture *capture = nullptr;
+  u32 device_va = 0;
+  int tile = -1;
+};
+std::mutex g_twin_mutex;
+HeldTwin g_twin_held;                    // under g_twin_mutex
+std::atomic<bool> g_twin_holding{false};  // a capture is held (the hook's check without the lock)
+thread_local bool t_twin_queueing = false;  // this thread queues under g_twin_mutex: its hook call has nothing to do
+std::atomic<uint64_t> g_twin_pairs_queued{0};
+
+// The one tile the device's draws are predicated to while tiling (vivapinata_tiles_once's test), or -1.
+int TwinTileOf(u32 device_va, u32 &tiles) {
+  const u8 *device = GuestPtr<const u8>(device_va);
+  if (!device)
+    return -1;
+  tiles = *reinterpret_cast<const be_u32 *>(device + native::off::TileCount);
+  if (!(device[native::off::Flags] & 0x20) || tiles < 2 || tiles > 16)
+    return -1;
+  const u32 mask = *reinterpret_cast<const be_u32 *>(device + d3d::kDeviceOffsetPredication);
+  if (!mask)
+    return -1;
+  int tile = -1;
+  for (u32 i = 0; i < tiles; ++i) {
+    if (!(mask & (3u << (2 * i))))
+      continue;
+    if (tile >= 0)
+      return -1;
+    tile = int(i);
+  }
+  return tile;
+}
+
+// The render thread's item for a held draw and its twin.
+void QueueTwinPair(DrawCapture *a, DrawCapture *b) {
+  g_twin_pairs_queued.fetch_add(1, std::memory_order_relaxed);
+  render_thread::QueuePrefetched(a, a->narrowed ? a->narrow.get() : a->state.data(), [a, b] {
+    // The first's device kept: the chain's device moves on to the second's.
+    static std::array<u8, d3d::kDeviceSnapshotSize> image;  // render thread
+    const u8 *device_a = DeviceForDraw(*a);
+    if (a->narrowed)
+      NarrowCheckLocked(*a, device_a);
+    std::memcpy(image.data(), device_a, image.size());
+    const u8 *device_b = DeviceForDraw(*b);
+    if (b->narrowed)
+      NarrowCheckLocked(*b, device_b);
+    banjo::renut_gpu::CountDrawSource(0);
+    banjo::renut_gpu::CountDrawSource(0);
+    const auto draw = [](DrawCapture *c, const u8 *device) {
+      // No chain hint: the second's delta is in the chain's device already, so the first is not the next of the chain's
+      // draws, and the second's draw follows a draw of another device image (the reuses then make everything again).
+      g_chain_hint = {};
+      SetReplayStackHeaders(c->stack_headers.count ? &c->stack_headers : nullptr);
+      if (c->binding) {
+        ApplyBindingLocked(c->binding);
+        c->binding = 0;
+      }
+      if (c->snapshot != SnapshotKind::Whole && ChainConstantsOn()) {
+        const ReplayConstants chain{nullptr, ~uint64_t(0), ~uint64_t(0), &g_chain_vs_dirty, &g_chain_ps_dirty,
+                                    g_chain_id};
+        DrawStateLocked(device, c->call, &chain);
+      } else {
+        DrawStateLocked(device, c->call);
+      }
+      // The constant uploads compare every group at the next draw: the first's draw took the groups the second's delta
+      // wrote with the first's values.
+      g_chain_vs_dirty = g_chain_ps_dirty = ~uint64_t(0);
+      g_chain_hint = {};
+      SetReplayStackHeaders(nullptr);
+    };
+    g_tile_twin.device_b = device_b;
+    g_tile_twin.call_b = b->call;
+    g_tile_twin.active = true;
+    g_tile_twin.merged = false;
+    draw(a, image.data());
+    const bool merged = g_tile_twin.merged;
+    g_tile_twin = {};
+    if (!merged)
+      draw(b, device_b);
+    g_capture_pool.Give(a, true);
+    g_capture_pool.Give(b, true);
+  });
+}
+
+// The held draw queued alone (render_thread's before-push hook: before anything else is queued or waited for).
+void FlushHeldTwin() {
+  if (t_twin_queueing || !g_twin_holding.load(std::memory_order_acquire))
+    return;
+  std::lock_guard lock(g_twin_mutex);
+  if (!g_twin_held.capture)
+    return;
+  DrawCapture *held = g_twin_held.capture;
+  g_twin_held = {};
+  g_twin_holding.store(false, std::memory_order_release);
+  t_twin_queueing = true;
+  QueueCapture(held);
+  t_twin_queueing = false;
+}
+
+// QueueDraw's capture (made under the chain's lock): true when it was taken (held, or queued with the held one).
+bool TakeTwinCapture(u32 device_va, const DrawCall &call, DrawCapture *capture) {
+  static const bool on = [] {
+    const bool v = TileTwinMergeOn() && DeltasOn();
+    if (v)
+      render_thread::SetBeforePushHook2(&FlushHeldTwin);
+    return v;
+  }();
+  if (!on)
+    return false;
+  u32 tiles = 0;
+  const int tile = call.tessellation && !call.up_vertices && !call.up_indices && capture->vertices.empty() &&
+                           capture->indices.empty()
+                       ? TwinTileOf(device_va, tiles)
+                       : -1;
+  if (tile < 0 && !g_twin_holding.load(std::memory_order_acquire))
+    return false;
+  // A tile run vivapinata_tiles_once holds (queued before this draw) goes first: at most one thing held at a time.
+  if (tile >= 0) {
+    t_twin_queueing = true;
+    render_thread::RunBeforePushHook(1);
+    t_twin_queueing = false;
+  }
+  std::lock_guard lock(g_twin_mutex);
+  t_twin_queueing = true;
+  if (DrawCapture *held = g_twin_held.capture) {
+    const HeldTwin h = g_twin_held;
+    g_twin_held = {};
+    g_twin_holding.store(false, std::memory_order_release);
+    const DrawCall &c = held->call;
+    if (tile >= 0 && h.device_va == device_va && h.tile != tile && c.primitive == call.primitive &&
+        c.indexed == call.indexed && c.start_vertex == call.start_vertex && c.count == call.count &&
+        c.base_vertex == call.base_vertex && c.start_index == call.start_index && c.tessellation) {
+      QueueTwinPair(held, capture);
+      t_twin_queueing = false;
+      return true;
+    }
+    QueueCapture(held);
+  }
+  if (tile >= 0 && u32(tile) + 1 < tiles) {
+    g_twin_held = {capture, device_va, tile};
+    g_twin_holding.store(true, std::memory_order_release);
+    t_twin_queueing = false;
+    return true;
+  }
+  t_twin_queueing = false;
+  return false;
+}
+
 DrawCapture *Capture(u32 device_va, const DrawCall &call) {
   auto *device = GuestPtr<d3d::Device>(device_va);
   if (!device)
@@ -1137,6 +1296,10 @@ void QueueDraw(u32 device_va, const DrawCall &call, u32 up_vertex_bytes, u32 up_
     std::memcpy(&vs_word, guest_device + d3d::kDeviceOffsetVertexShader, 4);
     capture->binding = LastBindingOf(__builtin_bswap32(vs_word));
   }
+  // banjo-nx (2026-11-23, banjo_renut_tile_twin_merge): an upper tile's tessellated draw held for its twin, or queued
+  // with the one held (a draw of the chain only: under its lock, in its order).
+  if (deltas && !cross && TakeTwinCapture(device_va, call, capture))
+    return;
   QueueCapture(capture);
 }
 

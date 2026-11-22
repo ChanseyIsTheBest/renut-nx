@@ -30,6 +30,11 @@ namespace renut::gpu::render_thread {
 // render thread, so work held back on the game's side (a tile's command buffer run waiting for its twin) is queued
 // before anything after it. Set once at start-up; null for none.
 void SetBeforePushHook(void (*hook)());
+// banjo-nx (2026-11-23, banjo_renut_tile_twin_merge): a second such hook, called before the first.
+void SetBeforePushHook2(void (*hook)());
+// banjo-nx (2026-11-23): one of the two hooks now (1: SetBeforePushHook's, 2: SetBeforePushHook2's), when set: work held
+// by the other holder queued before this one holds its own, so at most one thing is held at a time.
+void RunBeforePushHook(int which);
 
 // Runs 'work' on the render thread after everything queued before it, with
 // State().mutex held.

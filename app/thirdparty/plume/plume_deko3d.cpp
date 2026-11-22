@@ -1908,6 +1908,8 @@ namespace plume {
         usage.ssboMask = uint32_t(strtoul(field("ssbo=").c_str(), nullptr, 16));
         usage.textures = field("tex=") == "1";
         usage.txqMask = uint32_t(strtoul(field("txq=").c_str(), nullptr, 16));  // banjo-nx (2026-10-19)
+        if (const std::string twin = field("twin="); !twin.empty())  // banjo-nx (2026-11-23): one register (twinsel)
+            usage.twinRegPlusOne = uint32_t(strtoul(twin.c_str(), nullptr, 10)) + 1;
         // texb=k:textureWord:samplerWord,... in binding order
         const std::string texb = field("texb=");
         size_t q = 0;
@@ -2509,6 +2511,10 @@ namespace plume {
 
     bool Deko3DShaderWritesVertexKill(const RenderShader *shader) {
         return shader != nullptr && static_cast<const Deko3DShader *>(shader)->usage.writesVertexKill;
+    }
+
+    uint32_t Deko3DShaderTwinRegPlusOne(const RenderShader *shader) {
+        return shader != nullptr ? static_cast<const Deko3DShader *>(shader)->usage.twinRegPlusOne : 0;
     }
 
     bool Deko3DShaderReadsVertexId(const RenderShader *shader) {

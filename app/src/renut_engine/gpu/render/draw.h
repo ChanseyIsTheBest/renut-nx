@@ -195,6 +195,19 @@ extern uint64_t g_group_pointer_reads, g_group_pointer_differ;
 bool DrawStateLocked(const u8 *device_state, const DrawCall &call,
                      const ReplayConstants *replay = nullptr);
 
+// banjo-nx (2026-11-23, the Nutty Acres GPU work, banjo_renut_tile_twin_merge; render/draw.cpp): set by
+// backend/queued.cpp around the draw of an upper predicated tile whose twin for the lower tile came with it: that twin's
+// device and call. DrawStateLocked draws the first over both tiles' rows when it can, and then sets 'merged' (the twin
+// is then not drawn); else it draws it alone, as before. Render thread.
+struct TileTwin {
+  const u8 *device_b = nullptr;
+  DrawCall call_b{};
+  bool active = false;
+  bool merged = false;
+};
+extern TileTwin g_tile_twin;
+bool TileTwinMergeOn();
+
 // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_chain_reuse): set by backend/queued.cpp around a draw of its delta chain
 // (banjo_renut_snapshot_deltas): the device chunks that changed since the chain's previous draw. The chain's chunks: the
 // 30 of 64 bytes before the float constants (device bytes 0-1919), then the bool constants on: banjo-nx (N&B's
