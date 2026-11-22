@@ -473,8 +473,10 @@ ClearRect EndTilingRect(native::Device d, u32 i) {
 }
 
 // The rect every tile's resolve covers together, when they cover it exactly, each resolves to its own corner and the
-// clear values are the same; false otherwise (or with the key off, or in A/B 321's off half).
-bool EndTilingWhole(native::Device d, u32 device, u32 count, u32 color_va, ClearRect &whole) {
+// colour clear values are the same; false otherwise (or with the key off, or in A/B 321's off half). *same_depth: the
+// depth and stencil clear values the same too (else each tile's depth is cleared with its own, as before).
+// banjo-nx (2026-11-23, the console's first run: 0 of 8191 as one): BeginTiling's depth clear is not EndTiling's 1.0.
+bool EndTilingWhole(native::Device d, u32 device, u32 count, u32 color_va, ClearRect &whole, bool *same_depth) {
   static const bool on = REXCVAR_GET(banjo_renut_tiles_resolve_once);
   if (!on || count < 2 || count > 16 || !color_va || banjo::renut_gpu::g_ab_off_plain == 321)
     return false;
@@ -483,10 +485,21 @@ bool EndTilingWhole(native::Device d, u32 device, u32 count, u32 color_va, Clear
   const auto *end_color = GuestPtr<const be_u32>(color_va);
   if (!begin_color || !end_color)
     return false;
+  bool colour_same = true;
   for (u32 k = 0; k < 4; ++k)
-    if (u32(begin_color[k]) != u32(end_color[k]))
-      return false;
-  if (d.W(0x33A0) != std::bit_cast<u32>(1.0f) || d.W(0x33A4) != 0)
+    colour_same = colour_same && u32(begin_color[k]) == u32(end_color[k]);
+  *same_depth = d.W(0x33A0) == std::bit_cast<u32>(1.0f) && d.W(0x33A4) == 0;
+  {
+    static u32 logged = 0;
+    if (logged < 4) {
+      ++logged;
+      RGPU_INFO("[renut] EndTiling's clear values: BeginTiling colour {:08X} {:08X} {:08X} {:08X} depth {:08X} stencil "
+                "{}, EndTiling colour {:08X} {:08X} {:08X} {:08X} depth 3F800000 stencil 0",
+                u32(begin_color[0]), u32(begin_color[1]), u32(begin_color[2]), u32(begin_color[3]), d.W(0x33A0),
+                d.W(0x33A4), u32(end_color[0]), u32(end_color[1]), u32(end_color[2]), u32(end_color[3]));
+    }
+  }
+  if (!colour_same)
     return false;
   int64_t area = 0;
   ClearRect rects[16];
@@ -519,7 +532,10 @@ u32 D3DDevice_EndTiling_hook(u32 device, u32 dest_texture, u32 color_va) {
   const u32 count = d.W(native::off::TileCount);
   if (dest_texture) {
     ClearRect whole{};
-    const bool once = EndTilingWhole(d, device, count, color_va, whole);
+    bool same_depth = true;
+    const bool once = EndTilingWhole(d, device, count, color_va, whole, &same_depth);
+    // 0x300: the colour and the depth cleared after the copy; 0x100: the colour alone (each tile's depth below).
+    const u32 whole_flags = same_depth ? 0x300u : 0x100u;
     if (once) {
       // Predicated to every tile (the clear is not cut to one tile's rect), the render state the tiles' resolves have.
       u32 all = 0;
@@ -530,9 +546,9 @@ u32 D3DDevice_EndTiling_hook(u32 device, u32 dest_texture, u32 color_va) {
       float color[4] = {0, 0, 0, 0};
       ReadVector4(color_va, color);
       if (IsRecordingCommandBuffer(device)) {
-        RecordResolve(device, 0x300, &whole, dest_texture, whole.x1, whole.y1, 0, 0, color, 1.0f, 0);
+        RecordResolve(device, whole_flags, &whole, dest_texture, whole.x1, whole.y1, 0, 0, color, 1.0f, 0);
       } else if (Active()) {
-        QueueResolve(device, 0x300, &whole, dest_texture, whole.x1, whole.y1, 0, 0, color, 1.0f, 0);
+        QueueResolve(device, whole_flags, &whole, dest_texture, whole.x1, whole.y1, 0, 0, color, 1.0f, 0);
       }
       g_tiles_resolve_once.fetch_add(1, std::memory_order_relaxed);
     } else {
@@ -557,10 +573,18 @@ u32 D3DDevice_EndTiling_hook(u32 device, u32 dest_texture, u32 color_va) {
                              (d.B(native::off::Flags3) & 0x20) ? 0 : 2);
       const i32 dest_x = i32(d.W(tile)), dest_y = i32(d.W(tile + 4));
       if (once) {  // the host's copy made above: the guest's own resolve alone, as Resolve() does after its copy
-        if (i + 1 < count)
-          native::Resolve(d, 0x300, dest_texture, d.F(0x33A0), d.W(0x33A4), 0);
-        else
-          native::Resolve(d, 0x300, dest_texture, 1.0f, 0, 0);
+        const float tile_z = i + 1 < count ? d.F(0x33A0) : 1.0f;
+        const u32 tile_stencil = i + 1 < count ? d.W(0x33A4) : 0u;
+        if (!same_depth) {
+          // This tile's depth and stencil cleared with its own values (the resolve's "clear depth after": 0x30, its
+          // rect, under this tile's predication), as its own resolve did after its copy.
+          static constexpr float kNoColor[4] = {0, 0, 0, 0};
+          if (IsRecordingCommandBuffer(device))
+            RecordClear(device, 0x30, &rect, kNoColor, tile_z, tile_stencil);
+          else if (Active())
+            QueueClear(device, 0x30, &rect, kNoColor, tile_z, tile_stencil);
+        }
+        native::Resolve(d, 0x300, dest_texture, tile_z, tile_stencil, 0);
       } else if (i + 1 < count) {
         Resolve(device, 0x300, &rect, dest_texture, dest_x, dest_y, 0, 0, device + 0x3390,
                 d.F(0x33A0), d.W(0x33A4), 0);
