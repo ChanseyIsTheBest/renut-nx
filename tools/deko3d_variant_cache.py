@@ -572,8 +572,9 @@ def main():
                 if at + 1 < len(parts) and parts[at + 1].isdigit():
                     spec[FLAG_GS] = int(parts[at + 1])
             pipelines.append(((parts[1], parts[3]), spec))
-    if not pipelines and not a.generic:
-        sys.exit('deko3d_variant_cache: no pipelines (--list or --variants)')
+    # banjo-nx (2026-11-22): --runtime-log alone is enough (a small cache of a level's misses, appended to the card's).
+    if not pipelines and not a.generic and not a.runtime_log:
+        sys.exit('deko3d_variant_cache: no pipelines (--list, --variants or --runtime-log)')
 
     todo = {}
 

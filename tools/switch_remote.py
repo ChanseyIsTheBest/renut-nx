@@ -23,6 +23,7 @@ console run needs the console owner's word first.
   ls [PATH]                  ftp listing (default: the port's folder)
   get REMOTE [LOCAL]         ftp download (a folder: every file in it, one level)
   put LOCAL REMOTE           ftp upload (overwrites a file of that name in the folder)
+  append LOCAL REMOTE        ftp append (APPE): LOCAL's bytes added at the end of REMOTE in the folder
   mv REMOTE NEW              ftp rename inside the port's folder; refused when NEW exists (it would be replaced)
   raw "CMD ..."              a sys-botbase command as it is, the reply printed
   album-ls [PATH]            the Album, read only: /Nintendo/Album... or /emuMMC/<folder>/Nintendo/Album...
@@ -396,7 +397,7 @@ def main():
         remote = sd_path('logs/rex/stall_dump')
         ftp_retry(host, lambda f: f.storbinary('STOR ' + remote, io.BytesIO(b'')))
         print('requested a stall dump:', remote, time.strftime('%H:%M:%S'))
-    elif cmd in ('ls', 'get', 'put', 'mv'):
+    elif cmd in ('ls', 'get', 'put', 'mv', 'append'):
         # Refused before any connection is made: the card path is rest[1] for put, rest[0] for the others (both for mv).
         sd_path(rest[1] if cmd == 'put' else (rest[0] if rest else ''))
         if cmd == 'mv':
@@ -429,6 +430,24 @@ def main():
                 print('%d files, %d failed' % (len(sizes), len(failed)))
         elif cmd == 'put':
             print('put', rest[0], '->', sd_path(rest[1]), ftp_put_file(host, rest[0], sd_path(rest[1])), 'bytes')
+        elif cmd == 'append':
+            # banjo-nx (2026-11-22): a file's bytes added at the end of one in the port's folder (FTP APPE), its size
+            # checked to have grown by exactly that much: records added to the DKSH shader cache, whose loader walks
+            # the ones after its index. Nothing already there is changed.
+            remote = sd_path(rest[1])
+            want = os.path.getsize(rest[0])
+
+            def run(f):
+                f.voidcmd('TYPE I')
+                before = f.size(remote)
+                with open(rest[0], 'rb') as src:
+                    f.storbinary('APPE ' + remote, src, blocksize=1 << 16)
+                f.voidcmd('TYPE I')
+                return before, f.size(remote)
+            before, after = ftp_retry(host, run, tries=1)
+            if after != before + want:
+                sys.exit('append: %s grew from %d to %d bytes, not by %d' % (remote, before, after, want))
+            print('appended', rest[0], '->', remote, want, 'bytes (now %d)' % after)
         elif cmd == 'mv':
             # blur-nx (2026-11-18): a rename inside the port's folder (both paths checked), in place of a delete: an A/B of
             # packed and raw game files sets the raw ones aside and puts them back. Here it also refuses a destination
