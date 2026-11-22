@@ -292,6 +292,24 @@ const std::vector<ScriptedPress>& InputScript() {
           {"UP", 0x0001},    {"DOWN", 0x0002}, {"LEFT", 0x0004}, {"RIGHT", 0x0008}, {"START", 0x0010},
           {"BACK", 0x0020},  {"LB", 0x0100},   {"RB", 0x0200},   {"A", 0x1000},     {"B", 0x2000},
           {"X", 0x4000},     {"Y", 0x8000}};
+      // banjo-nx (2026-10-31, again 2026-11-22 for the Nutty Acres route): a stick held at a part tilt,
+      // 'LSx/y/seconds' or 'RSx/y/seconds' (x and y from -1 to 1, up positive; the hold also as '@seconds').
+      if ((name.rfind("LS", 0) == 0 || name.rfind("RS", 0) == 0) && name.find('/') != std::string::npos) {
+        const int base = name[0] == 'L' ? 0 : 2;
+        double v[3] = {0.0, 0.0, hold};
+        size_t p = 2;
+        for (int k = 0; k < 3; ++k) {
+          const size_t q = name.find('/', p);
+          const std::string part = name.substr(p, q == std::string::npos ? std::string::npos : q - p);
+          if (!part.empty()) v[k] = std::atof(part.c_str());
+          if (q == std::string::npos) break;
+          p = q + 1;
+        }
+        auto tilt = [](double f) { return int16_t(std::max(-1.0, std::min(1.0, f)) * 32767.0); };
+        out.push_back({seconds, 0, v[2], base, tilt(v[0])});
+        out.push_back({seconds, 0, v[2], base + 1, tilt(v[1])});
+        continue;
+      }
       for (const auto& [button, bits] : kButtons)
         if (name == button) out.push_back({seconds, bits, hold});
       static const struct {
