@@ -13,6 +13,7 @@
 #include <chrono>
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -64,6 +65,8 @@ REXCVAR_DEFINE_BOOL(input_rumble, true, "Input",
                     "Controller vibration: the game's own rumble (on by default). false = controllers only get zero "
                     "vibration");
 namespace rex::input {
+
+std::atomic<uint32_t> g_script_frame_draws{0};  // banjo-nx (2026-11-22): input_system.h NoteScriptFrameDraws
 
 namespace {
 // blur-nx (2026-11-17, the Renut audit's #27, exact): the device list of a controller call kept per thread, so a call
@@ -266,6 +269,10 @@ struct ScriptedPress {
   // katamari-nx (2026-11-01): a stick pushed all the way (axis 0-3: left x, left y, right x, right y).
   int axis = -1;
   int16_t value = 0;
+  // banjo-nx (2026-11-22): a wait item ('SECONDS:W<draws>'): the script's clock stops at SECONDS until the renderer's
+  // frames have had at least this many draws for 3 s (g_script_frame_draws); the later items keep their spacing from
+  // it. An emulator's loads take 1.5 to 8 minutes depending on the PC's load: a fixed time misses the level.
+  uint32_t wait_draws = 0;
 };
 const std::vector<ScriptedPress>& InputScript() {
   static const std::vector<ScriptedPress> presses = [] {
@@ -292,6 +299,10 @@ const std::vector<ScriptedPress>& InputScript() {
           {"UP", 0x0001},    {"DOWN", 0x0002}, {"LEFT", 0x0004}, {"RIGHT", 0x0008}, {"START", 0x0010},
           {"BACK", 0x0020},  {"LB", 0x0100},   {"RB", 0x0200},   {"A", 0x1000},     {"B", 0x2000},
           {"X", 0x4000},     {"Y", 0x8000}};
+      if (name.size() > 1 && name[0] == 'W' && std::isdigit(static_cast<unsigned char>(name[1]))) {
+        out.push_back({seconds, 0, 0.0, -1, 0, uint32_t(std::strtoul(name.c_str() + 1, nullptr, 10))});
+        continue;
+      }
       // banjo-nx (2026-10-31, again 2026-11-22 for the Nutty Acres route): a stick held at a part tilt,
       // 'LSx/y/seconds' or 'RSx/y/seconds' (x and y from -1 to 1, up positive; the hold also as '@seconds').
       if ((name.rfind("LS", 0) == 0 || name.rfind("RS", 0) == 0) && name.find('/') != std::string::npos) {
@@ -329,10 +340,48 @@ const std::vector<ScriptedPress>& InputScript() {
   }();
   return presses;
 }
-// Seconds since the first input poll (the script's clock).
+// Seconds since the first input poll (the script's clock), less the time its wait items held it (banjo-nx 2026-11-22).
 double ScriptSeconds() {
   static const auto start = std::chrono::steady_clock::now();
-  return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+  const double raw = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+  static const std::vector<std::pair<double, uint32_t>> waits = [] {
+    std::vector<std::pair<double, uint32_t>> w;
+    for (const ScriptedPress& p : InputScript())
+      if (p.wait_draws) w.emplace_back(p.at, p.wait_draws);
+    std::sort(w.begin(), w.end());
+    return w;
+  }();
+  if (waits.empty()) return raw;
+  static std::mutex mutex;
+  static double shift = 0.0;        // seconds the waits held the clock
+  static size_t next = 0;           // the next wait item
+  static double good_since = -1.0;  // since when the frames have had enough draws
+  static bool said = false;
+  std::lock_guard lock(mutex);
+  double t = raw - shift;
+  if (next < waits.size() && t >= waits[next].first) {
+    const auto [at, draws] = waits[next];
+    if (!said) {
+      said = true;
+      REXLOG_INFO("input_script: waiting at {:.1f} s for frames of {} draws", at, draws);
+    }
+    if (g_script_frame_draws.load(std::memory_order_relaxed) >= draws) {
+      if (good_since < 0.0) good_since = raw;
+    } else {
+      good_since = -1.0;
+    }
+    if (good_since >= 0.0 && raw - good_since >= 3.0) {
+      REXLOG_INFO("input_script: the wait at {:.1f} s ends (frames of {}+ draws); the waits held the clock {:.1f} s "
+                  "in all", at, draws, shift);
+      ++next;
+      good_since = -1.0;
+      said = false;
+    } else {
+      shift = raw - at;
+      t = at;
+    }
+  }
+  return t;
 }
 // banjo-nx (2026-10-23, input_script_sticks): the sticks' random wander: segment k of 1.5 s eases from target k to
 // target k + 1, each target four values in [-28000, 28000] from a hash of k.

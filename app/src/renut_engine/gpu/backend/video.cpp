@@ -28,6 +28,7 @@
 #include <plume_render_interface.h>
 #include <plume_render_interface_builders.h>
 
+#include <rex/input/input_system.h>  // banjo-nx (2026-11-22): NoteScriptFrameDraws
 #include "renut_engine/perf/frame_stats.h"
 #include "renut_engine/gpu/backend/backend.h"
 #include "renut_engine/gpu/backend/gpu_profile.h"
@@ -1096,6 +1097,7 @@ void SubmitAndAdvance(VideoState &s, plume::RenderCommandSemaphore *wait,
     g_gpu_done_noted[cur] = g_presenting_swap == 0;
     s.last_frame_draws = s.frame_draws;  // port 164 (banjo_deko3d_progressive_submit)
     s.frame_draws = 0;
+    rex::input::NoteScriptFrameDraws(s.last_frame_draws);  // banjo-nx (2026-11-22): input_script's wait items
   } else if (s.list_open) {
     FinishRecordingLocked(s);
     EndListTiming(s, true);
@@ -1120,6 +1122,7 @@ void SubmitAndAdvance(VideoState &s, plume::RenderCommandSemaphore *wait,
     g_gpu_done_noted[cur] = g_presenting_swap == 0;
     s.last_frame_draws = s.frame_draws;  // port 164 (banjo_deko3d_progressive_submit)
     s.frame_draws = 0;
+    rex::input::NoteScriptFrameDraws(s.last_frame_draws);  // banjo-nx (2026-11-22): input_script's wait items
 #if defined(PLUME_DEKO3D)
     g_trim.frame_end[cur] = plume::Deko3DCopyFence(s.fences[cur].get());
     FirstGpuWorkLocked(cur);

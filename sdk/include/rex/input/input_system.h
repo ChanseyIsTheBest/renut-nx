@@ -86,4 +86,12 @@ class InputSystem : public system::IInputSystem {
 /// In tool mode, only the NOP driver is added.
 std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode);
 
+/// banjo-nx (2026-11-22, test automation): the renderer's draws in the frame just ended, for input_script's wait items
+/// ("SECONDS:W<draws>": the script's clock stops there until frames of at least that many draws have come for 3 s).
+/// One relaxed store a frame.
+extern std::atomic<uint32_t> g_script_frame_draws;
+inline void NoteScriptFrameDraws(uint32_t draws) noexcept {
+  g_script_frame_draws.store(draws, std::memory_order_relaxed);
+}
+
 }  // namespace rex::input
