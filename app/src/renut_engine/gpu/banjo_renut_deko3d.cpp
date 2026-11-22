@@ -40,6 +40,12 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_log_writer, true, "Banjo/Enhancements",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // Port 161 (from fnxf_xiii, its note of 2026-10-30): plume_deko3d.h beforeBufferCopy.
 // banjo-nx (2026-11-20, the rebase's console runs: 20,000 stages on the generic variant): plume's logMisses.
+// renut-nx (2026-11-22, the user: the slow boot): the DKSH cache's start took 101-105 s on the console with 195,826
+// variants (one small read a record on the SD card). NAME.idx beside it lists the records (LoadCache).
+REXCVAR_DEFINE_BOOL(banjo_deko3d_cache_index, true, "Banjo/Enhancements",
+                    "The DKSH cache's index file (deko3d_shaders.bin.idx): the start reads the records' keys, offsets "
+                    "and sizes from it in one read and walks only the records added since (false: the whole cache is "
+                    "walked at every start, in 4 MB pieces)");
 REXCVAR_DEFINE_BOOL(banjo_deko3d_log_misses, false, "Banjo/Diagnostics",
                     "deko3d renderer: every shader variant a draw got the generic one for (neither loaded nor in "
                     "deko3d_shaders.bin) is logged once to deko3d.log as a \"run-time variant\" line, for "
@@ -455,6 +461,131 @@ struct DkshCache {
 };
 DkshCache g_cache;
 
+// renut-nx (2026-11-22, the user: the slow boot): the cache's start was 101-105 s on the console at every start since
+// at least c40 (195,826 variants). The walk sought to each record and read its 16-byte head: a seek drops stdio's
+// buffer, so each record was a small read at a new place on the SD card. Now (1) NAME.idx beside the cache lists its
+// records' keys, offsets and sizes (16 bytes each, ~3 MB), read in one go; it holds the cache's length when written
+// and the first and last records' heads, checked against the cache; records appended after it (a run's compiles) are
+// walked from its end, and a cache it does not match is walked whole. (2) The walk reads the cache in 4 MB pieces and
+// finds the heads inside them. The index is written again (NAME.idx.new, then renamed) when the walk found records.
+// Credit: the cache format and the walk are banjo-nx's (2026-10-18, its record cut of 2026-10-20).
+struct CacheIndexHead {
+  char magic[4];     // "BDKI"
+  uint32_t version;  // 1
+  char tag[16];      // kCacheTag
+  uint64_t length;   // the cache's end of whole records when the index was written
+  uint64_t count;    // records listed
+  uint64_t first_key, last_key;
+  uint64_t first_at, last_at;  // the first and the last listed record's DKSH offsets
+  uint32_t first_size, last_size;
+};
+struct CacheIndexRecord {
+  uint64_t key;
+  uint64_t at_size;  // the DKSH's offset (low 40 bits) and its size (high 24 bits)
+};
+static_assert(sizeof(CacheIndexRecord) == 16, "16-byte index records");
+constexpr uint64_t kIndexAtMask = 0xFFFFFFFFFFull;
+
+// One record head (key, size, the DKSH magic) at `at`: false when there is not one.
+bool ReadCacheHead(FILE *f, long at, long length, uint64_t &key, uint32_t &size) {
+  uint32_t magic = 0;
+  return at >= 0 && at + 16 <= length && std::fseek(f, at, SEEK_SET) == 0 && std::fread(&key, 8, 1, f) == 1 &&
+         std::fread(&size, 4, 1, f) == 1 && std::fread(&magic, 4, 1, f) == 1 && size >= 64 && size <= (16u << 20) &&
+         at + 12 + long(size) <= length && magic == kDkshMagic;
+}
+
+// The index, when it matches the cache: c.index filled, the end of its records returned; else -1 (nothing kept).
+long ReadCacheIndex(DkshCache &c, long length) {
+  FILE *f = std::fopen((c.path + ".idx").c_str(), "rb");
+  if (!f)
+    return -1;
+  CacheIndexHead h{};
+  bool ok = std::fread(&h, sizeof(h), 1, f) == 1 && std::memcmp(h.magic, "BDKI", 4) == 0 && h.version == 1 &&
+            std::memcmp(h.tag, kCacheTag, sizeof(kCacheTag)) == 0 && long(h.length) <= length && h.count > 0 &&
+            h.count < (16u << 20);
+  std::vector<CacheIndexRecord> records;
+  if (ok) {
+    records.resize(size_t(h.count));
+    ok = std::fread(records.data(), sizeof(CacheIndexRecord), records.size(), f) == records.size();
+  }
+  std::fclose(f);
+  uint64_t key = 0;
+  uint32_t size = 0;
+  if (!ok || !ReadCacheHead(c.file, long(h.first_at) - 12, length, key, size) || key != h.first_key ||
+      size != h.first_size || !ReadCacheHead(c.file, long(h.last_at) - 12, length, key, size) || key != h.last_key ||
+      size != h.last_size || long(h.last_at) + long(size) != long(h.length))
+    return -1;
+  c.index.reserve(records.size() + 4096);
+  for (const CacheIndexRecord &r : records)
+    c.index[r.key] = {long(r.at_size & kIndexAtMask), uint32_t(r.at_size >> 40)};
+  return long(h.length);
+}
+
+// The cache's records from `at` on, read in 4 MB pieces: the end of the last whole record.
+long WalkCacheRecords(DkshCache &c, long at, long length) {
+  constexpr size_t kPiece = 4u << 20;
+  std::vector<uint8_t> buf(kPiece);
+  long buf_at = -1;  // the file offset of buf[0]
+  size_t buf_len = 0;
+  while (at + 16 <= length) {
+    if (buf_at < 0 || at < buf_at || at + 16 > buf_at + long(buf_len)) {
+      if (std::fseek(c.file, at, SEEK_SET) != 0)
+        break;
+      buf_at = at;
+      buf_len = std::fread(buf.data(), 1, std::min<size_t>(kPiece, size_t(length - at)), c.file);
+      if (buf_len < 16)
+        break;
+    }
+    const uint8_t *p = buf.data() + (at - buf_at);
+    uint64_t key;
+    uint32_t size, magic;
+    std::memcpy(&key, p, 8);
+    std::memcpy(&size, p + 8, 4);
+    std::memcpy(&magic, p + 12, 4);
+    if (size < 64 || size > (16u << 20) || at + 12 + long(size) > length || magic != kDkshMagic)
+      break;
+    c.index[key] = {at + 12, size};
+    at += 12 + long(size);
+  }
+  return at;
+}
+
+void WriteCacheIndex(const DkshCache &c) {
+  if (c.index.empty())
+    return;
+  std::vector<CacheIndexRecord> records;
+  records.reserve(c.index.size());
+  for (const auto &[key, v] : c.index)
+    records.push_back({key, uint64_t(v.first) | (uint64_t(v.second) << 40)});
+  std::sort(records.begin(), records.end(), [](const CacheIndexRecord &a, const CacheIndexRecord &b) {
+    return (a.at_size & kIndexAtMask) < (b.at_size & kIndexAtMask);
+  });
+  CacheIndexHead h{};
+  std::memcpy(h.magic, "BDKI", 4);
+  h.version = 1;
+  std::memcpy(h.tag, kCacheTag, sizeof(kCacheTag));
+  h.length = uint64_t(c.end);
+  h.count = records.size();
+  h.first_key = records.front().key;
+  h.first_at = records.front().at_size & kIndexAtMask;
+  h.first_size = uint32_t(records.front().at_size >> 40);
+  h.last_key = records.back().key;
+  h.last_at = records.back().at_size & kIndexAtMask;
+  h.last_size = uint32_t(records.back().at_size >> 40);
+  const std::string path = c.path + ".idx", tmp = path + ".new";
+  FILE *f = std::fopen(tmp.c_str(), "wb");
+  if (!f)
+    return;
+  const bool ok = std::fwrite(&h, sizeof(h), 1, f) == 1 &&
+                  std::fwrite(records.data(), sizeof(CacheIndexRecord), records.size(), f) == records.size();
+  if (std::fclose(f) == 0 && ok) {
+    std::remove(path.c_str());
+    if (std::rename(tmp.c_str(), path.c_str()) == 0)
+      return;
+  }
+  std::remove(tmp.c_str());
+}
+
 void LoadCache() {
   DkshCache &c = g_cache;
   // banjo-nx (2026-10-18): the code uam makes with other flags (banjo_deko3d_uam_prmt, banjo_deko3d_uam_gvn off) has a
@@ -480,19 +611,15 @@ void LoadCache() {
       // the process did not finish). The file is cut there and new records follow the good ones. Before, appends
       // went after such a record, where the next start's walk never found them: Ryujinx runs 20-22 compiled the same
       // ~30 shaders on every start.
-      long at = sizeof(head);
-      for (;;) {
-        uint64_t key;
-        uint32_t size, magic;
-        if (at + 16 > length || std::fseek(c.file, at, SEEK_SET) != 0 || std::fread(&key, sizeof(key), 1, c.file) != 1 ||
-            std::fread(&size, sizeof(size), 1, c.file) != 1 || std::fread(&magic, sizeof(magic), 1, c.file) != 1)
-          break;
-        if (size < 64 || size > (16u << 20) || at + 12 + long(size) > length || magic != kDkshMagic)
-          break;
-        c.index[key] = {at + 12, size};
-        at += 12 + long(size);
-      }
+      // renut-nx (2026-11-22): the index's records, then the walk from where they end (WalkCacheRecords: 4 MB pieces).
+      const auto t0 = std::chrono::steady_clock::now();
+      const bool use_index = REXCVAR_GET(banjo_deko3d_cache_index);
+      const long indexed = use_index ? ReadCacheIndex(c, length) : -1;
+      const size_t from_index = c.index.size();
+      long at = indexed > 0 ? indexed : long(sizeof(head));
+      at = WalkCacheRecords(c, at, length);
       c.end = at;
+      const bool walked = at != (indexed > 0 ? indexed : long(sizeof(head)));
       if (at != length) {
         REXLOG_WARN("[deko3d] DKSH cache {}: {} bytes after the last whole record ({} of them) dropped", c.path,
                     length - at, c.index.size());
@@ -500,6 +627,12 @@ void LoadCache() {
         if (ftruncate(fileno(c.file), at) != 0)
           REXLOG_WARN("[deko3d] DKSH cache {}: could not be cut; new records overwrite the rest", c.path);
       }
+      if (use_index && (walked || indexed < 0))
+        WriteCacheIndex(c);
+      REXLOG_INFO("[deko3d] DKSH cache {}: read in {} ms ({} records from its index{}, {} walked{})", c.path,
+                  std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count(),
+                  from_index, use_index ? (indexed < 0 ? ": none or not this cache's" : "") : ": off",
+                  c.index.size() - from_index, use_index && (walked || indexed < 0) ? "; the index written" : "");
     }
   }
   if (fresh) {

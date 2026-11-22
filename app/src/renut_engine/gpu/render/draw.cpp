@@ -12968,6 +12968,87 @@ bool g_ds_keys_ready = false;
 }
 }  // namespace
 
+// renut-nx (2026-11-22, sasrt-nx's sasrt_resolve_remake_carry of 2026-11-21, credit sasrt-nx; render/textures.cpp
+// ResolveTarget): 'from''s image drawn into 'to' (the same format and guest size, another scale): present_vs's triangle
+// over 'to', ui_upscale_ps reading 'from''s raw view (no swizzle) with the point sampler at the same guest coordinates,
+// every texel written. Texture slots are freed a frame late (retired_texture_slots), so the read of 'from' is safe.
+bool SasrtCarryResolveContentLocked(HostTexture *from, HostTexture *to) {
+  auto &s = State();
+  plume::RenderCommandList *cmd = s.command_list;
+  if (!cmd || !from || !to || !from->texture || !to->texture || !s.present_vs || !s.utility_layout)
+    return false;
+  const uint32_t source_slot = RawViewSlotLocked(*from);
+  if (source_slot == kInvalidDescriptor)
+    return false;
+  static std::unique_ptr<plume::RenderShader> ps;
+  static bool tried = false;
+  if (!tried) {
+    tried = true;
+    ps = CreateHostShader(s.device.get(), RENUT_HOST_SHADER(ui_upscale_ps), "ui_upscale_ps");
+  }
+  if (!ps)
+    return false;
+  struct Entry {
+    plume::RenderFormat format = plume::RenderFormat::UNKNOWN;
+    std::unique_ptr<plume::RenderPipeline> pipeline;
+  };
+  static Entry entries[12];
+  plume::RenderPipeline *pipeline = nullptr;
+  for (Entry &e : entries) {
+    if (e.pipeline && e.format == to->host_format) {
+      pipeline = e.pipeline.get();
+      break;
+    }
+    if (e.pipeline)
+      continue;
+    plume::RenderGraphicsPipelineDesc desc;
+    desc.pipelineLayout = s.utility_layout.get();
+    desc.vertexShader = s.present_vs.get();
+    desc.pixelShader = ps.get();
+    desc.primitiveTopology = plume::RenderPrimitiveTopology::TRIANGLE_LIST;
+    desc.cullMode = plume::RenderCullMode::NONE;
+    desc.renderTargetCount = 1;
+    desc.renderTargetFormat[0] = to->host_format;
+    desc.renderTargetBlend[0] = plume::RenderBlendDesc::Copy();
+    e.pipeline = s.device->createGraphicsPipeline(desc);
+    e.format = to->host_format;
+    if (e.pipeline)
+      e.pipeline->setName("resolve carry");
+    pipeline = e.pipeline.get();
+    break;
+  }
+  if (!pipeline)
+    return false;
+  if (!to->copy_framebuffer) {
+    const plume::RenderTexture *targets[] = {to->texture.get()};
+    to->copy_framebuffer = s.device->createFramebuffer(plume::RenderFramebufferDesc(targets, 1));
+    if (!to->copy_framebuffer)
+      return false;
+  }
+  TransitionTextureLocked(from, plume::RenderTextureLayout::SHADER_READ);
+  TransitionTextureLocked(to, plume::RenderTextureLayout::COLOR_WRITE);
+  cmd->setFramebuffer(to->copy_framebuffer.get());
+  cmd->setViewports(plume::RenderViewport(0.0f, 0.0f, float(to->alloc_width), float(to->alloc_height)));
+  cmd->setScissors(plume::RenderRect(0, 0, int32_t(to->alloc_width), int32_t(to->alloc_height)));
+  cmd->setGraphicsPipelineLayout(s.utility_layout.get());
+  cmd->setPipeline(pipeline);
+  cmd->setGraphicsDescriptorSet(s.texture_set.get(), 0);
+  cmd->setGraphicsDescriptorSet(s.sampler_set.get(), 1);
+  UtilityPush push{};
+  push.scale[0] = push.scale[1] = 1.0f;
+  push.texture_index = source_slot;
+  push.sampler_index = kPointClampSamplerSlot;
+  cmd->setGraphicsPushConstants(0, &push, 0, sizeof(push));
+  cmd->drawInstanced(3, 1, 0, 0);
+  TransitionTextureLocked(to, plume::RenderTextureLayout::SHADER_READ);
+  // The draw path binds its own layout, pipeline, targets and viewport again.
+  g_bound.framebuffer = nullptr;
+  g_bound.pipeline = nullptr;
+  g_bound.layout = false;
+  g_bound.viewport_set = false;
+  return true;
+}
+
 bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayConstants *replay) {
   ::renut::gpu::census::Scope census_scope(::renut::gpu::census::kDrawState);  // blur-nx (2026-11-17)
   if (!g_ds_keys_ready) [[unlikely]]  // blur-nx (2026-11-17, audit #24)

@@ -764,3 +764,20 @@ A fourth launch (08:35, a night attempt after Blur's slot): a dim blue-grey sky,
 6.86-7.08 us a draw, the render thread the limit in each. The whole run read every stage from the DKSH cache: "uam 0
 compiles, blocking 0, DKSH cache 13091 hits, 0 added" (RR6's blocking generic compiles behind the core-3 stage do not
 happen here).
+
+### The slow start: the DKSH cache's walk (2026-11-22, the user: "we have a slow boot")
+
+Not pacman-nx's CLI11 registration (its fix, 72c28ced, is in: sdk/src/core/cvar.cpp registers only the cvars the
+command line names). Every console start since at least c40 spent 101-105 s between the log's fourth line and
+"[deko3d] DKSH cache /switch/renut-nx/deko3d_shaders.bin: 195826 variants": LoadCache sought to each record and read
+its 16-byte head, and a seek drops stdio's buffer, so 195,826 small reads at new places on the SD card. The card's
+cache has every variant of every build since 2026-10 (a Showdown Town session hit 13,091 of them). The base and the
+other ports (sasrt-nx, blur-nx, culdcept-nx) have the same walk.
+
+Fix (banjo_deko3d_cache_index, on): deko3d_shaders.bin.idx beside the cache lists the records (key, offset, size: 16
+bytes each, ~3 MB), read in one go; it keeps the cache's length and the first and last records' heads, checked against
+the cache before it is used; records added after it are walked from its end, and the index is written again
+(NAME.idx.new, then renamed) whenever the walk found records. The walk itself reads 4 MB pieces (a cache without an
+index: one sequential read of the file instead of a seek a record). The start's log line gives the time and where the
+records came from. Not yet measured on the console.
+
