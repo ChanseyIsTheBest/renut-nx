@@ -132,3 +132,7 @@ Title screen, no input, 4-5 minutes (out/emu/emu_movie_*.toml; runs in out/emu_r
   for the WMV3 runs), so the remux's pacing holds (culdcept-nx's bug was slow, silent movies). The sound and NVDEC
   are for the console (held until the user's next render-thread round).
 
+The test folder (game_root_inst) and out/media_test were deleted the same day for disk space (the user's word); to make
+them again: serve.py --test-sink with test/browser.html?compile=0&sink=1 (~23 min), test/sink_finish.py --link, then
+test/movie_browser.html (~3 min); tools/xwb_opcm_pack.py for a PC-made .opcm.
+
