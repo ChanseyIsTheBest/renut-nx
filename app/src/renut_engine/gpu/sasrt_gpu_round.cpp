@@ -273,7 +273,14 @@ REXCVAR_DEFINE_BOOL(sasrt_gpu_export_raster_discard, true, "SASRT/GPU",
 
 // sasrt-nx (2026-11-08): the third GPU round (docs/gpu-round-1108.md "Round 3"; the user: "Try to aim for 20 more pixel
 // identical gpu optimisations"). A/B 120 and up.
-REXCVAR_DEFINE_BOOL(sasrt_gpu_seed_cpu_direct, true, "SASRT/GPU",
+// banjo-nx (2026-11-22, console bisect in Nutty Acres): OFF for N&B. With it, Nutty Acres showed vertex explosions and
+// flickering smoke on alternate frames (huge flat triangles from the GPU-skinned trees and particles), new since 1.0.2.
+// The bisect over the 20 memexport items of the GPU rounds (out/card/renut_nutty_t3 ... t7b): all 20 off cured it, the
+// 10 waits off did not, the seed and readback paths off did, these two off did (6a), sasrt_rt_cached_export_seeds alone
+// off did not (7b). The CPU writes a seed at record time, outside the GPU's order: here the slot's export buffer can still
+// be in use by the GPU's earlier work (the assumption above, "the slot was last used before its fence", does not hold
+// with N&B's kicks and command stage), and the dispatch path below orders the copy after it.
+REXCVAR_DEFINE_BOOL(sasrt_gpu_seed_cpu_direct, false, "SASRT/GPU",
                     "deko3d renderer (third GPU round, item 30, A/B 120; with sasrt_gpu_fetch_copy_compute): a memexport "
                     "draw's fresh windows get their seed (guest memory's bytes there) written by the CPU straight into the "
                     "slot's export buffer as the draw is recorded, not copied into the upload ring and then by a compute "

@@ -64,6 +64,14 @@ REXCVAR_DEFINE_INT32(input_script_sticks, 0, "Input",
 REXCVAR_DEFINE_BOOL(input_rumble, true, "Input",
                     "Controller vibration: the game's own rumble (on by default). false = controllers only get zero "
                     "vibration");
+// banjo-nx (2026-11-22, console test automation): sys-botbase's virtual controller connects as a second pad, so with
+// the handheld Joy-Cons attached it was player 2 and never reached the game (the Nutty Acres route had to be scripted
+// blind with input_script). With this, every pad is player 1 (SharedAssignment: their inputs merged), so the remote
+// tool's presses and sticks drive the game while the screenshots steer them. Off by default (multiplayer needs slots).
+REXCVAR_DEFINE_BOOL(input_all_pads_player1, false, "Input",
+                    "Test automation: every connected controller is player 1 (their inputs merged), so a remote "
+                    "controller (sys-botbase) drives the game beside the handheld. Off: one controller a player")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 namespace rex::input {
 
 std::atomic<uint32_t> g_script_frame_draws{0};  // banjo-nx (2026-11-22): input_system.h NoteScriptFrameDraws
@@ -700,7 +708,10 @@ std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode) {
   // NOP driver (primary in tool mode, fallback otherwise)
   uint8_t nop_index = tool_mode ? 0 : 1;
   input->AddDriver(std::make_unique<nop::NopInputDriver>(nullptr, nop_index));
-  input->SetDeviceAssignment(std::make_unique<SlotAssignment>());
+  if (REXCVAR_GET(input_all_pads_player1))  // banjo-nx (2026-11-22): console test automation (see the cvar)
+    input->SetDeviceAssignment(std::make_unique<SharedAssignment>());
+  else
+    input->SetDeviceAssignment(std::make_unique<SlotAssignment>());
   return input;
 }
 
