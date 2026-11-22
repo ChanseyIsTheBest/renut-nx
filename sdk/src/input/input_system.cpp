@@ -273,6 +273,10 @@ struct ScriptedPress {
   // frames have had at least this many draws for 3 s (g_script_frame_draws); the later items keep their spacing from
   // it. An emulator's loads take 1.5 to 8 minutes depending on the PC's load: a fixed time misses the level.
   uint32_t wait_draws = 0;
+  // sa2-nx-ult (2026-11-22, its 08ce9e9e, credit sa2-nx): the first poll at or after `at` (-1: none yet); the press
+  // lasts `hold` from there. In an emulator the game thread stalls past a press's window (Ryujinx, 626 ms frames in
+  // SA2's menus; 250 ms in N&B's town at 4 fps): a late poll now only makes the press late.
+  mutable double started = -1.0;
 };
 const std::vector<ScriptedPress>& InputScript() {
   static const std::vector<ScriptedPress> presses = [] {
@@ -418,7 +422,9 @@ uint16_t ScriptedButtons() {
   const double now = ScriptSeconds();
   uint16_t buttons = 0;
   for (const ScriptedPress& press : InputScript()) {
-    if (press.axis < 0 && now >= press.at && now < press.at + press.hold) {
+    if (press.axis < 0 && now >= press.at && press.started < 0)
+      press.started = now;
+    if (press.axis < 0 && press.started >= 0 && now < press.started + press.hold) {
       buttons |= press.buttons;
       static double logged = -1.0;
       if (logged != press.at) {
@@ -434,7 +440,9 @@ bool ScriptedStickPushes(X_INPUT_GAMEPAD& pad) {
   const double now = ScriptSeconds();
   bool any = false;
   for (const ScriptedPress& press : InputScript()) {
-    if (press.axis < 0 || now < press.at || now >= press.at + press.hold) continue;
+    if (press.axis >= 0 && now >= press.at && press.started < 0)
+      press.started = now;  // sa2-nx-ult (2026-11-22): from the first poll that sees it, as the buttons
+    if (press.axis < 0 || press.started < 0 || now >= press.started + press.hold) continue;
     switch (press.axis) {
       case 0: pad.thumb_lx = press.value; break;
       case 1: pad.thumb_ly = press.value; break;
