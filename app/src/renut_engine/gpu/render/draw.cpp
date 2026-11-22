@@ -13968,10 +13968,6 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   static constexpr u32 kNoRegisters[8] = {};
   const u32 *vs_used = vs->entry ? vs->entry->floatConstants : kAllRegisters;
   const u32 *ps_used = !ps ? kNoRegisters : ps->entry ? ps->entry->floatConstants : kAllRegisters;
-  // banjo-nx (2026-11-23, the Nutty Acres GPU work, banjo_renut_diag_tile_twins): N&B draws its sea once per predicated
-  // tile (sub_82386BF8), the same tessellated draw twice in a row; what the twins' shaders read that differs.
-  if (TileTwinsDiagOn() && call.tessellation) [[unlikely]]
-    NoteTileTwin(GuestDevice(device_state), call, geometry, *vs, ps, vs_constants, ps_constants, vs_used, ps_used, key);
   // banjo-nx (2026-10-19, banjo_deko3d_push_constants): pushed, except for draws point_sprite_gs expands (it reads
   // SharedConstants through its address).
   // bangaio-nx (2026-10-29, banjo_renut_point_fast_draw / A/B 69): those too: on deko3d point_sprite_gs reads
@@ -14476,6 +14472,10 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
                                REXCVAR_GET(banjo_renut_diag_draw_log_s) > 0;
   if (draw_log)
     DrawLog(call, geometry, vs, ps, targets, key, sc, export_count);
+  // banjo-nx (2026-11-23, the Nutty Acres GPU work, banjo_renut_diag_tile_twins): N&B draws its sea once per predicated
+  // tile (sub_82386BF8), the same tessellated draw twice in a row; what the twins' shaders read that differs.
+  if (TileTwinsDiagOn() && call.tessellation) [[unlikely]]
+    NoteTileTwin(GuestDevice(device_state), call, geometry, *vs, ps, vs_constants, ps_constants, vs_used, ps_used, key);
   // banjo-nx (2026-10-19, banjo_renut_resolve_skip): the targets this draw can write.
   for (u32 i = 0; i < targets.color_count && i < key.color_count; ++i)
     if ((key.color_mask >> (4 * i)) & 0xF) {
