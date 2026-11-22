@@ -4585,6 +4585,34 @@ bool TilesOnce(u32 device_va, const u8 *device, u32 command_buffer_va, const std
       why = 4;
     else if (!SameButPredication(g_held.run->running, run->running, differs))
       why = 2;
+    // banjo-nx (2026-11-23, the Nutty Acres GPU work): N&B's twin runs are all refused as "another buffer" (every frame's
+    // tiled scene, so its vertex, tessellation and memexport work runs once per tile). What differs, for the first 24:
+    // the two buffers' addresses, their run's recordings, and the top recordings' sizes and op kinds.
+    if (why == 0) {
+      static uint32_t logged = 0;
+      if (logged < 24) {
+        ++logged;
+        const auto top_of = [](const BufferSet &set, u32 va) -> const HostCommandBuffer * {
+          auto it = set.find(va);
+          return it == set.end() ? nullptr : it->second.get();
+        };
+        const HostCommandBuffer *a = top_of(g_held.run->buffers, g_held.command_buffer);
+        const HostCommandBuffer *b = top_of(run->buffers, command_buffer_va);
+        u32 draws_a = 0, draws_b = 0, runs_a = 0, runs_b = 0;
+        if (a)
+          for (const Op &op : a->ops) draws_a += op.kind == OpKind::Draw, runs_a += op.kind == OpKind::Run;
+        if (b)
+          for (const Op &op : b->ops) draws_b += op.kind == OpKind::Draw, runs_b += op.kind == OpKind::Run;
+        const bool same_arena = a && b && a->arena.size() == b->arena.size() &&
+                                std::memcmp(a->arena.data(), b->arena.data(), a->arena.size()) == 0;
+        RGPU_INFO("[renut] tiles once, another buffer: held {:08X} ({} buffers, top {} ops {} draws {} runs, arena {} B), "
+                  "this {:08X} ({} buffers, top {} ops {} draws {} runs, arena {} B), the same recording object {}, "
+                  "arenas equal {}, tiles {} predication {:08X} after {:08X}",
+                  g_held.command_buffer, g_held.run->buffers.size(), a ? a->ops.size() : 0, draws_a, runs_a,
+                  a ? a->arena.size() : 0, command_buffer_va, run->buffers.size(), b ? b->ops.size() : 0, draws_b,
+                  runs_b, b ? b->arena.size() : 0, a == b, same_arena, tiles, predication, g_held.predication);
+      }
+    }
     if (why < 0) {
       // The twin: one run for both. The running device's own predication word is both tiles' too (draws that set none
       // take it); the replay's mask is the union.
