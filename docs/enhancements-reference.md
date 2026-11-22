@@ -916,6 +916,24 @@ Exact items from it:
 - The diagnostics in renut.toml (the GPU profile by shader, the resolve trace) cost about 0.4 % of the render thread in
   per-draw checks and counts. renut_play.toml turns them off.
 
+### Nutty Acres GPU round (2026-11-23, the 24 h mandate: 45 fps at the overclock, pixel-identical)
+
+Measured at CPU 2396 / GPU 1305.6 / RAM 2733 in Nutty Acres. Before: 48-51 fps, GPU 19.4-20.8 ms a frame.
+- `banjo_renut_tile_twin_merge` [320] (on): N&B draws the sea once per predicated tile, the same tessellated draw
+  twice in a row (sub_82386BF8). `backend/queued.cpp` holds the upper tile's capture, and `render/draw.cpp`
+  (TileTwinPrepareLocked) draws the pair once over both tiles' rows. The pixel shader takes the lower tile's c222 and
+  bools below that tile's first row (pass `twinsel`, docs/shader.md), so the pixels are the same. Identical twins merge
+  too when the pixel shader never reads gl_FragCoord.
+  - A/B on the console: GPU -1.1 to -1.2 ms a frame, about +3 fps (51 vs 48, 55 vs 52).
+- `banjo_renut_tiles_resolve_once` [321] (on): EndTiling's per-tile resolves (copy each tile's rect, clear it) become
+  one resolve of the whole rect when the tiles cover it exactly and every tile's clear values are the same. The colour
+  hand-over then takes it without a copy. The guest's own calls run per tile as before.
+- `banjo_display_sync_no_late_snap` [322] (on): with a 60 cap at 60 Hz, a frame is never held past its own time (the
+  previous release plus a refresh) to meet the display grid.
+  - After a late frame went off the grid, the next one waited up to a whole refresh more. Those were the console's
+    slowest frames in Nutty Acres: 27-33 ms, with 15-17 ms of that in the limiter. The 1 % lows were 33-35 fps.
+  - Caps of two refreshes or more keep the grid's cadence. The pixels do not change (timing only).
+
 ## Other keys
 
 Not enhancements, but they decide how the ones above run or are measured.

@@ -14,6 +14,7 @@
  * instead. Neither takes State().mutex here.
  */
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -22,6 +23,7 @@
 #include <vector>
 
 #include <rex/hook.h>
+#include <rex/cvar.h>  // banjo-nx (2026-11-23): banjo_renut_tiles_resolve_once
 
 #include "renut_engine/gpu/banjo_renut_select.h"
 #include <rex/types.h>
@@ -37,6 +39,7 @@
 #include "renut_engine/gpu/backend/render_thread.h"
 #include "renut_engine/gpu/render/surfaces.h"
 #include "renut_engine/gpu/backend/video.h"
+#include "renut_engine/gpu/banjo_renut_tuning.h"  // banjo-nx (2026-11-23): g_ab_off_plain (A/B 321)
 
 using namespace renut::gpu;
 
@@ -439,28 +442,126 @@ void D3DDevice_BeginTiling_hook(u32 device, u32 count, u32 rects_va, u32 color_v
 // Z 1.0 and stencil 0. The host resolve reads each rect from the full-size
 // target. Left out: the tiles' ring segment, D3D's WorkerDpc callback that
 // replays it per tile, and its fence's packets.
+// banjo-nx (2026-11-23, the Nutty Acres GPU work, banjo_renut_tiles_resolve_once / A/B 321): the host's copy for every
+// tile at once. Each tile's resolve copies its rect of the target into the texture at the same place, then clears that
+// rect of the target's colour and depth (0x300); the tiles are apart and nothing reads or draws between them, so when
+// they cover their bounding rect exactly and every tile's clear values are the same (BeginTiling's for all but the last,
+// EndTiling's for the last), one resolve of the whole rect with those values leaves the same texture and the same
+// target. On the host that is a whole resolve and a whole clear: the colour hand-over's case (the destination takes the
+// target's image at the clear, banjo_deko3d_color_handover) instead of a drawn copy of each tile (N&B: two half-screen
+// copies a frame and their clears, about 0.27 ms of GPU). The guest's side is as before: every tile's predication,
+// render state and native resolve, in order; only the host's copy is made once, before the first tile's.
+REXCVAR_DEFINE_BOOL(banjo_renut_tiles_resolve_once, true, "Banjo/Enhancements",
+                    "N&B's EndTiling (2026-11-23): the tiles' resolves with clear made as one resolve of their whole "
+                    "rect when the tiles cover it and their clear values are the same (the colour hand-over then takes "
+                    "it without a copy). The same texture and target")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+std::atomic<uint64_t> g_tiles_resolve_once{0}, g_tiles_resolve_apart{0};
+
+// A tile's resolve rect (EndTiling's: a tile at the surface's edge resolves to a multiple of 8).
+ClearRect EndTilingRect(native::Device d, u32 i) {
+  const u32 tile = native::off::TileRects + i * 16;
+  ClearRect rect{i32(d.W(tile)), i32(d.W(tile + 4)), i32(d.W(tile + 8)), i32(d.W(tile + 12))};
+  const u32 surface = d.W(0x31BC);
+  const auto *s = surface ? GuestPtr<const be_u32>(surface) : nullptr;
+  const u32 size = s ? u32(s[9]) : 0;
+  if (u32(rect.x2) == (size >> 18) + 1)
+    rect.x2 = i32((u32(rect.x2) + 7) & ~7u);
+  if (u32(rect.y2) == native::Extract(size, 3, 15) + 1)
+    rect.y2 = i32((u32(rect.y2) + 7) & ~7u);
+  return rect;
+}
+
+// The rect every tile's resolve covers together, when they cover it exactly, each resolves to its own corner and the
+// clear values are the same; false otherwise (or with the key off, or in A/B 321's off half).
+bool EndTilingWhole(native::Device d, u32 device, u32 count, u32 color_va, ClearRect &whole) {
+  static const bool on = REXCVAR_GET(banjo_renut_tiles_resolve_once);
+  if (!on || count < 2 || count > 16 || !color_va || banjo::renut_gpu::g_ab_off_plain == 321)
+    return false;
+  // The clear values: BeginTiling's (device + 0x3390, 0x33A0, 0x33A4) for the first tiles, EndTiling's for the last.
+  const auto *begin_color = GuestPtr<const be_u32>(device + 0x3390);
+  const auto *end_color = GuestPtr<const be_u32>(color_va);
+  if (!begin_color || !end_color)
+    return false;
+  for (u32 k = 0; k < 4; ++k)
+    if (u32(begin_color[k]) != u32(end_color[k]))
+      return false;
+  if (d.W(0x33A0) != std::bit_cast<u32>(1.0f) || d.W(0x33A4) != 0)
+    return false;
+  int64_t area = 0;
+  ClearRect rects[16];
+  for (u32 i = 0; i < count; ++i) {
+    const ClearRect r = EndTilingRect(d, i);
+    const u32 tile = native::off::TileRects + i * 16;
+    if (r.x2 <= r.x1 || r.y2 <= r.y1 || i32(d.W(tile)) != r.x1 || i32(d.W(tile + 4)) != r.y1)
+      return false;
+    rects[i] = r;
+    area += int64_t(r.x2 - r.x1) * (r.y2 - r.y1);
+    if (i == 0) {
+      whole = r;
+    } else {
+      whole.x1 = std::min(whole.x1, r.x1);
+      whole.y1 = std::min(whole.y1, r.y1);
+      whole.x2 = std::max(whole.x2, r.x2);
+      whole.y2 = std::max(whole.y2, r.y2);
+    }
+    for (u32 j = 0; j < i; ++j)  // apart
+      if (r.x1 < rects[j].x2 && rects[j].x1 < r.x2 && r.y1 < rects[j].y2 && rects[j].y1 < r.y2)
+        return false;
+  }
+  return area == int64_t(whole.x2 - whole.x1) * (whole.y2 - whole.y1);
+}
+
 u32 D3DDevice_EndTiling_hook(u32 device, u32 dest_texture, u32 color_va) {
   native::Device d = native::DeviceAt(device);
   if (!d)
     return 0;
   const u32 count = d.W(native::off::TileCount);
   if (dest_texture) {
+    ClearRect whole{};
+    const bool once = EndTilingWhole(d, device, count, color_va, whole);
+    if (once) {
+      // Predicated to every tile (the clear is not cut to one tile's rect), the render state the tiles' resolves have.
+      u32 all = 0;
+      for (u32 i = 0; i < count; ++i)
+        all |= 3u << (i * 2);
+      native::SetPredication(d, all);
+      native::SetRenderState(d, kRenderStateHiZWriteEnable, (d.B(native::off::Flags3) & 0x20) ? 0 : 2);
+      float color[4] = {0, 0, 0, 0};
+      ReadVector4(color_va, color);
+      if (IsRecordingCommandBuffer(device)) {
+        RecordResolve(device, 0x300, &whole, dest_texture, whole.x1, whole.y1, 0, 0, color, 1.0f, 0);
+      } else if (Active()) {
+        QueueResolve(device, 0x300, &whole, dest_texture, whole.x1, whole.y1, 0, 0, color, 1.0f, 0);
+      }
+      g_tiles_resolve_once.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      g_tiles_resolve_apart.fetch_add(1, std::memory_order_relaxed);
+    }
+    {
+      static uint64_t reported = 0;
+      const uint64_t n = g_tiles_resolve_once.load(std::memory_order_relaxed) +
+                         g_tiles_resolve_apart.load(std::memory_order_relaxed);
+      if (n >= reported * 2 + 1) {  // the 1st, 3rd, 7th ... time
+        reported = n;
+        RGPU_INFO("[renut] EndTiling's resolves (banjo_renut_tiles_resolve_once, A/B 321): {} as one, {} per tile",
+                  g_tiles_resolve_once.load(std::memory_order_relaxed),
+                  g_tiles_resolve_apart.load(std::memory_order_relaxed));
+      }
+    }
     for (u32 i = 0; i < count; ++i) {
       const u32 tile = native::off::TileRects + i * 16;
-      ClearRect rect{i32(d.W(tile)), i32(d.W(tile + 4)), i32(d.W(tile + 8)), i32(d.W(tile + 12))};
-      // A tile at the surface's edge resolves to a multiple of 8.
-      const u32 surface = d.W(0x31BC);
-      const auto *s = surface ? GuestPtr<const be_u32>(surface) : nullptr;
-      const u32 size = s ? u32(s[9]) : 0;
-      if (u32(rect.x2) == (size >> 18) + 1)
-        rect.x2 = i32((u32(rect.x2) + 7) & ~7u);
-      if (u32(rect.y2) == native::Extract(size, 3, 15) + 1)
-        rect.y2 = i32((u32(rect.y2) + 7) & ~7u);
+      ClearRect rect = EndTilingRect(d, i);
       native::SetPredication(d, 3u << (i * 2));
       native::SetRenderState(d, kRenderStateHiZWriteEnable,
                              (d.B(native::off::Flags3) & 0x20) ? 0 : 2);
       const i32 dest_x = i32(d.W(tile)), dest_y = i32(d.W(tile + 4));
-      if (i + 1 < count) {
+      if (once) {  // the host's copy made above: the guest's own resolve alone, as Resolve() does after its copy
+        if (i + 1 < count)
+          native::Resolve(d, 0x300, dest_texture, d.F(0x33A0), d.W(0x33A4), 0);
+        else
+          native::Resolve(d, 0x300, dest_texture, 1.0f, 0, 0);
+      } else if (i + 1 < count) {
         Resolve(device, 0x300, &rect, dest_texture, dest_x, dest_y, 0, 0, device + 0x3390,
                 d.F(0x33A0), d.W(0x33A4), 0);
       } else {
