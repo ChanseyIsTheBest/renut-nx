@@ -86,3 +86,27 @@ Times AEST. One line per step; the details are in docs/banjo-ultimate-notes.md, 
 - 03:56-04:19 the PGO + LTO NRO (118 MB); 04:22 Ryujinx check: the same route, the self-check 45,134 of 45,134.
 - 04:00 --round-guess: 72.6 % / 73.7 % of the runs' misses derivable (97,334 variants); 04:33 the cache build with
   it and the four run-time logs.
+
+### 2026-11-22/23 (the user's 24 hours: Nutty Acres at 45 fps at the overclock, pixel-identical)
+
+Clocks: CPU 2396, GPU 1305.6, RAM 2733 MHz. Start: 30-34 fps, GPU 29-33 ms a frame.
+- 22:25 vertex explosions found: `sasrt_gpu_seed_cpu_direct`, CPU-written memexport seeds racing the GPU. Now off
+  (4f2b053e).
+- 22:40 122 Nutty Acres shader variants were missing; compiled and appended to the card's cache. That alone took it to
+  48-51 fps (GPU 19.4-20.8 ms).
+- 04:50-05:40 `banjo_renut_tile_twin_merge` [320] with pass `twinsel` (9ab49d4f, 59781300, bd546e70). The sea's
+  per-tile twin draws are drawn once. A/B: GPU -1.1 to -1.2 ms, +3 fps.
+- 06:10-06:40 two more items (11e6179a, 0a2e579d):
+  - `banjo_renut_tiles_resolve_once` [321]: EndTiling's per-tile resolves as one. BeginTiling clears depth to 0.0 and
+    EndTiling to 1.0, so each tile's depth is cleared on its own. A/B: GPU -0.2 to -0.25 ms.
+  - `banjo_display_sync_no_late_snap` [322]: the 60 cap never holds a frame past its time for the grid. The 1 % lows
+    went from 33-35 fps to 35-47 fps.
+- 06:55 63 more run-time variants appended to the card's cache.
+- 07:05 a two-minute drive on 0a2e579d: 51-56 fps in every 10 s window.
+- Measured and left:
+  - depth compression off: no gain;
+  - merging the per-tile point-sprite pairs: about 0.05-0.1 ms;
+  - texture fetch dedupe: uam already does it;
+  - the 128x128 HUD render: its inputs change every frame (the fetch words), so it cannot be cached.
+- Pitfall: a duplicate key in a test toml makes the whole file fail to parse. The game then starts on defaults: no log,
+  and no profile ("play anyway?", only "start new game"). The launch script now validates the toml.
