@@ -759,3 +759,8 @@ Showdown Town, fixed save, three launches (the time of day is the game's pick): 
 thread 38.26 ms, GPU 34.42 ms, 5,573 draws a frame, 6.86 us a draw; blue midday sky (36 windows) 25.24 fps, render
 36.22 ms, GPU 33.10 ms, 5,114 draws, 7.08 us a draw; the third warm again. The ~4,850-draw state of the earlier
 "night" runs did not come up. The start of the 24 hours (5d1c60e9): 23.09 fps, render 42.36 ms, GPU 35.42 ms.
+A fourth launch (08:35, a night attempt after Blur's slot): a dim blue-grey sky, 26.16 fps, render 36.67 ms, GPU
+33.47 ms, 5,313 draws a frame (6.90 us a draw); still not the ~4,850-draw state. Across the clean runs: 24.7-26.2 fps,
+6.86-7.08 us a draw, the render thread the limit in each. The whole run read every stage from the DKSH cache: "uam 0
+compiles, blocking 0, DKSH cache 13091 hits, 0 added" (RR6's blocking generic compiles behind the core-3 stage do not
+happen here).
