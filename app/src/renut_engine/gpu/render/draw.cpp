@@ -42,6 +42,7 @@ extern "C" char *fake_heap_end;  // libnx: the end of the malloc heap
 #include "renut_engine/gpu/backend/gpu_profile.h"
 #include "renut_engine/gpu/guest/command_buffers.h"
 #include "renut_engine/gpu/d3d/d3d.h"
+#include "renut_engine/gpu/d3d/d3d_native.h"  // banjo-nx (2026-11-23): the predication words (banjo_renut_diag_tile_twins)
 #include "renut_engine/gpu/render/format.h"
 #include "renut_engine/gpu/guest/guest_memory.h"
 #include "renut_engine/gpu/line_compare.h"
@@ -13160,8 +13161,99 @@ void NoteTileTwin(const GuestDevice &device, const DrawCall &call, const Geometr
   }
 }
 
+// banjo-nx (2026-11-23, the Nutty Acres GPU work, banjo_renut_diag_tile_twins): every draw (before the fast path), with
+// the draw before it: the same call and shaders for another predicated tile, by source (the immediate captures, the
+// snapshot chain, recorded command buffers) and tessellated or not; the devices the same outside the float constants,
+// the header and the predication words, else the first offset that differs (the first 12 logged). Where a merged draw
+// for both tiles would have to be made.
+struct AnyTwinRecord {
+  DrawCall call{};
+  u32 vs = 0, ps = 0, tile = ~0u;
+  int source = 0;
+  std::array<u8, d3d::kDeviceSnapshotSize> bytes{};
+  bool valid = false;
+};
+AnyTwinRecord g_any_prev, g_any_cur;
+uint64_t g_any_pairs[3][2] = {}, g_any_same[3][2] = {}, g_any_draws[3][2] = {};
+u32 g_any_logged = 0;
+void NoteAnyTwin(const u8 *device_state, const DrawCall &call, const ReplayConstants *replay) {
+  const GuestDevice device(device_state);
+  if (!device.valid())
+    return;
+  ClearRect rect{};
+  AnyTwinRecord &c = g_any_cur;
+  c.call = call;
+  c.call.up_vertices = nullptr;
+  c.call.up_indices = nullptr;
+  c.vs = device.U32(d3d::kDeviceOffsetVertexShader);
+  c.ps = device.U32(d3d::kDeviceOffsetPixelShader);
+  c.tile = PredicatedTile(device, rect) ? (u32(rect.y1) << 16 | u32(rect.x1)) : ~0u;
+  c.source = !replay ? 0 : (!replay->running ? 1 : 2);
+  std::memcpy(c.bytes.data(), device_state, c.bytes.size());
+  c.valid = true;
+  const int tess = call.tessellation ? 1 : 0;
+  ++g_any_draws[c.source][tess];
+  const AnyTwinRecord &p = g_any_prev;
+  if (p.valid && c.tile != ~0u && p.tile != ~0u && p.tile != c.tile && p.vs == c.vs && p.ps == c.ps &&
+      p.call.primitive == c.call.primitive && p.call.indexed == c.call.indexed &&
+      p.call.start_vertex == c.call.start_vertex && p.call.count == c.call.count &&
+      p.call.base_vertex == c.call.base_vertex && p.call.start_index == c.call.start_index &&
+      p.call.tessellation == c.call.tessellation && !call.up_vertices && !call.up_indices) {
+    ++g_any_pairs[c.source][tess];
+    // Compared: 0x38 up to the float constants (+0x780), after them (+0x2780) up to the predication words.
+    constexpr u32 kFloatBegin = 0x480 + 0x300, kFloatEnd = 0x480 + 0x2300;
+    const auto first_differ = [&](u32 begin, u32 end) -> u32 {
+      for (u32 i = begin; i < end; ++i)
+        if (p.bytes[i] != c.bytes[i])
+          return i;
+      return ~0u;
+    };
+    u32 at = first_differ(0x38, kFloatBegin);
+    u32 skip[3] = {native::off::TilePredication, native::off::RunPredication, d3d::kDeviceOffsetPredication};
+    if (at == ~0u) {
+      u32 begin = kFloatEnd;
+      for (const u32 s : skip) {
+        if (s < begin)
+          continue;
+        at = first_differ(begin, s);
+        if (at != ~0u)
+          break;
+        begin = s + 4;
+      }
+      if (at == ~0u)
+        at = first_differ(begin, u32(c.bytes.size()));
+    }
+    if (at == ~0u)
+      ++g_any_same[c.source][tess];
+    if (g_any_logged < 12) {
+      ++g_any_logged;
+      RGPU_INFO("[renut] any twins: {} {} draw, vs {:08X} ps {:08X} prim {} count {}, tiles {:08X} -> {:08X}: device {}",
+                c.source == 0 ? "immediate" : (c.source == 1 ? "chain" : "replayed"), tess ? "tessellated" : "plain",
+                c.vs, c.ps, c.call.primitive, c.call.count, p.tile, c.tile,
+                at == ~0u ? std::string("the same outside the constants and predication")
+                          : fmt::format("differs at +0x{:X}", at));
+    }
+  }
+  std::swap(g_any_prev, g_any_cur);
+  static auto last = std::chrono::steady_clock::now();
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last >= std::chrono::seconds(10)) {
+    last = now;
+    std::string line;
+    constexpr const char *kSource[3] = {"immediate", "chain", "replayed"};
+    for (int s = 0; s < 3; ++s)
+      for (int t = 0; t < 2; ++t)
+        line += fmt::format("{}{} {}: {} draws, {} twin pairs, {} the same device", line.empty() ? "" : "; ",
+                            kSource[s], t ? "tessellated" : "plain", g_any_draws[s][t], g_any_pairs[s][t],
+                            g_any_same[s][t]);
+    RGPU_INFO("[renut] any twins (banjo_renut_diag_tile_twins), since the start: {}", line);
+  }
+}
+
 bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayConstants *replay) {
   ::renut::gpu::census::Scope census_scope(::renut::gpu::census::kDrawState);  // blur-nx (2026-11-17)
+  if (TileTwinsDiagOn()) [[unlikely]]  // banjo-nx (2026-11-23): before the fast path, every draw
+    NoteAnyTwin(device_state, call, replay);
   if (!g_ds_keys_ready) [[unlikely]]  // blur-nx (2026-11-17, audit #24)
     ReadDrawStateKeys();
   {  // sasrt-nx (2026-11-11, port 82; its GPU list's row 4; UNTESTED), sasrt_gpu_skip_cull_both: before everything else
