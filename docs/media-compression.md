@@ -44,17 +44,31 @@ The bank sasrt-nx's survey saw in Bundle/4f/3e5515 is not one: 'DNBW' bytes insi
 - **The XMA sounds** (215 MB): sasrt-nx's NAME.xmop (XMA frames from Opus inside the XMA emulation) would take ~100 MB
   more, but one file cannot be both .opcm and .xmop: it needs the two formats merged. Not started.
 
-## The movies (Debug/**: 52 ASF files, WMV)
+## The movies (Debug/**: 52 ASF files, WMV3)
 
-N&B's codegen names its functions, so the movie path is known by name (the generated code, app/generated):
-CCalMoviePlayer (VideoDecoderThread, GetNextFrame, RenderNextFrame), CCalWmvDecoder (Create, Decode, GetWmvData, Seek,
-Close, ConnectInput), the WMV9 codec's interface CodecCreate / CodecSubmit / CodecProcess / CodecFlush / CodecDestroy,
-VodecConstruct (the FourCC check: WVC1 WMVA WMV3 WMV2 WMV1 WVP2 WMVP WMVR MP4S MP43 MP42), WmvideoC9DecNew / Init,
-WMVideoDecInit, WMVideoDecDecodeSequenceHeader, and the ASF parser (ASFDecode*, ASFParse*, ASFLoad*). culdcept-nx's
-app/src/cpu/culdcept_wmv_ffmpeg.cpp hooks the same codec interface in Culdcept Saga (by address there: no names): its
-destroy / decode / get output / flush and GetData, decoding with FFmpeg, and an H.265 movie (the installer's re-encode,
-kept in its ASF file) on NVDEC through tools/switch/nxvideo. The port for N&B: those hooks on the named functions and
-N&B's structure offsets. Not started.
+All 52 are WMV3 1280x720 at 30 fps (43 at 30/1, 9 at 30000/1001), 19.1 minutes in all, audio WMA 2 / WMA Pro (some
+5.1). culdcept-nx's movie path is used as it is (credit culdcept-nx; its method from sasrt-nx and tw2de_nx):
+
+- **Port** (app/src/cpu/banjo_wmv_ffmpeg.cpp, culdcept-nx's culdcept_wmv_ffmpeg.cpp): Culdcept Saga links the same XMedia
+  WMV9 wrapper (the same build: the same instructions but for registers, the same FourCC table), and N&B's codegen
+  names it: decode = WmvideoC9DecDecode, get output = WmvideoC9DecGetOutput, flush = WmvideoC9DecReset, destroy =
+  WmvideoC9DecClose, GetData = WMVDecCBGetData_HANDLER, the status = sub_82AA9070, the stream node's payload fetch
+  (mode 2) = WMDecCBGetData (found by comparing the generated code of both games; the wrapper's offsets are the same).
+  N&B's own Codec* functions are the voice chat's (XHV), not the movies'. banjo_wmv_ffmpeg: 0 the game's decoder, 1
+  FFmpeg (WMV3) / nxvideo (H.265), 2 both compared. The SDK's FFmpeg has the WMV3 decoder on (config.h includes
+  config_masseffect_wmv3.h, force-added as culdcept-nx did). nxvideo (tools/switch/nxvideo, culdcept-nx's): devkitPro's
+  switch-ffmpeg 7.1 with nvtegra in one object (only nxv_* global): the H.265 movies on NVDEC, the VIC copy into a
+  256-byte aligned NV12 picture, NVDEC / VIC at their maximum clocks while a movie plays (banjo_movie_max_clock: the
+  video units' clocks, not the CPU's), the decode thread at 0x2C while it waits (banjo_movie_decode_priority).
+- **Installer** (worker.js; culdcept-nx-installer's lib/asf.js, lib/movies.js, movie_worker.js, wasm/wmv3): each movie
+  decoded (FFmpeg's WMV3 in WebAssembly) and encoded by the browser's H.265 encoder (WebCodecs, the computer's video
+  hardware) at 35 % of its bitrate, a keyframe every 120 frames, written back into its ASF file in the original
+  muxer's packet layout (culdcept-nx found the XDK player loses a split audio object's sound and paces by the packets'
+  send times). A browser without an H.265 encoder keeps the WMVs.
+- **Measured** (2026-11-22, test/movie_browser.html in Chromium, 2 workers): all 52 re-encoded, 1,155 -> 427 MiB
+  (37 %), 177 s; none kept as WMV.
+- Ryujinx decodes no H.265 on NVDEC (culdcept-nx): the H.265 movies' playback is a console test (held until the
+  user's next render-thread round).
 
 ## Where each piece is
 
@@ -84,4 +98,16 @@ files, the classification identical to before) and the tool now refuses a linked
 separate copy.
 
 Still to do: the installer end to end in Chromium (test/browser.html) into a separate SD folder, the console (after the
-user's word: held until the next render-thread round), the movies (H.265, the named CCalWmvDecoder / Codec* hooks).
+user's word: held until the next render-thread round). (Both done since but the console: the sections below.)
+
+## The installer end to end (2026-11-22, Chromium: test/browser.html?compile=0&sink=1)
+
+serve.py --test-sink reads the zip as it streams and writes only what the installer made (NAME.lz4b, NAME.opcm) into a
+separate game_root (D:\New folder\ryu-data\banjo-ult\sdcard\switch\renut-nx\game_root_inst); test/sink_finish.py checks
+every entry against the game folder and links the unchanged files in as hard links (the game folder only read; a
+whole install would not fit the drive). The run: 1,383 s (the shaders' GLSL 723 s, identical to the release's
+reference build); zip 5,332,559,140 bytes, 1,999 entries, end records good; 951 game files 3,031 -> 1,975 MiB as
+.lz4b, every one decoded equal to its original byte for byte; the music 819.5 -> 357.9 MB as .opcm (the browser's
+Opus, 105 s); 1,029 entries stored as they are, all equal; 0 bad. Then the 52 movies into the same folder as H.265
+(test/movie_browser.html, above). Next: the folder in Ryujinx (the packed reads, the music, the movies' remux), the
+WMV3 path compared with the game's decoder (banjo_wmv_ffmpeg 2) on the disc's movies.
