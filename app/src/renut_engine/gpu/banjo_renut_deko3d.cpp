@@ -203,7 +203,8 @@ const PackageEntry *Find(Package &p, uint64_t hash) {
 // read whole into memory at start, and a shader's GLSL is unpacked from there: no card access while the game runs.
 // The translator and GLSL chain the installer must have run for this NRO: a change to either changes the tag (and the
 // installer's release with it), and a package with another tag is not read.
-constexpr char kInstalledTag[16] = "renut7-bnxglsl1";
+// renut-nx 1.0.3 (2026-11-23): the ultimate base's translator and GLSL chain (renut7 was 1.0.0-1.0.2's).
+constexpr char kInstalledTag[16] = "renut8-ultglsl1";
 
 struct InstalledInfo {
   uint32_t specConstantsMask, vertexFetchMemoryMask, textureFetchMask;
