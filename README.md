@@ -1,11 +1,13 @@
 # renut-nx
 
-**Banjo-Kazooie: Nuts & Bolts on the Nintendo Switch** (homebrew), version 1.0.2, by ChanseyIsTheBest. Formerly
+**Banjo-Kazooie: Nuts & Bolts on the Nintendo Switch** (homebrew), version 1.0.3, by ChanseyIsTheBest. Formerly
 banjo-nx.
 
 renut-nx is a Switch port of [reNut](https://github.com/masterspike52/reNut), masterspike52's static recompilation of
 the Xbox 360 game, built on the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk). It draws with reNut's
 Direct3D-level renderer on deko3d, the Switch's native GPU API, and runs the game's title update 3 with its DLC.
+From 1.0.3 it is built on the ultimate base, the renderer, shader and CPU work shared by ChanseyIsTheBest's Switch
+ports (docs/ultimate/).
 
 No game data is included. The game's files, its shaders and the update come from your own copy.
 
@@ -21,6 +23,12 @@ and uploads nothing.
 3. Extract `renut-nx.zip` to the root of the SD card: it makes `switch/renut-nx/`.
 4. In **Sphaira**, find Banjo-Kazooie Nuts & Bolts, press X to open Options and choose **Install Forwarder**. Make
    sure **Address Space** is set to **39-bit**, choose **Create Forwarder**, then start the game from the Home Screen.
+
+**Updating from 1.0.2 or older:** make the package again with the web installer (1.0.3's shaders come from a new
+translator: the old shader files do not work with it, and renut-nx refuses them). Your saves in
+`switch/renut-nx/renut/` stay where they are; delete the old `switch/renut-nx/game_root/` before extracting (the new
+one is packed, LZ4 files, Opus music and H.265 movies: about 4.2 GB instead of 6.6 GB), and keep a copy of your
+`renut.toml` if you changed it.
 
 The forwarder is how the game gets all four CPU cores (it cannot through a title takeover): started through it,
 renut-nx writes an NPDM for the forwarder's program id (Atmosphère's ExeFS replacement), and from the next start on it
@@ -53,7 +61,8 @@ makes at run time; the web installer makes the rest.
 - deko3d and uam by fincs and the devkitPro team; libnx; Mesa's GLSL compiler inside uam.
 - XenosRecomp (hedge-dev) in reNut's version.
 - Work shared between sister ports: sa2-nx, futari-nx, sasrt-nx, katamari-nx, kameo-nx and the Torchlight port's findings (2 MB
-  blocks), UnleashedRecomp-NX, NetherSX2_nx's
+  blocks), the ports of the ultimate base (rr6-nx, vivapinata-nx, mk9-nx, fnxf_xiii, feedingfrenzy-nx and the others its
+  docs/ultimate/ names), rr6-nx's and culdcept-nx's packed game files, Opus music and H.265 movies, UnleashedRecomp-NX, NetherSX2_nx's
   four-core layout, nfsmw-nx (StevensND), battd_nx; keflings-nx-installer's Xbox 360 package reader in the web
   installer. Details in `docs/` and in each file's comments.
 - Banjo-Kazooie: Nuts & Bolts is © Microsoft and Rare. This project is not affiliated with them.

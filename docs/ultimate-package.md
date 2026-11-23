@@ -1,5 +1,29 @@
 # renut-nx on the ultimate base: the test package, its notes, and what the installer would need
 
+**2026-11-23: renut-nx 1.0.3, the release of this branch.** How it was made (the installer's list at the end of this
+page, done):
+
+- The NRO: VERSION 1.0.3 (app/CMakeLists.txt) and the installer package tag `renut8-ultglsl1`
+  (banjo_renut_deko3d.cpp kInstalledTag; the installer's lib/package.js INSTALLED_TAG), so a 1.0.2 package is refused.
+  Built in the everyday folder (app/out/switch: the PGO profile of pgo-inplace, LTO, copies in place) reconfigured with
+  `-DBANJO_RENUT_RELEASE_SHADERS=ON`, with app/out/renut_switch_release made by
+  `tools/renut_switch_shader_cache.py --pc app/out/pc --only <run-time captures> --out-dir app/out/renut_switch_release`
+  and `tools/deko3d_shader_package.py --glsl out/deko3d_shaders/glsl_opt --only <the same> --raw --out
+  app/out/renut_switch_release` (the 185 shaders the game makes at run time: banjo-nx's app/out/pc-me/shader_capture).
+  NOT renut_release_shaders.py (katamari-nx's: it keeps the whole shader table and builds no package in, so the
+  installer would have no run-time shaders). Set the folder back with `-DBANJO_RENUT_RELEASE_SHADERS=OFF` for the
+  everyday build.
+- The variants (the installer's release/variants.txt): `tools/deko3d_variant_cache.py --glsl out/deko3d_shaders/glsl_opt
+  --list <the console's pipeline_list.bin> --generic --plain-guess app/out/renut_switch/shader_cache_switch.cpp
+  --sasrt-guess --round-guess --runtime-log <every console log> --export-variants ... --dry-run`: 113,623 (no
+  `--noearly-ab`: its variants serve A/B 151 only). The export's key check is FNV in Python: about 40 minutes.
+- The dictionary (release/deko3d_glsl.dict): the native package's (app/out/renut_switch/deko3d_glsl.bin, the bytes from
+  offset 32, its header's size).
+- The installer: py/ from tools/ (with twinsel_shaders.txt and noearly_keep.txt), the translator and uam built to
+  WebAssembly from this branch (the translator's front end sets userClipPlane as main.cpp does), the cache index
+  (deko3d_shaders.bin.idx) written by the page, and the variant texts made when compiled (8 GB of text otherwise).
+
+
 **2026-11-20: out/package_ultimate_2026-11-20/** replaces the package below for testing: the NRO with PGO and LTO
 (md5 84a50b1d6fe14ea1d1bbeafba5970199, 118,140,646 bytes, every library but uam in both; ELF beside it), the DKSH cache
 v3 (105,814 variants, 1,184,506,656 bytes: the run-time keys the renderer asks for; docs/banjo-ultimate-notes.md, "The
