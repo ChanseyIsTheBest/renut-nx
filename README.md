@@ -1,68 +1,70 @@
-# renut-nx
+<p align=center><img src="tools/switch/icon/banjo_icon.jpg" alt="Banjo-Kazooie: Nuts &amp; Bolts" width="256" height="256"></p>
 
-**Banjo-Kazooie: Nuts & Bolts on the Nintendo Switch** (homebrew), version 1.0.3, by ChanseyIsTheBest. Formerly
-banjo-nx.
+<h1 align=center>Banjo-Kazooie: Nuts &amp; Bolts on the Nintendo Switch</h1>
 
-renut-nx is a Switch port of [reNut](https://github.com/masterspike52/reNut), masterspike52's static recompilation of
-the Xbox 360 game, built on the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk). It draws with reNut's
-Direct3D-level renderer on deko3d, the Switch's native GPU API, and runs the game's title update 3 with its DLC.
-From 1.0.3 it is built on the ultimate base, the renderer, shader and CPU work shared by ChanseyIsTheBest's Switch
-ports (docs/ultimate/).
+<p align=center><b>renut-nx 1.0.3</b> · <a href="https://chanseyisthebest.github.io/renut-nx-webinstaller/">web installer</a> · <a href="https://github.com/ChanseyIsTheBest/renut-nx/releases/tag/v1.0.3">release</a></p>
 
-No game data is included. The game's files, its shaders and the update come from your own copy.
+An unofficial Switch port (formerly banjo-nx) of [reNut](https://github.com/masterspike52/reNut), masterspike52's
+static recompilation of the Xbox 360 version of **Banjo-Kazooie: Nuts & Bolts**, built on the
+[ReXGlue SDK](https://github.com/rexglue/rexglue-sdk). No emulator. Built on the ultimate base shared by
+ChanseyIsTheBest's Switch ports ([docs/ultimate/](docs/ultimate/)).
 
-## Install
+This repository contains no game files. You need your own copy of the game: your Xbox 360 disc image (or the folder it
+was extracted to), title update 3's package (`TU_16L61VD_0000004000000.00000000000O1`) and, optionally, the DLC
+(`E41F20AAF7094B9AFCA8CC90489D689D72A5062B4D`).
 
-Use **[renut-nx-webinstaller](https://chanseyisthebest.github.io/renut-nx-webinstaller/)**: a web page that builds the Switch package from your Xbox 360 disc image (or the
-folder it was extracted to), title update 3's package and, if you have it, the DLC package. It runs in your browser
-and uploads nothing.
+## Playing it on the Switch
 
-1. Open the web installer (https://chanseyisthebest.github.io/renut-nx-webinstaller/), choose your game, then title update 3's package (`TU_16L61VD_0000004000000.00000000000O1`)
-   and the DLC (`E41F20AAF7094B9AFCA8CC90489D689D72A5062B4D`, optional).
-2. Press **Create renut-nx.zip** and wait: the page makes the game's shaders and compiles them for the Switch.
-3. Extract `renut-nx.zip` to the root of the SD card: it makes `switch/renut-nx/`.
-4. In **Sphaira**, find Banjo-Kazooie Nuts & Bolts, press X to open Options and choose **Install Forwarder**. Make
-   sure **Address Space** is set to **39-bit**, choose **Create Forwarder**, then start the game from the Home Screen.
+Needs Atmosphère and Sphaira.
 
-**Updating from 1.0.2 or older:** make the package again with the web installer (1.0.3's shaders come from a new
-translator: the old shader files do not work with it, and renut-nx refuses them). Your saves in
-`switch/renut-nx/renut/` stay where they are; delete the old `switch/renut-nx/game_root/` before extracting (the new
-one is packed, LZ4 files, Opus music and H.265 movies: about 4.2 GB instead of 6.6 GB), and keep a copy of your
-`renut.toml` if you changed it.
+1. Open the web installer: **https://chanseyisthebest.github.io/renut-nx-webinstaller/**
+   ([source](https://github.com/ChanseyIsTheBest/renut-nx-webinstaller)).
+2. Choose your game, title update 3's package and the DLC (optional), press **Create renut-nx.zip** and wait while it
+   makes the shaders. It runs in your browser and uploads nothing.
+3. Extract `renut-nx.zip` to the root of your SD card (it makes `switch/renut-nx/`).
+4. In **Sphaira**, find Banjo-Kazooie Nuts & Bolts, press X for Options, choose **Install Forwarder**, set
+   **Address Space** to **39-bit**, choose **Create Forwarder**, then start the game from the Home Screen.
 
-The forwarder is how the game gets all four CPU cores (it cannot through a title takeover): started through it,
-renut-nx writes an NPDM for the forwarder's program id (Atmosphère's ExeFS replacement), and from the next start on it
-moves audio and the shader compiler to the fourth core (docs/four-core-mode.md).
+Start it through the forwarder: that is how it gets all four CPU cores (a title takeover can't).
 
-## Settings
+**Updating from 1.0.2 or older:** make the package again with the web installer (the old shaders don't work with
+1.0.3). Delete the old `switch/renut-nx/game_root/` before extracting and keep a copy of your `renut.toml` if you
+changed it; saves in `switch/renut-nx/renut/` stay where they are.
 
-`switch/renut-nx/renut.toml` lists the settings meant to be changed, by category: the language (`language`:
-`"system"`, the default, follows the Switch's system language; or one of the game's 15 by name), MSAA and SMAA, the
-dynamic resolution (handheld 540p-720p, docked 540p-1080p), fur detail, 1.0.0's font and dialogue boxes, the frame cap,
-four-core mode and the controls. Everything else is built in.
+Features:
 
-## Logs
-
-Off, except crash logs (`switch/renut-nx/logs/rex/rex_crash.log`). For a bug report, set `log_level = "info"` in
-renut.toml and send the `logs/` folder.
+- Title update 3, with the DLC (L.O.G.'s Lost Challenges) if you give it.
+- reNut's renderer on deko3d, the Switch's own GPU API.
+- Dynamic resolution (540p-720p handheld, 540p-1080p docked), MSAA and SMAA.
+- All 15 of the game's languages; by default it follows the Switch's language.
+- Optional 1.0.0 look: its font and dialogue boxes.
+- Four CPU cores from the forwarder: audio and the shader compiler on the fourth ([docs/four-core-mode.md](docs/four-core-mode.md)).
+- Smaller install: packed game files (LZ4), Opus music and H.265 movies, about 4.2 GB instead of 6.6 GB.
+- Settings in `switch/renut-nx/renut.toml`: language, MSAA, SMAA, dynamic resolution, fur detail, the 1.0.0 look, frame
+  cap, four-core mode and controls. Everything else is built in.
+- Logging off except crash logs (`switch/renut-nx/logs/rex/rex_crash.log`). For a bug report, set
+  `log_level = "info"` in renut.toml and send the `logs/` folder.
 
 ## Building
 
-See `app/README.md` (reNut's) and `docs/` (the Switch port: `docs/deko3d-renderer.md`, `docs/title-update-3.md`,
-`docs/enhancements-reference.md`). The distribution NRO carries none of the game's shaders but the ones the game
+See [app/README.md](app/README.md) (reNut's) and [docs/](docs/) for the Switch port:
+[docs/deko3d-renderer.md](docs/deko3d-renderer.md), [docs/title-update-3.md](docs/title-update-3.md),
+[docs/enhancements-reference.md](docs/enhancements-reference.md). The release NRO carries only the shaders the game
 makes at run time; the web installer makes the rest.
 
-## Credits
+## Credits and license
 
 - [reNut](https://github.com/masterspike52/reNut) by masterspike52: the recompilation and its renderer, used here with
   the author's permission.
 - [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) and its contributors.
 - [plume](https://github.com/renderbag/plume) (rendering abstraction), with a deko3d back end written for this port.
 - deko3d and uam by fincs and the devkitPro team; libnx; Mesa's GLSL compiler inside uam.
-- XenosRecomp (hedge-dev) in reNut's version.
-- Work shared between sister ports: sa2-nx, futari-nx, sasrt-nx, katamari-nx, kameo-nx and the Torchlight port's findings (2 MB
-  blocks), the ports of the ultimate base (rr6-nx, vivapinata-nx, mk9-nx, fnxf_xiii, feedingfrenzy-nx and the others its
-  docs/ultimate/ names), rr6-nx's and culdcept-nx's packed game files, Opus music and H.265 movies, UnleashedRecomp-NX, NetherSX2_nx's
-  four-core layout, nfsmw-nx (StevensND), battd_nx; keflings-nx-installer's Xbox 360 package reader in the web
-  installer. Details in `docs/` and in each file's comments.
-- Banjo-Kazooie: Nuts & Bolts is © Microsoft and Rare. This project is not affiliated with them.
+- XenosRecomp (hedge-dev), in reNut's version.
+- Sister ports: sa2-nx, futari-nx, sasrt-nx, katamari-nx, kameo-nx and the Torchlight port's findings (2 MB blocks);
+  the ports of the ultimate base (rr6-nx, vivapinata-nx, mk9-nx, fnxf_xiii, feedingfrenzy-nx and the others its
+  docs/ultimate/ names); rr6-nx's and culdcept-nx's packed game files, Opus music and H.265 movies;
+  UnleashedRecomp-NX; NetherSX2_nx's four-core layout; nfsmw-nx (StevensND); battd_nx; keflings-nx-installer's Xbox
+  360 package reader in the web installer. Details in `docs/` and in each file's comments.
+
+See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Banjo-Kazooie: Nuts & Bolts is © Microsoft
+and Rare. This project is not affiliated with them.
