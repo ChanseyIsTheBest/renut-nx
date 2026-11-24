@@ -2,7 +2,7 @@
 
 <h1 align=center>Banjo-Kazooie: Nuts &amp; Bolts on the Nintendo Switch</h1>
 
-<p align=center><b>renut-nx 1.0.3</b> · <a href="https://chanseyisthebest.github.io/renut-nx-webinstaller/">web installer</a> · <a href="https://github.com/ChanseyIsTheBest/renut-nx/releases/tag/v1.0.3">release</a></p>
+<p align=center><b>renut-nx 1.0.4</b> · <a href="https://chanseyisthebest.github.io/renut-nx-webinstaller/">web installer</a> · <a href="https://github.com/ChanseyIsTheBest/renut-nx/releases/tag/v1.0.4">release</a></p>
 
 An unofficial Switch port (formerly banjo-nx) of [reNut](https://github.com/masterspike52/reNut), masterspike52's
 static recompilation of the Xbox 360 version of **Banjo-Kazooie: Nuts & Bolts**, built on the
@@ -27,8 +27,11 @@ Needs Atmosphère and Sphaira.
 
 Start it through the forwarder: that is how it gets all four CPU cores (a title takeover can't).
 
+**Updating from 1.0.3:** replace `switch/renut-nx/renut-nx.nro` with the release's `renut-nx.nro`. Your shader files,
+settings and saves stay as they are.
+
 **Updating from 1.0.2 or older:** make the package again with the web installer (the old shaders don't work with
-1.0.3). Delete the old `switch/renut-nx/game_root/` before extracting and keep a copy of your `renut.toml` if you
+1.0.3 and later). Delete the old `switch/renut-nx/game_root/` before extracting and keep a copy of your `renut.toml` if you
 changed it; saves in `switch/renut-nx/renut/` stay where they are.
 
 Features:
