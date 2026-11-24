@@ -242,9 +242,20 @@ enum DrawField : u32 {
   kFieldVertexFetch = 1u << 17,
   kFieldsAll = (1u << 18) - 1,
 };
+// culdcept-nx (2026-11-19): the device's own vertex declaration (the one SetFVF builds inside the device:
+// kDeviceDeclarationOffset in draw.cpp, its elements from +52, at most 15 of 12 bytes). A new FVF rewrites it in place,
+// the declaration word at kDeviceOffsetVertexDeclaration keeping its address, so its bytes count as the declaration
+// too: the fast draw kept the draw before's vertex layout for Culdcept Saga's board panels (FVF quads), which then drew
+// wrong or not at all on deko3d (found with a field-forcing bisection in Ryujinx: forcing kFieldDecl alone brought them
+// back).
+// banjo-nx (2026-11-24, the base sync, port 213): N&B's title update, +0x2FA8 (the base: Katamari's +0x2F98), as
+// draw.cpp's kDeviceDeclarationOffset.
+constexpr u32 kDeviceOwnDeclarationBegin = 0x2FA8, kDeviceOwnDeclarationEnd = 0x2FA8 + 52 + 15 * 12;
 constexpr u32 FieldOfOffset(u32 at) {
   if (at < 0x480)
     return 0;
+  if (at >= kDeviceOwnDeclarationBegin && at < kDeviceOwnDeclarationEnd)
+    return kFieldDecl | kFieldTail;
   if (at < 0x6F0)
     return kFieldFetch;
   if (at < 0x780)

@@ -205,8 +205,13 @@ endif()
 
 
 
+# renut-ultimate (2026-11-20, port 193): the game's name in the build stamp (src/build_stamp.cpp) and the NRO's title. A
+# port sets its own here. banjo-nx: no "&" (cmd.exe would split the post-build command).
+set(RENUT_GAME_NAME "Banjo-Kazooie Nuts and Bolts")
+
 set(RENUT_SOURCES
     src/main.cpp
+    src/build_stamp.cpp  # port 193: the build stamp, the first line of every log (cmake/build_stamp.cmake)
     src/renut_engine/hooks.cpp
     src/renut_engine/StopNSwap.cpp
 	src/renut_engine/frameHooks.cpp
@@ -301,6 +306,24 @@ list(APPEND RENUT_SOURCES icon/app.rc)
 else()
     add_executable(renut ${RENUT_SOURCES})
 endif()
+
+# Port 193 (TFU-nx's): the build stamp header, rewritten on every build when its text changes (a custom target with no
+# output runs every time; the script leaves the header alone when the commit is the same).
+if(REXGLUE_PLATFORM_SWITCH)
+    set(RENUT_BUILD_KIND "switch")
+else()
+    set(RENUT_BUILD_KIND "pc")
+endif()
+set(RENUT_BUILD_STAMP_DIR "${CMAKE_CURRENT_BINARY_DIR}/build_stamp")
+add_custom_target(renut_build_stamp
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${RENUT_BUILD_STAMP_DIR}"
+    COMMAND "${CMAKE_COMMAND}" "-DOUT=${RENUT_BUILD_STAMP_DIR}/build_stamp.h" "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}/.."
+            "-DKIND=${RENUT_BUILD_KIND}" "-DNAME=${RENUT_GAME_NAME}" -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_stamp.cmake"
+    BYPRODUCTS "${RENUT_BUILD_STAMP_DIR}/build_stamp.h"
+    VERBATIM)
+add_dependencies(renut renut_build_stamp)
+target_include_directories(renut PRIVATE "${RENUT_BUILD_STAMP_DIR}")
+set_source_files_properties(src/build_stamp.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
 # GPU_PLUGINS stages the emulated-GPU backend (rexgpu-xenos.dll) next to the exe.
 # It is only used when the gpu_plugin cvar is "xenos"; empty means no GPU at all
@@ -968,20 +991,22 @@ foreach(_dep imgui xxhash renderdoc)
     endif()
 endforeach()
 
-# renut-nx (2026-11-22, culdcept-nx's, credit it): src/cpu/banjo_wmv_ffmpeg.cpp calls FFmpeg's WMV3 decoder itself
-# (sdk/thirdparty/FFmpeg/config.h switches it on: config_masseffect_wmv3.h).
+# renut-ultimate (2026-11-23; vivapinata-nx's / banjo-nx's / culdcept-nx's block, credit them): src/cpu/banjo_wmv_ffmpeg.cpp
+# calls FFmpeg's WMV3 decoder itself (sdk/thirdparty/FFmpeg/config.h switches it on: config_masseffect_wmv3.h).
 if(TARGET libavcodec)
     target_link_libraries(renut PRIVATE libavcodec libavutil)
 endif()
 
-# renut-nx (2026-11-22, culdcept-nx's tools/switch/nxvideo, credit it): the installer's H.265 movies on the Switch's
-# NVDEC: devkitPro's switch-ffmpeg 7.1 (averne's nvtegra backend) linked with the shim into one object whose only global
-# symbols are nxv_*, so FFmpeg 7.1's names never meet the SDK's FFmpeg (XMA, the WMV3 path). Built when devkitPro's
-# FFmpeg has nvtegra.
+# Base port 259 (rr6-nx / sasrt-nx, 2026-11-21; culdcept-nx's nxvideo): the H.265 movies' decoder on the Switch's NVDEC,
+# tools/switch/nxvideo: devkitPro's switch-ffmpeg 7.1 (built with averne's nvtegra backend) linked with the shim into one
+# object whose only global symbols are nxv_*, so FFmpeg 7.1's names never meet the SDK's FFmpeg (the XMA audio). Made
+# into the static library renut_nxvideo, so only a port whose movie player calls nxv_* takes it into the NRO (the base
+# has none: each game's player is its own, as rr6-nx's SFD and sasrt-nx's USM). Built when devkitPro's FFmpeg has
+# nvtegra; RENUT_NXVIDEO=1 is then defined for the app.
 if(REXGLUE_PLATFORM_SWITCH)
-    option(BANJO_NXVIDEO "The movies' H.265 / NVDEC decoder (tools/switch/nxvideo)" ON)
+    option(RENUT_NXVIDEO "The H.265 movies' NVDEC decoder (tools/switch/nxvideo)" ON)
     set(_nxv_pl "${DEVKITPRO}/portlibs/switch")
-    if(BANJO_NXVIDEO AND EXISTS "${_nxv_pl}/include/libavutil/hwcontext_nvtegra.h")
+    if(RENUT_NXVIDEO AND EXISTS "${_nxv_pl}/include/libavutil/hwcontext_nvtegra.h")
         set(_nxv_src "${CMAKE_CURRENT_SOURCE_DIR}/../tools/switch/nxvideo")
         set(_nxv_out "${CMAKE_CURRENT_BINARY_DIR}/nxvideo")
         file(MAKE_DIRECTORY "${_nxv_out}")
@@ -1000,9 +1025,11 @@ if(REXGLUE_PLATFORM_SWITCH)
             COMMENT "nxvideo: FFmpeg 7.1 with nvtegra in one object, only nxv_* global"
             VERBATIM)
         set_source_files_properties("${_nxv_out}/nxvideo.o" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
-        target_sources(renut PRIVATE "${_nxv_out}/nxvideo.o")
-        target_include_directories(renut PRIVATE "${_nxv_src}")
-        target_compile_definitions(renut PRIVATE BANJO_NXVIDEO=1)
+        add_library(renut_nxvideo STATIC "${_nxv_out}/nxvideo.o")
+        set_target_properties(renut_nxvideo PROPERTIES LINKER_LANGUAGE C)
+        target_include_directories(renut_nxvideo INTERFACE "${_nxv_src}")
+        target_link_libraries(renut PRIVATE renut_nxvideo)
+        target_compile_definitions(renut PRIVATE RENUT_NXVIDEO=1)
         message(STATUS "nxvideo: H.265 / NVDEC movies (devkitPro's switch-ffmpeg with nvtegra)")
     endif()
 endif()
@@ -1019,7 +1046,7 @@ if(REXGLUE_PLATFORM_SWITCH)
         set(RENUT_ICON_ARG ICON "${RENUT_ICON}")
     endif()
     rexglue_switch_add_nro(renut
-        NAME "Banjo-Kazooie Nuts and Bolts"  # no "&": cmd.exe would split the post-build command
+        NAME "${RENUT_GAME_NAME}"  # port 193: set once, above (no "&": cmd.exe would split the post-build command)
         AUTHOR "ChanseyIsTheBest"  # 2026-11-01, the public build (the user's choice)
         VERSION "1.0.3"  # 2026-11-23: the final release on the ultimate base
         ${RENUT_ICON_ARG})

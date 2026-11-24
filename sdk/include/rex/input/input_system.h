@@ -88,10 +88,9 @@ std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode);
 
 /// banjo-nx (2026-11-22, test automation): the renderer's draws in the frame just ended, for input_script's wait items
 /// ("SECONDS:W<draws>": the script's clock stops there until frames of at least that many draws have come for 3 s).
-/// One relaxed store a frame.
+/// One relaxed store a frame. A function, not an inline store (2026-11-24): on the PC the SDK's runtime is a DLL,
+/// and the app cannot link to its data without dllimport (the PC link failed on the variable).
 extern std::atomic<uint32_t> g_script_frame_draws;
-inline void NoteScriptFrameDraws(uint32_t draws) noexcept {
-  g_script_frame_draws.store(draws, std::memory_order_relaxed);
-}
+void NoteScriptFrameDraws(uint32_t draws) noexcept;
 
 }  // namespace rex::input

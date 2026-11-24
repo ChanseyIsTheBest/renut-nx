@@ -21,13 +21,59 @@
 #include <exception>
 
 #include <cxxabi.h>
+#include <malloc.h>
+#include <unistd.h>
+
+#include <cstdint>
+#include <cstring>
+#include <new>
 
 #include <switch.h>
 
 extern "C" void RexSwitchCrashLog(const char* reason, const ThreadExceptionDump* ctx, u64 stack,
                                   u64 pc);
 
+extern "C" {
+extern char *fake_heap_start, *fake_heap_end;  // libnx: the malloc heap's bounds (plume's GPU region lowers the end)
+extern void* __malloc_av_[];                   // newlib: [2] is malloc's top chunk (plume reads it the same way)
+}
+
 namespace {
+
+// sasrt-nx 1.0.1 (2026-11-24): the heap's end as __libnx_initheap set it, before plume's GPU region took its top.
+char* g_heap_initial_end = nullptr;
+
+/*
+ * sasrt-nx 1.0.1 (2026-11-24, the docked bad_alloc of 1.0.0: out/console_runs/c1124_docked_crash): with logging off the
+ * crash log said nothing about the heap, so whether the heap was used up or malloc failed with room left (Blur's sbrk
+ * race, fixed by the locked _sbrk_r in app/src/blur_small_alloc.cpp) could not be told. A bad_alloc now adds the
+ * heap's figures to the crash reason:
+ *   - room: what sbrk can still give (the heap's end minus the break);
+ *   - malloc's arena, the bytes in use and the free pieces inside it (mallinfo, under malloc's lock), and its top chunk;
+ *   - where the top chunk ends against the break (+0 when they agree; otherwise something moved the break under malloc);
+ *   - the GPU region plume has taken from the heap's top, of the heap's whole size.
+ * Large room or a top chunk that does not end at the break: not a shortage. Little room and few free pieces: a shortage.
+ */
+void AppendHeapFigures(char* reason, size_t cap) {
+  const struct mallinfo mi = mallinfo();
+  char* const brk = static_cast<char*>(sbrk(0));
+  char* const end = fake_heap_end;
+  char* const top = static_cast<char*>(__malloc_av_[2]);
+  const double mb = 1.0 / (1024.0 * 1024.0);
+  const double room = (brk && end > brk) ? double(end - brk) * mb : 0.0;
+  const long long top_end_vs_break =
+      (top && brk) ? (long long)((top + mi.keepcost) - brk) : 0;
+  const double region = (g_heap_initial_end && g_heap_initial_end > end) ? double(g_heap_initial_end - end) * mb : 0.0;
+  const double whole = (g_heap_initial_end && fake_heap_start) ? double(g_heap_initial_end - fake_heap_start) * mb : 0.0;
+  const size_t used = std::strlen(reason);
+  if (used + 1 >= cap) return;
+  std::snprintf(reason + used, cap - used,
+                "\nheap at the failure: room %.1f MB (the heap's end minus the break); malloc's arena %.1f MB, in use "
+                "%.1f MB, free pieces %.1f MB, top chunk %.1f MB ending at the break %+lld bytes; GPU region %.1f MB "
+                "of the heap's %.1f MB",
+                room, double(mi.arena) * mb, double(mi.uordblks) * mb, double(mi.fordblks) * mb,
+                double(mi.keepcost) * mb, top_end_vs_break, region, whole);
+}
 
 /*
  * An uncaught exception. devkitA64's libstdc++ handler writes nothing
@@ -44,6 +90,9 @@ namespace {
     const char* type_name = demangled ? demangled : (type ? type->name() : "?");
     try {
       std::rethrow_exception(current);
+    } catch (const std::bad_alloc& e) {
+      std::snprintf(reason, sizeof(reason), "std::terminate: %s: %s", type_name, e.what());
+      AppendHeapFigures(reason, sizeof(reason));  // sasrt-nx 1.0.1
     } catch (const std::exception& e) {
       std::snprintf(reason, sizeof(reason), "std::terminate: %s: %s", type_name, e.what());
     } catch (...) {
@@ -122,10 +171,9 @@ void __libnx_initheap(void) {
     }
     if (R_FAILED(rc)) diagAbortWithResult(MAKERESULT(Module_Libnx, LibnxError_HeapAllocFailed));
   }
-  extern char* fake_heap_start;
-  extern char* fake_heap_end;
   fake_heap_start = static_cast<char*>(addr);
   fake_heap_end = static_cast<char*>(addr) + size;
+  g_heap_initial_end = fake_heap_end;  // sasrt-nx 1.0.1: for the bad_alloc's heap figures
 }
 
 /*

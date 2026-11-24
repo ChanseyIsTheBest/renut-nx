@@ -34,6 +34,11 @@
 #include <rex/stream.h>
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
+#include <cmath>
+
+#include <rex/filesystem/xmo.h>  // culdcept-nx (2026-11-20)
+
+#include "xmo_opus.h"
 
 #if defined(__aarch64__) && !REX_ARCH_AMD64
 #include <arm_neon.h>
@@ -344,10 +349,209 @@ using stream::BitStream;
 const uint32_t XmaContext::kBitsPerPacketHeader;
 const uint32_t XmaContext::kOutputMaxSizeBytes;
 
+/*
+ * culdcept-nx (2026-11-20, the user: re-encode the game's audio to Opus, music at 128 kbit/s): NAME.xmo frames
+ * (rex/filesystem/xmo.h). The game and this emulation walk the XMA packets and frames as before (loops, subframes and
+ * the output are theirs); the frame's packet has a tag naming the sound and the packet, the frame's position in the
+ * sound gives its index k, and its samples are [512 k, 512 k + 512) of the sound's Opus stream after its pre-skip.
+ * Each context keeps one Opus decoder, which goes on from where the last frame left it; any other frame (a loop back,
+ * a jump) puts it 320 ms of packets before the frame and decodes up to it. Measured on the game's music and effects (52
+ * seeks): the first frame after a seek against the frames decoded in order, 80 ms (RFC 7845's pre-roll) 20-25 dB, 160
+ * ms 45-49 dB, 320 ms 92 dB or better (a loop's seam as clean as the rest; Ryujinx xmo4, bgm_01_01's loop at frame
+ * 745, had 24.6 dB at 80 ms).
+ *
+ * sasrt-nx (2026-11-21, the user: "please compress all the videos and audio"; NAME.xmop, SASRT's Wwise packages): the
+ * Opus decoder at the sound's Opus rate (24 kHz sounds: 24 kHz Opus, 480-sample packets), and a 44.1 kHz sound's
+ * frames resampled from its 48 kHz Opus (Opus has no 44.1 kHz).
+ */
+namespace {
+constexpr uint32_t kXmoPreroll = 16;         // packets: 320 ms
+constexpr uint32_t kXmoDecodeThrough = 25;   // a jump ahead of up to this many packets is decoded through
+constexpr int kXmoMaxPacketSamples = 5760;   // 120 ms at 48 kHz, Opus's longest packet
+std::atomic<uint32_t> g_xmo_warnings{0};
+std::atomic<uint32_t> g_xmo_started{0};  // the first sounds played from Opus are logged
+
+// sasrt-nx (2026-11-21): a 44.1 kHz sound's Opus is 48 kHz (Opus has no 44.1 kHz): output sample n is the 48 kHz
+// stream at n x 160 / 147, through a 16-tap Blackman-windowed sinc low-passed at 22.05 kHz, one of 147 phases.
+constexpr int kResampleTaps = 8;  // a side
+constexpr uint32_t kResampleUp = 160, kResampleDown = 147;  // 48000 / 44100
+struct ResampleTable {
+  float w[kResampleDown][2 * kResampleTaps];
+  ResampleTable() {
+    const double cutoff = double(kResampleDown) / double(kResampleUp);  // the output's Nyquist in input terms
+    for (uint32_t ph = 0; ph < kResampleDown; ++ph) {
+      const double frac = double(ph) / double(kResampleDown);
+      double sum = 0;
+      for (int k = 0; k < 2 * kResampleTaps; ++k) {
+        const double t = double(k - (kResampleTaps - 1)) - frac;
+        const double x = 3.14159265358979323846 * cutoff * t;
+        const double sinc = std::abs(x) < 1e-9 ? 1.0 : std::sin(x) / x;
+        const double u = t / double(kResampleTaps);  // -1..1 over the window
+        const double win = std::abs(u) >= 1.0 ? 0.0
+                                              : 0.42 + 0.5 * std::cos(3.14159265358979323846 * u) +
+                                                    0.08 * std::cos(2.0 * 3.14159265358979323846 * u);
+        w[ph][k] = float(sinc * win);
+        sum += w[ph][k];
+      }
+      for (int k = 0; k < 2 * kResampleTaps; ++k) w[ph][k] = float(w[ph][k] / sum);  // unity gain at DC
+    }
+  }
+};
+const ResampleTable& GetResampleTable() {
+  static const ResampleTable table;
+  return table;
+}
+}  // namespace
+
+struct XmaContext::XmoState {
+  std::shared_ptr<const rex::filesystem::XmoSound> sound;
+  rex::audio::xmo_opus::Decoder* decoder = nullptr;
+  int decoder_channels = 0;
+  uint32_t decoder_rate = 0;
+  bool positioned = false;   // the decoder goes on from next_packet, and pcm holds [pcm_start, pcm_start + pcm samples)
+  uint32_t next_packet = 0;
+  uint64_t pcm_start = 0;    // a sample of the stream (the pre-skip counted), at the Opus rate
+  std::vector<float> pcm;    // interleaved, the sound's channels
+  std::vector<float> packet_pcm;
+  uint32_t missing_id = 0;   // the sound last found unreadable (logged once)
+};
+
+int XmaContext::DecodeXmoFrame(const uint8_t* packet, uint32_t frame_offset, bool stereo) {
+  if (!rex::filesystem::AnyXmoSound()) return -1;  // base port 259: no .xmo / .xmop opened
+  uint32_t id = 0, packet_index = 0;
+  if (!rex::filesystem::ReadXmoPacketTag(packet, &id, &packet_index) || !rex::filesystem::XmoSoundKnown(id)) {
+    return -1;
+  }
+  if (!xmo_) xmo_ = new XmoState();
+  XmoState& x = *xmo_;
+  // The frame cache keys a frame by the one before it: the next XMA frame of this context has none it knows.
+  cache_prev_ = CachePrev::kUnknown;
+  cache_behind_ = false;
+
+  if (!x.sound || x.sound->id != id) {
+    x.sound = rex::filesystem::FindXmoSound(id);
+    x.positioned = false;
+    if (x.sound && g_xmo_started.fetch_add(1, std::memory_order_relaxed) < 40)
+      REXAPU_INFO("[xmo] context {}: sound {:08X} from Opus ({} ch, {} Hz from {} Hz Opus, {} frames, {} Opus packets)",
+                  id_, id, x.sound->channels, x.sound->sample_rate, x.sound->opus_rate, x.sound->frame_pos.size(),
+                  x.sound->opus_offset.size() - 1);
+  }
+  const rex::filesystem::XmoSound* s = x.sound.get();
+  const int channels = s ? s->channels : 0;
+  const int64_t found = s ? rex::filesystem::FindXmoFrame(
+                                *s, uint64_t(packet_index) * kBitsPerPacket + frame_offset) : -1;
+  if (s && found < 0) {
+    if (g_xmo_warnings.fetch_add(1, std::memory_order_relaxed) < 20)
+      REXAPU_WARN("[xmo] context {}: sound {:08X} has no frame at packet {} bit {}: silent", id_, id, packet_index,
+                  frame_offset);
+    s = nullptr;
+  }
+  const uint32_t index = found < 0 ? 0 : uint32_t(found);
+  if (s && (!x.decoder || x.decoder_channels != channels || x.decoder_rate != s->opus_rate)) {
+    rex::audio::xmo_opus::Destroy(x.decoder);
+    x.decoder = rex::audio::xmo_opus::Create(channels, int(s->opus_rate));
+    x.decoder_channels = x.decoder ? channels : 0;
+    x.decoder_rate = x.decoder ? s->opus_rate : 0;
+    x.positioned = false;
+  }
+  alignas(16) float planes[2][kSamplesPerFrame] = {};
+  if (!s || !x.decoder) {
+    if (x.missing_id != id && g_xmo_warnings.fetch_add(1, std::memory_order_relaxed) < 20)
+      REXAPU_WARN("[xmo] context {}: sound {:08X} has no Opus to play: silent", id_, id);
+    x.missing_id = id;
+  } else {
+    const uint32_t packet_samples = s->opus_rate / 50;  // 20 ms (the installer's packets)
+    const uint32_t packets = uint32_t(s->opus_offset.size() - 1);
+    const bool resample = s->sample_rate != s->opus_rate;  // 44.1 kHz from 48 kHz
+    // The stream samples (at the Opus rate, the pre-skip counted) this frame needs: [a, b).
+    const uint64_t n0 = uint64_t(index) * kSamplesPerFrame;  // the frame's first sample at the XMA's rate
+    uint64_t a, b;
+    if (!resample) {
+      a = n0 + s->pre_skip;
+      b = a + kSamplesPerFrame;
+    } else {
+      const uint64_t first = n0 * kResampleUp / kResampleDown, last = (n0 + kSamplesPerFrame - 1) * kResampleUp / kResampleDown;
+      a = first + s->pre_skip >= uint64_t(kResampleTaps - 1) ? first + s->pre_skip - (kResampleTaps - 1) : 0;
+      b = last + s->pre_skip + kResampleTaps + 1;
+    }
+    const uint64_t pcm_end = x.pcm_start + x.pcm.size() / channels;
+    if (!x.positioned || a < x.pcm_start || a > pcm_end + uint64_t(kXmoDecodeThrough) * packet_samples) {
+      rex::audio::xmo_opus::Reset(x.decoder);
+      const uint32_t p = uint32_t(std::min<uint64_t>(a / packet_samples, packets));
+      x.next_packet = p > kXmoPreroll ? p - kXmoPreroll : 0;
+      x.pcm_start = uint64_t(x.next_packet) * packet_samples;
+      x.pcm.clear();
+      x.positioned = true;
+    }
+    x.packet_pcm.resize(size_t(kXmoMaxPacketSamples) * channels);
+    while (x.pcm_start + x.pcm.size() / channels < b && x.next_packet < packets) {
+      const uint32_t at = s->opus_offset[x.next_packet], size = s->opus_offset[x.next_packet + 1] - at;
+      int n = rex::audio::xmo_opus::Decode(x.decoder, s->opus.data() + at, int(size), x.packet_pcm.data(),
+                                          kXmoMaxPacketSamples);
+      if (n < 0) {
+        if (g_xmo_warnings.fetch_add(1, std::memory_order_relaxed) < 20)
+          REXAPU_WARN("[xmo] context {}: sound {:08X} packet {}: Opus error {}: silent", id_, id, x.next_packet, n);
+        n = int(packet_samples);
+        std::fill_n(x.packet_pcm.begin(), size_t(n) * channels, 0.0f);
+      }
+      x.pcm.insert(x.pcm.end(), x.packet_pcm.begin(), x.packet_pcm.begin() + size_t(n) * channels);
+      ++x.next_packet;
+    }
+    // Keep from this frame's first input on (it may be asked for again: a loop of one frame).
+    if (a > x.pcm_start) {
+      const size_t drop = size_t(std::min<uint64_t>(a - x.pcm_start, x.pcm.size() / channels)) * channels;
+      x.pcm.erase(x.pcm.begin(), x.pcm.begin() + drop);
+      x.pcm_start += drop / channels;
+    }
+    const float* in = x.pcm.data();
+    const uint64_t have_end = x.pcm_start + x.pcm.size() / channels;  // short at the stream's end
+    if (!resample) {
+      const size_t have = size_t(std::min<uint64_t>(kSamplesPerFrame, have_end > a ? have_end - a : 0));
+      const float* f = in + size_t(a - x.pcm_start) * channels;
+      for (size_t i = 0; i < have; ++i) {
+        if (channels == 2) {
+          planes[0][i] = f[i * 2];
+          planes[1][i] = f[i * 2 + 1];
+        } else {
+          planes[0][i] = planes[1][i] = f[i];
+        }
+      }
+    } else {
+      const ResampleTable& rt = GetResampleTable();
+      for (uint32_t i = 0; i < kSamplesPerFrame; ++i) {
+        const uint64_t num = (n0 + i) * kResampleUp;
+        const int64_t ip = int64_t(num / kResampleDown) + s->pre_skip;  // stream index of the tap at t = 0
+        const float* w = rt.w[num % kResampleDown];
+        float acc0 = 0.0f, acc1 = 0.0f;
+        for (int k = 0; k < 2 * kResampleTaps; ++k) {
+          const int64_t at = ip + k - (kResampleTaps - 1);
+          if (at < int64_t(x.pcm_start) || at >= int64_t(have_end)) continue;  // before the stream, or past its end
+          const float* f = in + size_t(at - int64_t(x.pcm_start)) * channels;
+          acc0 += w[k] * f[0];
+          if (channels == 2) acc1 += w[k] * f[1];
+        }
+        planes[0][i] = acc0;
+        planes[1][i] = channels == 2 ? acc1 : acc0;
+      }
+    }
+    if (!stereo && channels == 2) {
+      for (size_t i = 0; i < kSamplesPerFrame; ++i) planes[0][i] = 0.5f * (planes[0][i] + planes[1][i]);
+    }
+  }
+  const uint8_t* samples[2] = {reinterpret_cast<const uint8_t*>(planes[0]),
+                               reinterpret_cast<const uint8_t*>(planes[1])};
+  ConvertFrame(samples, stereo, raw_frame_.data());
+  return 1;
+}
+
 XmaContext::XmaContext()
     : work_completion_event_(rex::thread::Event::CreateAutoResetEvent(false)) {}
 
 XmaContext::~XmaContext() {
+  if (xmo_) {  // culdcept-nx (2026-11-20)
+    rex::audio::xmo_opus::Destroy(xmo_->decoder);
+    delete xmo_;
+  }
   if (av_context_) {
     avcodec_free_context(&av_context_);
   }
@@ -666,12 +870,17 @@ bool XmaContext::DecodeFrame(int prepared, int sample_rate, bool stereo) {
       chain_ok = true;
     }
   }
-  // blur-nx (2026-11-13, M-37): the report's clock read every 64 frames of a thread, not every frame.
-  if (static thread_local uint32_t frames = 0; (++frames & 63) == 0) {
-    static std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
-    const auto now = std::chrono::steady_clock::now();
-    if (now - last >= std::chrono::seconds(10)) {
-      last = now;
+  // blur-nx (2026-11-13, M-37): the report's clock read every 64 frames, atomic across worker/fallback callers.
+  if (static std::atomic<uint32_t> frames{0}; (frames.fetch_add(1, std::memory_order_relaxed) & 63) == 0) {
+    static std::atomic<int64_t> last_ns{0};
+    const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count();
+    int64_t prev_ns = last_ns.load(std::memory_order_relaxed);
+    if (prev_ns == 0) {
+      last_ns.compare_exchange_strong(prev_ns, now_ns, std::memory_order_relaxed);
+    } else if (now_ns - prev_ns >= 10'000'000'000LL &&
+               last_ns.compare_exchange_strong(prev_ns, now_ns, std::memory_order_relaxed)) {
       if (const std::string r = XmaFrameCacheReport(); !r.empty()) REXAPU_INFO("{}", r);
     }
   }
@@ -703,8 +912,8 @@ bool XmaContext::DecodeFrame(int prepared, int sample_rate, bool stereo) {
           ++c.chain_verified;
           if (std::memcmp(raw_frame_.data(), chain_raw_.data(), pcm_bytes) != 0) {
             ++c.chain_differ;
-            static uint32_t logged = 0;
-            if (logged++ < 16)
+            static std::atomic<uint32_t> logged{0};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 16)
               REXAPU_ERROR("banjo_xma_frame_cache_chain_verify: context {}: a frame the cache answered differs from "
                            "the full chain's", id_);
           }
@@ -744,8 +953,8 @@ bool XmaContext::DecodeFrame(int prepared, int sample_rate, bool stereo) {
       ++c.chain_verified;
       if (std::memcmp(raw_frame_.data(), chain_raw_.data(), pcm_bytes) != 0) {
         ++c.chain_differ;
-        static uint32_t logged = 0;
-        if (logged++ < 16)
+        static std::atomic<uint32_t> logged{0};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 16)
           REXAPU_ERROR("banjo_xma_frame_cache_chain_verify: context {}: a frame after the one-frame catch-up differs "
                        "from the full chain's", id_);
       }
@@ -755,8 +964,8 @@ bool XmaContext::DecodeFrame(int prepared, int sample_rate, bool stereo) {
       ++c.verified;
       if (std::memcmp(raw_frame_.data(), verify_pcm.data(), pcm_bytes) != 0) {
         ++c.differ;
-        static uint32_t logged = 0;
-        if (logged++ < 16)
+        static std::atomic<uint32_t> logged{0};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 16)
           REXAPU_ERROR("banjo_xma_frame_cache_verify: context {}: a cached frame differs from FFmpeg's decode", id_);
       }
     }
@@ -981,6 +1190,7 @@ bool XmaContext::Work() {
   }
 
   uint8_t silence_reason = 0;  // Measurement only
+  uint32_t zero_output_iters = 0;
   while (remaining_subframe_blocks_in_output_buffer_ >= minimum_subframe_decode_count) {
     const uint32_t previous_offset = data.input_buffer_read_offset;
     const uint32_t previous_buffer = data.current_buffer;
@@ -990,6 +1200,14 @@ bool XmaContext::Work() {
     Decode(&data);
     const uint32_t written = Consume(&output_rb, &data);
     output_bytes_written += written;
+    if (written != 0) {
+      zero_output_iters = 0;
+    } else if (++zero_output_iters >= 256) {
+      // Guard against pathological loops (e.g. loop_count=255 over undecodable frames) holding lock_.
+      data.error_status = 4;
+      silence_reason = 4;
+      break;
+    }
 
     // The last packet can leave several decoded subframes. If this returns with
     // PCM pending, the consumer may wait for a full block without advancing the
@@ -1130,6 +1348,7 @@ void XmaContext::ResetDecoderState() {
   current_frame_remaining_subframes_ = 0;
   loop_frame_output_limit_ = 0;
   loop_start_skip_pending_ = false;
+  if (xmo_) xmo_->positioned = false;  // culdcept-nx (2026-11-20): a new sound (its decoder is kept)
 }
 
 void XmaContext::Disable() {
@@ -1319,12 +1538,15 @@ kPacketInfo XmaContext::GetPacketInfo(uint8_t* packet, uint32_t frame_offset) {
     packet_info.current_frame_size_ = first_frame_offset - frame_offset;
   }
 
+  bool terminated = false;
   while (true) {
     if (stream.BitsRemaining() < kBitsPerFrameHeader) {
       // A header that starts here may continue in the next packet. Counting it
       // avoids marking the previous frame as the last one and skipping this one.
       // Decode will join both fragments to get its full size.
-      if (stream.BitsRemaining()) {
+      if (stream.BitsRemaining() &&
+          (!xma::IsPacketXma2Type(packet) ||
+           packet_info.frame_count_ < xma::GetPacketFrameCount(packet))) {
         if (stream.offset_bits() == frame_offset) {
           packet_info.current_frame_ = packet_info.frame_count_;
         }
@@ -1335,6 +1557,7 @@ kPacketInfo XmaContext::GetPacketInfo(uint8_t* packet, uint32_t frame_offset) {
 
     const uint64_t frame_size = stream.Peek(kBitsPerFrameHeader);
     if (frame_size == 0 || frame_size == xma::kMaxFrameLength) {
+      terminated = true;
       break;
     }
 
@@ -1352,11 +1575,12 @@ kPacketInfo XmaContext::GetPacketInfo(uint8_t* packet, uint32_t frame_offset) {
     stream.Advance(frame_size - 1);
 
     if (stream.Read(1) == 0) {
+      terminated = true;
       break;
     }
   }
 
-  if (xma::IsPacketXma2Type(packet)) {
+  if (!terminated && xma::IsPacketXma2Type(packet)) {
     const uint8_t xma2_frame_count = xma::GetPacketFrameCount(packet);
     if (xma2_frame_count > packet_info.frame_count_) {
       if (packet_info.current_frame_size_ == 0) {
@@ -1641,8 +1865,15 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
     combined.SetOffset(relative_offset - kBitsPerPacketHeader);
 
     uint64_t frame_size = combined.Peek(kBitsPerFrameHeader);
-    if (frame_size == xma::kMaxFrameLength) {
-      data->error_status = 4;
+    if (frame_size == 0 || frame_size == xma::kMaxFrameLength) {
+      if (frame_size == xma::kMaxFrameLength &&
+          kBitsPerPacket - relative_offset >= kBitsPerFrameHeader) {
+        data->error_status = 4;
+        return;
+      }
+      if (!LoopWholeBuffer(data, next_packet_index, current_input_packet_count)) {
+        AdvanceInputPacket(data, next_packet_index);
+      }
       return;
     }
     packet_info.current_frame_size_ = static_cast<uint32_t>(frame_size);
@@ -1656,7 +1887,9 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
 
   if (bits_to_copy == 0) {
     REXAPU_ERROR("XmaContext {}: There are no bits to copy!", id());
-    SwapInputBuffer(data);
+    if (!LoopWholeBuffer(data, next_packet_index, current_input_packet_count)) {
+      AdvanceInputPacket(data, next_packet_index);
+    }
     return;
   }
 
@@ -1705,6 +1938,11 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
   // blur-nx (2026-11-13, M-03): no raw_frame_.fill(0): DecodeFrame writes every byte that is read (ConvertFrame the
   // whole 512 samples of each channel, an answer the node's same bytes), and a frame that fails is not output.
 
+  // culdcept-nx (2026-11-20): a frame of a NAME.xmo takes its samples from Opus (DecodeXmoFrame); FFmpeg is not asked.
+  bool decoded = false;
+  if (DecodeXmoFrame(packet, relative_offset, bool(data->is_stereo)) > 0) {
+    decoded = true;
+  } else {
   const int prepared = PrepareDecoder(data->sample_rate, bool(data->is_stereo));
   if (prepared < 0) {
     data->error_status = 4;
@@ -1712,12 +1950,13 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
   }
   PreparePacket(packet_info.current_frame_size_, padding_start);
   // banjo-nx (2026-10-27, #4): decoded, or answered by the frame cache (DecodeFrame converts it into raw_frame_).
-  const bool decoded = DecodeFrame(prepared, GetSampleRate(data->sample_rate), bool(data->is_stereo));
+  decoded = DecodeFrame(prepared, GetSampleRate(data->sample_rate), bool(data->is_stereo));
   if (codec_open_failed_) {
     // blur-nx (2026-11-13, M-05 lazy open): the codec failed to open (PrepareDecoder's -1 before).
     codec_open_failed_ = false;
     data->error_status = 4;
     return;
+  }
   }
   if (decoded) {
     // Diagnostic (audio_dump_xma_s): the whole frame as it comes out of FFmpeg.
@@ -1766,10 +2005,11 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
     return;
   }
 
-  if (!packet_info.isLastFrameInPacket()) {
-    const uint32_t next_frame_offset =
-        (data->input_buffer_read_offset + bits_to_copy) % kBitsPerPacket;
-    data->input_buffer_read_offset = (packet_index * kBitsPerPacket) + next_frame_offset;
+  const uint32_t next_bit =
+      data->input_buffer_read_offset + static_cast<uint32_t>(bits_to_copy);
+  const uint32_t packet_end_bit = (static_cast<uint32_t>(packet_index) + 1) * kBitsPerPacket;
+  if (!packet_info.isLastFrameInPacket() && next_bit < packet_end_bit) {
+    data->input_buffer_read_offset = next_bit;
     return;
   }
 

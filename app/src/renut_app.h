@@ -62,6 +62,8 @@ void RexSwitchApmApply(void);
 }
 #endif
 
+extern "C" const char* RexAppBuildStamp(void);  // port 193 (TFU-nx's): src/build_stamp.cpp
+
 class RenutApp : public rex::ReXApp {
 public:
     RenutApp(rex::ui::WindowedAppContext& ctx, std::string_view name, rex::PPCImageInfo info)
@@ -104,6 +106,7 @@ public:
         fps_dialog_ = std::make_unique<FpsOverlayDialog>(drawer);
         fps_dialog_->fpsManager = &fpsManager;
         fpsManager.showFPS = REXCVAR_GET(banjo_show_fps);  // banjo-nx (2026-10-21)
+        fpsManager.GetCreateCounter("Shown");  // port 196 (S4ep1-nx's): made here, before the display thread ticks it
         drawer->AddDialog(fps_dialog_.get());
         drawer->AddDialog(new RenuLogOverlayDialog(drawer));
         // CPU/GPU profiler window ported from UnleashedRecomp (F5 / banjo_show_profiler).
@@ -202,6 +205,7 @@ public:
 #endif
 
     void OnPostSetup() override {
+        REXLOG_INFO("[build] {}", RexAppBuildStamp());  // port 193 (TFU-nx's): ties this log to its build
         // blur-nx (2026-11-17, #220; renut-ultimate port 151): the small-block arena, blur_small_alloc_mb (32 MB by
         // default, Blur's size; 0 in a game's toml turns it off). Before the DLC install, as Blur has it.
         blur::small_alloc::Enable();
@@ -246,6 +250,19 @@ public:
     }
 
     void OnShutdown() override {
+        // Port 269 (2026-11-24, the Peggle 2 session's finding): the app's own dialogs go first, while the SDK's
+        // ImGuiDrawer still exists. ReXApp::OnDestroy frees the drawer right after OnShutdown, and these members
+        // were destroyed only later, in the app's destructor: each ImGuiDialog destructor calls the freed drawer's
+        // RemoveDialog, and Peggle 1's normal quit (the game ending its title) faulted at 0x0 in
+        // ImGui::IsAnyMouseDown (~GameMenuDialog -> ~ImGuiDialog -> ImGuiDrawer::ClearInput). The game menu first, as
+        // Peggle's fix; the overlays the same way. OnDestroy runs this on the UI thread, where the overlay pump records
+        // them (app_integration.cpp); port 159's close path runs it on a worker while the UI thread waits for it.
+        game_menu_.reset();
+        profiler_dialog_.reset();
+        fps_dialog_.reset();
+#if !REX_PLATFORM_SWITCH
+        mnk_dialog_.reset();
+#endif
 #if BANJO_RENUT_RENDERER
         if (banjo::renut_gpu::Active()) renut::gpu::ShutdownRenderer();
 #endif

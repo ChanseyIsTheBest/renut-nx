@@ -669,6 +669,12 @@ namespace plume {
         // (copyRunFenced: nothing but buffer copies since it), a barrier recorded before another buffer copy stays
         // pending, as a Full, and is emitted before the next command the copy engine does not run: every other
         // command calls flushBarriers. Without a Full first nothing is held back.
+        // Port 250 (2026-11-21, blur-nx's console bisect): off by default. With it on, Blur's races drew rainbow colour
+        // fringes (4 of 5 races, its release NRO with the installer's package and a warm cache among them; off, none
+        // in 4 of 4). The NRO's own GLSL package and an empty DKSH cache make it show reliably (timing, not the
+        // shaders). So the ordering above does not hold
+        // somewhere; why is not known (blur-nx's guess: copies that depend on one another, or on GPU writes since the
+        // last Full barrier, are not ordered without the barrier).
         bool copyRunFenced = false;
         uint32_t sampleMaskSet = 0xFFFFFFFFu;  // port 166: the mask last recorded (none yet in this list)
         void flushBarriers() {
@@ -1110,8 +1116,18 @@ namespace plume {
         bool on = false;
         uint64_t size = 0, used = 0, peak = 0, freeBytes = 0, largestFree = 0, givenBack = 0, refused = 0;
         uint32_t freeRanges = 0, blocks = 0, growths = 0, givebacks = 0;
+        // sasrt-nx 1.0.1 (2026-11-24): the free range at the region's bottom (what Deko3DRegionGiveBack can return to
+        // newlib), and the region's growths and fallbacks refused for the CPU side's reserve (Deko3DSetRegionCpuReserve).
+        uint64_t freeBottom = 0, reserveRefused = 0;
     };
     void Deko3DGpuRegionFigures(Deko3DGpuRegionInfo &out);
+    // sasrt-nx 1.0.1 (2026-11-24, SASRT's docked bad_alloc: the region grew down to newlib's last 32 MB, then the game's
+    // own allocation failed with 0.6 MB of heap left): the room the GPU side leaves to newlib. The region does not lower
+    // newlib's end closer than this above its break, and a GPU block the region could not place does not take newlib's
+    // memory below it either: such a block fails (the memory emergency path, which the governor answers by releasing
+    // textures and stepping the resolution down) where the CPU side's failure is a crash. 32 MB (the old
+    // kRegionNewlibSlack) until set.
+    void Deko3DSetRegionCpuReserve(uint64_t bytes);
     // sasrt-nx (2026-11-09; port 58, for a title's memory governor): the heap's free bytes as the memory-block log lines
     // count them (the free chunks inside what malloc has taken and what sbrk can still give; mallinfo walks every free
     // piece under malloc's lock: 7-21 ms in SASRT's docked race, a cold-path figure).
@@ -1239,6 +1255,10 @@ namespace plume {
         // The uam thread's core (-1: any) and priority (Horizon: a higher number is a lower priority; 0: unchanged).
         // A thread that waits for a compile lends its priority to the uam thread while it waits.
         int compileCore = -1;
+        // sasrt-nx (2026-11-22, the user: "let the shader compiles float around instead"): when set, the uam thread and its
+        // spare-chunk thread are placed by this (the app's: every core of the process, no preferred core: the kernel
+        // puts them where there is room) instead of being pinned to compileCore.
+        void (*placeCompileThread)() = nullptr;
         int compilePriority = 0;
         // banjo-nx (2026-10-23): the share of its core (percent) background compiles may use: after each one the uam
         // thread rests in proportion (a compile a thread waits for ends the rest). An application's lowest priority

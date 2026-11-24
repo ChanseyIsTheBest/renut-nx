@@ -54,7 +54,7 @@
 #include <unordered_map>
 #include <vector>
 
-#if BANJO_NXVIDEO
+#if RENUT_NXVIDEO
 #include <switch.h>  // svcGetThreadPriority / svcSetThreadPriority (banjo_movie_decode_priority)
 
 #include "nxvideo.h"
@@ -171,7 +171,7 @@ struct Movie {
   bool checked = false;  // the first frame looked at
   bool hevc = false;     // the movie's video is H.265
   bool nxv_used = false;
-#if BANJO_NXVIDEO
+#if RENUT_NXVIDEO
   NxvDecoder *nxv = nullptr;
   NxvPicture pic{};
 #endif
@@ -203,7 +203,7 @@ Movie &MovieFor(uint32_t c) {
 }
 
 void CloseDecoder(Movie &m) {
-#if BANJO_NXVIDEO
+#if RENUT_NXVIDEO
   if (m.nxv)
     nxv_close(m.nxv);
   m.nxv = nullptr;
@@ -268,7 +268,7 @@ bool NxvDecode(Movie &m, const uint8_t *base, uint32_t v, const std::vector<uint
     m.hevc = LooksHevc(bytes);
     const int nvdec = REXCVAR_GET(banjo_movie_nvdec);
     m.nxv_used = m.hevc || nvdec >= 2;
-#if BANJO_NXVIDEO
+#if RENUT_NXVIDEO
     if (m.nxv_used) {
       m.width = Ld32(base, v + kWidth);
       m.height = Ld32(base, v + kHeight);
@@ -291,7 +291,7 @@ bool NxvDecode(Movie &m, const uint8_t *base, uint32_t v, const std::vector<uint
   }
   if (!m.nxv_used)
     return false;
-#if BANJO_NXVIDEO
+#if RENUT_NXVIDEO
   const int boost = REXCVAR_GET(banjo_movie_decode_priority);
   s32 own = 0;
   const bool raised = boost > 0 && R_SUCCEEDED(svcGetThreadPriority(&own, CUR_THREAD_HANDLE)) && own > boost &&
@@ -376,7 +376,7 @@ void WriteI420(Movie &m, uint8_t *base, uint32_t buf, uint32_t w, uint32_t h) {
   rex::memory::MarkStoreCardsAt(base, buf, w * h * 3 / 2);
 }
 
-#if BANJO_NXVIDEO
+#if RENUT_NXVIDEO
 // nxvideo's picture (YUV420P, or NV12 from NVDEC) into the player's I420 buffer.
 void WriteI420Nxv(const NxvPicture &p, uint8_t *base, uint32_t buf, uint32_t w, uint32_t h) {
   const uint32_t fw = std::min<uint32_t>(w, uint32_t(p.width)), fh = std::min<uint32_t>(h, uint32_t(p.height));
@@ -402,7 +402,7 @@ void WriteI420Nxv(const NxvPicture &p, uint8_t *base, uint32_t buf, uint32_t w, 
 }
 #endif
 
-#if BANJO_NXVIDEO
+#if RENUT_NXVIDEO
 // nxvideo's times since its last line (then cleared): every 10 s and at the movie's close (2026-11-21: the intros are
 // shorter than 10 s).
 void NxvLine(Movie &m, uint32_t c) {
@@ -436,7 +436,7 @@ void TimeLine(Movie &m, uint32_t c, double decode_ms, double copy_ms) {
                 m.decode_ms / double(m.timed), m.nxv_ms / double(m.timed), m.copy_ms / double(m.timed), m.decoded,
                 m.failed, m.damaged);
     m.decode_ms = m.copy_ms = m.nxv_ms = 0.0;
-#if BANJO_NXVIDEO
+#if RENUT_NXVIDEO
     NxvLine(m, c);
 #endif
     m.timed = 0;
@@ -542,7 +542,7 @@ REX_HOOK_RAW(rex_WmvideoC9DecGetOutput) {
   }
   uint32_t status = kStatusNoMoreOutput;
   if (m.nxv_used) {
-#if BANJO_NXVIDEO
+#if RENUT_NXVIDEO
     if (m.have) {
       const auto t0 = std::chrono::steady_clock::now();
       WriteI420Nxv(m.pic, base, buf, w, h);
@@ -586,7 +586,7 @@ REX_HOOK_RAW(rex_WmvideoC9DecReset) {
     std::lock_guard lock(m.mutex);
     if (m.avctx)
       avcodec_flush_buffers(m.avctx);
-#if BANJO_NXVIDEO
+#if RENUT_NXVIDEO
     if (m.nxv)
       nxv_flush(m.nxv);
 #endif
@@ -602,14 +602,14 @@ REX_HOOK_RAW(rex_WmvideoC9DecClose) {
     Movie &m = MovieFor(c);
     std::lock_guard lock(m.mutex);
     if ((m.avctx || m.nxv_used) && (m.frames || m.failed)) {
-#if BANJO_NXVIDEO
+#if RENUT_NXVIDEO
       const char *by = m.nxv_used ? (m.nxv && nxv_is_hw(m.nxv) ? "NVDEC" : "nxvideo (software)") : "FFmpeg";
 #else
       const char *by = m.nxv_used ? "nothing (no H.265 decoder)" : "FFmpeg";
 #endif
       REXLOG_INFO("[wmv] {:08X}: movie closed{}: {} frames, {} decoded by {}, {} not, {} damaged", c,
                   m.hevc ? " (H.265)" : "", m.frames, m.decoded, by, m.failed, m.damaged);
-#if BANJO_NXVIDEO
+#if RENUT_NXVIDEO
       NxvLine(m, c);
 #endif
     }

@@ -175,10 +175,13 @@ void MaybeReportMemory() {
     plume::Deko3DGpuRegionInfo r;
     plume::Deko3DGpuRegionFigures(r);
     if (r.on)
+      // sasrt-nx 1.0.1 (2026-11-24): and its free bottom (what the heap can have back) and the CPU side's reserve's
+      // refusals (sasrt_region_cpu_reserve_mb)
       RGPU_INFO("Memory: GPU region {:.0f} MB at the heap's top: {} blocks {:.0f} MB (peak {:.0f}), {:.0f} MB free in {} "
-                "ranges (largest {:.0f} MB); grown {} times, {} times given back ({:.0f} MB), {} blocks not placed in it",
+                "ranges (largest {:.0f} MB, {:.0f} MB at its bottom); grown {} times, {} times given back ({:.0f} MB), "
+                "{} blocks not placed in it, {} refused for the CPU side's reserve",
                 Mb(r.size), r.blocks, Mb(r.used), Mb(r.peak), Mb(r.freeBytes), r.freeRanges, Mb(r.largestFree),
-                r.growths, r.givebacks, Mb(r.givenBack), r.refused);
+                Mb(r.freeBottom), r.growths, r.givebacks, Mb(r.givenBack), r.refused, r.reserveRefused);
     // sasrt-nx (2026-11-11, sasrt_target_block_cache_mb)
     plume::Deko3DTargetCacheInfo c;
     plume::Deko3DTargetCacheFigures(c);

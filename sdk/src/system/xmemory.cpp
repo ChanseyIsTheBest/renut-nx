@@ -16,6 +16,10 @@
 #if REX_PLATFORM_MAC
 #include <sys/mman.h>
 #endif
+#include <rex/platform.h>
+#if REX_PLATFORM_WIN32
+#include "../core/platform_win.h"  // port 193: VirtualQuery for the guest crash report
+#endif
 
 #include <fmt/format.h>
 
@@ -609,8 +613,27 @@ runtime::MMIORange* Memory::LookupVirtualMappedRange(uint32_t virtual_address) {
   return mmio_handler_->LookupRange(virtual_address);
 }
 
+#if REX_PLATFORM_SWITCH || REX_PLATFORM_WIN32
 #if REX_PLATFORM_SWITCH
 extern "C" void* RexGmShadowFor(uint64_t window_address);
+#else
+// Port 193 (TFU-nx's of 2026-11-11, via S4ep1-nx): the same report on the PC (it was Switch-only). Guest memory is read
+// only where the host page is committed and readable, so the report cannot fault itself.
+static void* RexGmShadowFor(uint64_t window_address) {
+  MEMORY_BASIC_INFORMATION mbi{};
+  if (!VirtualQuery(reinterpret_cast<const void*>(window_address), &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
+      (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || !(mbi.Protect & (PAGE_READONLY | PAGE_READWRITE |
+      PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY))) {
+    return nullptr;
+  }
+  // A read of 4 bytes may cross into the next page: check that one too.
+  const uint64_t end = window_address + 3;
+  if ((end & ~uint64_t(0xFFF)) != (window_address & ~uint64_t(0xFFF))) {
+    return RexGmShadowFor(end) ? reinterpret_cast<void*>(window_address) : nullptr;
+  }
+  return reinterpret_cast<void*>(window_address);
+}
+#endif
 
 namespace {
 /*
@@ -715,7 +738,7 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
         "Unhandled guest access violation: {} of guest 0x{:08X} (host 0x{:016X}) on thread 0x{:X}",
         is_write ? "write" : "read", virtual_address, reinterpret_cast<uintptr_t>(host_address),
         rex::thread::current_thread_id());
-#if REX_PLATFORM_SWITCH
+#if REX_PLATFORM_SWITCH || REX_PLATFORM_WIN32  // port 193: the PC too
     DumpGuestCrashContext(virtual_membase_);
 #endif
     return false;
@@ -1136,6 +1159,27 @@ BaseHeap::BaseHeap() : membase_(nullptr), heap_base_(0), heap_size_(0), page_siz
 
 BaseHeap::~BaseHeap() = default;
 
+std::atomic<uint64_t> g_page_access_generation{1};  // sasrt-nx (2026-11-20, sasrt_rt2_readable_memo): xmemory.h
+namespace {
+// sasrt-nx (2026-11-22, the base port of sasrt_rt2_readable_memo): g_page_access_generation raised when an operation
+// that can take read access starts and again when it returns, its page changes made: a readable answer a query found
+// while the operation ran (before its changes, under the heap mutex) carries a value from before the second raise, so
+// it goes with it (raised only at the start, such an answer could carry the new value and outlive the change).
+struct PageAccessChange {
+  bool on;
+  explicit PageAccessChange(bool raise = true) : on(raise) {
+    if (on)
+      g_page_access_generation.fetch_add(1, std::memory_order_acq_rel);
+  }
+  ~PageAccessChange() {
+    if (on)
+      g_page_access_generation.fetch_add(1, std::memory_order_acq_rel);
+  }
+  PageAccessChange(const PageAccessChange &) = delete;
+  PageAccessChange &operator=(const PageAccessChange &) = delete;
+};
+}  // namespace
+
 std::unique_lock<std::recursive_mutex> BaseHeap::AcquireHostPageReconcileLock() const {
   if (page_size_ >= memory_->system_page_size_) {
     return {};
@@ -1394,6 +1438,7 @@ bool BaseHeap::Save(stream::ByteStream* stream) {
 }
 
 bool BaseHeap::Restore(stream::ByteStream* stream) {
+  const PageAccessChange page_access_change;  // sasrt-nx (2026-11-20, sasrt_rt2_readable_memo)
   REXSYS_DEBUG("Heap {:08X}-{:08X}", heap_base_, heap_base_ + (heap_size_ - 1));
 
   const uint32_t host_page_size = memory_->system_page_size_;
@@ -1471,6 +1516,7 @@ bool BaseHeap::Restore(stream::ByteStream* stream) {
 }
 
 void BaseHeap::Reset() {
+  const PageAccessChange page_access_change;  // sasrt-nx (2026-11-20, sasrt_rt2_readable_memo)
   // TODO(DrChat): protect pages.
   std::memset(page_table_.data(), 0, sizeof(PageEntry) * page_table_.size());
   // TODO(Triang3l): Remove access callbacks from pages if this is a physical
@@ -1516,6 +1562,9 @@ bool BaseHeap::AllocSystemHeap(uint32_t size, uint32_t alignment, uint32_t alloc
 
 bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignment,
                           uint32_t allocation_type, uint32_t protect) {
+  // sasrt-nx (2026-11-20, sasrt_rt2_readable_memo): a commit over pages already committed sets their protection (it
+  // can take read access away): the readable answers go when the new one has no read.
+  const PageAccessChange page_access_change(!(protect & memory::kMemoryProtectRead));
   alignment = rex::round_up(alignment, page_size_);
   if (base_address % alignment != 0) {
     if (base_address % page_size_ != 0) {
@@ -1805,6 +1854,7 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t 
 }
 
 bool BaseHeap::Decommit(uint32_t address, uint32_t size) {
+  const PageAccessChange page_access_change;  // sasrt-nx (2026-11-20, sasrt_rt2_readable_memo)
   uint32_t page_count = get_page_count(size, page_size_, page_size_shift_);
   uint32_t start_page_number = (address - heap_base_) >> page_size_shift_;
   uint32_t end_page_number = start_page_number + page_count - 1;
@@ -1841,6 +1891,7 @@ bool BaseHeap::Decommit(uint32_t address, uint32_t size) {
 }
 
 bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
+  const PageAccessChange page_access_change;  // sasrt-nx (2026-11-20, sasrt_rt2_readable_memo)
   // Global critical region before heap_mutex_ - see
   // AcquireHostPageReconcileLock for why the order matters.
   auto global_lock = AcquireHostPageReconcileLock();
@@ -1903,6 +1954,7 @@ bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
 }
 
 bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect, uint32_t* old_protect) {
+  const PageAccessChange page_access_change;  // sasrt-nx (2026-11-20, sasrt_rt2_readable_memo)
   if (!size) {
     REXSYS_ERROR("BaseHeap::Protect failed due to zero size");
     return false;

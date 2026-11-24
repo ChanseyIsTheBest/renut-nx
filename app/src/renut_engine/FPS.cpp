@@ -8,6 +8,13 @@
 namespace banjo::harvest { void Fotograma(); }  // native/banjo_shader_harvest.cpp
 namespace banjo::renderdoc { void GameFrame(); }  // me/banjo_renderdoc.cpp (banjo_renderdoc_game_s)
 
+// Port 258: the FPS overlay's "Shown" counter, one tick per image the player sees (renut_engine/display_sync.cpp, port
+// 196; a weak empty one stands in there for a port without this file).
+void RenutCountShownFrame() {
+    static FPSCounter *const shown_counter = fpsManager.GetCreateCounter("Shown");
+    shown_counter->Tick();
+}
+
 //CPU Time
 REX_EXTERN(__imp__appMainTickPreDraw);
 REX_HOOK_RAW(appMainTickPreDraw){

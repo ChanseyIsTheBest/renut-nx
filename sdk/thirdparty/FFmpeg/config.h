@@ -30,6 +30,8 @@
 #else
 #error "no config"
 #endif
-/* renut-nx (2026-11-22, culdcept-nx's line, credit it): the WMV3 decoder (and what it selects) for N&B's movies
- * (Debug/**: ASF / WMV3), every platform (src/cpu/banjo_wmv_ffmpeg.cpp). */
+
+/* renut-ultimate (2026-11-23, Katamari's movies: app/src/cpu/katamari_wmv_ffmpeg.cpp): the fork addition's WMV3 /
+   VC-1 decoders (config_masseffect_wmv3.h), whose sources sdk/thirdparty/CMakeLists.txt always compiled; culdcept-nx,
+   banjo-nx, vivapinata-nx and nights-nx include it here the same way. */
 #include "config_masseffect_wmv3.h"

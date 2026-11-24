@@ -147,11 +147,45 @@ struct GpuRegionRanges {
         return give;
     }
 
+    // sasrt-nx (2026-11-24, after 1.0.1): giveBackBottom with no malloc and no free, for plume_region_give_back_for_sbrk
+    // (called inside newlib's _sbrk_r, in the middle of malloc_extend_top). The bottom range's map node is taken out,
+    // re-keyed and put back (std::map's extract and node insert move no memory), and at least one step stays in it, so
+    // the node is never erased. 0 when the free bottom is a single step or less.
+    template <typename Raise>
+    uint64_t giveBackBottomInPlace(uint64_t step, Raise &&raise) {
+        auto it = free.find(low);
+        if (it == free.end())
+            return 0;
+        uint64_t give = it->second / step * step;
+        if (give == it->second)
+            give -= step;
+        if (!give)
+            return 0;
+        const uintptr_t newLow = low + give;
+        if (!raise(newLow))
+            return 0;
+        auto node = free.extract(it);
+        node.key() = newLow;
+        node.mapped() -= give;
+        free.insert(std::move(node));
+        low = newLow;
+        givenBack += give;
+        ++givebacks;
+        return give;
+    }
+
     uint64_t freeBytes() const {
         uint64_t bytes = 0;
         for (const auto &r : free)
             bytes += r.second;
         return bytes;
+    }
+
+    // sasrt-nx 1.0.1 (2026-11-24, the docked bad_alloc): the free range at the bottom, the part giveBackBottom can
+    // return to newlib (the rest of the free space is only the GPU's: newlib's heap ends at 'low').
+    uint64_t freeBottom() const {
+        auto it = free.find(low);
+        return it == free.end() ? 0 : it->second;
     }
 
     uint64_t largestFree() const {

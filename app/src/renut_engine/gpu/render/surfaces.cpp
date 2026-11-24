@@ -89,6 +89,9 @@ constexpr int kMaxDynamicSteps = 10;
 int32_t g_dynamic_steps[2][kMaxDynamicSteps] = {};
 int g_dynamic_count[2] = {0, 0};
 std::atomic<int> g_dynamic_step{0};
+// rr6-nx (2026-11-22): the in-use mode's step count while its switch is on, 0 while it is off (the latch's, for
+// NoteGpuFrameForDynamicResolution).
+std::atomic<int> g_dynamic_active{0};
 std::atomic<bool> g_dynamic_docked{false};
 // banjo-nx (2026-10-28, night_gpu5): the heights render_scale.h's settable codes 4 and 6 hold now ([0] code 4, [1] code
 // 6; the shaders read them from InternalHeightsWord), and the frame each was last the render scale. A height other than
@@ -215,7 +218,10 @@ struct SurfaceMemo {
   uint64_t epoch = 0;
   HostSurface *surface = nullptr;
 };
-SurfaceMemo g_surface_memo[64];  // banjo-nx (2026-10-19, render-thread proposal 8): 64, indexed by a hash of the VA
+// banjo-nx (2026-10-19, render-thread proposal 8): 64, indexed by a hash of the VA. sasrt-nx (2026-11-20,
+// sasrt_rt3_surface_memo_256; the third render-thread round's #24): 256 (Sonic Transformed's four views' targets and
+// resolves, their EDRAM views and the stack headers conflicted in 64); the first 64 alone with the key off.
+SurfaceMemo g_surface_memo[256];
 uint64_t g_surface_epoch = 1;
 
 void FreeDepthViews(std::vector<DepthImage::View> &views) {
@@ -494,6 +500,18 @@ REXCVAR_DEFINE_INT32(sasrt_retire_current_idle_frames, 1800, "SASRT/Graphics",
     .range(0, 1000000)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+// sasrt-nx 1.0.1 (2026-11-24): see the dynamic resolution's start in the latch below. Off in the base (on in SASRT,
+// where it does nothing now: SASRT 1.0.1's docked range ends at 720, where the climb starts anyway).
+REXCVAR_DEFINE_BOOL(sasrt_dynamic_docked_start_top, false, "SASRT/Graphics",
+                    "banjo_renut_dynamic_resolution: a game started in docked mode begins at the docked range's top, not "
+                    "its 720 end (the climb made a set of targets at each step and left the GPU region's free space in "
+                    "pieces); a change of mode still starts at 720")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+bool DockedStartTop() {
+  static const bool on = REXCVAR_GET(sasrt_dynamic_docked_start_top);
+  return on;
+}
+
 void RetireIdleTargetsLocked(bool emergency = false) {
   static const int32_t set = REXCVAR_GET(sasrt_retire_idle_targets_frames);
   // every 10 frames, and at once in an emergency
@@ -608,9 +626,17 @@ void LatchResolutionScaleLocked() {
       // request: docked 720 to 1080): an end of 1080 is code 2 (1.5x, the docked display's own size: the HUD is drawn
       // into the scene without the upscale), as a fixed height of 1080 always was (render_scale below).
       bool dynamic[2] = {false, false};
-      if (DynamicResolutionOn()) {
+      // rr6-nx (2026-11-22, the user: "a separate toggle for handheld and docked dynamic resolution"): each mode's range
+      // is made whenever it has one; banjo_renut_dynamic_resolution_handheld / _docked turn it on or off for that mode,
+      // at every latch on deko3d (the game menu's rows), at start on the other back ends (their codes are fixed).
+      {
         for (int m = 0; m < 2; ++m) {
           const bool docked_mode = m == 1;
+          const bool on_now = DynamicModeOn(docked_mode);
+#if !defined(PLUME_DEKO3D)
+          if (!on_now)
+            continue;
+#endif
           const int32_t low = pick(DynamicHeight(docked_mode, false), docked_mode ? "dynamic docked low" : "dynamic handheld low");
           const int32_t high = pick(DynamicHeight(docked_mode, true), docked_mode ? "dynamic docked high" : "dynamic handheld high");
           // sasrt-nx (2026-11-09, the user's ranges: handheld 480-720, docked 540-1080; port 52): on deko3d a range need
@@ -621,12 +647,19 @@ void LatchResolutionScaleLocked() {
 #else
           const bool needs_720 = true;
 #endif
+          // rr6-nx (2026-11-09): low = high, no range: that mode keeps its fixed height (banjo_renut_render_height_*).
+          if (low == high) {
+            RGPU_INFO("[renut] dynamic resolution, {} mode: no range (low = high = {}): the fixed {} lines",
+                      docked_mode ? "docked" : "handheld", low, docked_mode ? dh : hh);
+            continue;
+          }
           if (low >= high || (needs_720 && low != 720 && high != 720)) {
             RGPU_WARN("[renut] dynamic resolution, {} mode: {} to {} lines is not a range with 720 at one end: the "
                       "fixed height", docked_mode ? "docked" : "handheld", low, high);
             continue;
           }
-          (docked_mode ? dh : hh) = low == 720 ? high : low;
+          if (on_now)
+            (docked_mode ? dh : hh) = low == 720 ? high : low;
           dynamic[m] = true;
           // banjo-nx (2026-10-28, night_gpu5, banjo_renut_dynamic_steps): the ends and the heights between them, evenly
           // spaced and rounded to a multiple of 36 (whole host pixels at 320x180 too). Deko3d only: the other back ends'
@@ -648,8 +681,9 @@ void LatchResolutionScaleLocked() {
           for (int i = 0; i < n; ++i)
             list += fmt::format("{}{}", i ? " " : "", g_dynamic_steps[m][i]);
           RGPU_INFO("[renut] dynamic resolution, {} mode: 3D at {} lines, by the GPU's time a frame against {} ms "
-                    "(banjo_renut_dynamic_resolution){}",
-                    docked_mode ? "docked" : "handheld", list, DynamicGpuMs(),
+                    "({} now: banjo_renut_dynamic_resolution_{}){}",
+                    docked_mode ? "docked" : "handheld", list, DynamicGpuMs(), on_now ? "on" : "off",
+                    docked_mode ? "docked" : "handheld",
                     DynamicTestSeconds() > 0 ? fmt::format("; test: a step every {} s", DynamicTestSeconds())
                                              : std::string());
         }
@@ -673,16 +707,37 @@ void LatchResolutionScaleLocked() {
     // mode starts it at its 720 end (night_gpu2 console run: docking at 900 made the docked set of targets with the heap
     // at its end; 720 is the smaller set, at the 1x code both modes use).
     const int mode = docked ? 1 : 0;
-    const int count = heights.dynamic[mode] ? g_dynamic_count[mode] : 0;
+#if defined(PLUME_DEKO3D)
+    const bool mode_on = heights.dynamic[mode] && DynamicModeOn(docked);  // rr6-nx (2026-11-22): the mode's switch, now
+#else
+    const bool mode_on = heights.dynamic[mode];
+#endif
+    const int count = mode_on ? g_dynamic_count[mode] : 0;
     static bool dynamic_started = false;
+    static bool was_on[2] = {false, false}, seen[2] = {false, false};
     const bool mode_changed = g_dynamic_docked.exchange(docked) != docked;
-    if ((mode_changed || !dynamic_started) && count) {
+    const bool switched_on = mode_on && !was_on[mode];
+    if (heights.dynamic[mode] && seen[mode] && mode_on != was_on[mode])
+      RGPU_INFO("[renut] dynamic resolution, {} mode: {}", docked ? "docked" : "handheld",
+                mode_on ? "on" : "off: the fixed resolution");
+    seen[mode] = true;
+    was_on[mode] = mode_on;
+    g_dynamic_active.store(count, std::memory_order_relaxed);
+    if ((mode_changed || !dynamic_started || switched_on) && count) {
+      const bool first_start = !dynamic_started;
       dynamic_started = true;
       // the 720 end, or (sasrt-nx, 2026-11-09; port 52) the step nearest below 720 for a range without it
       int start = 0;
       for (int i = 0; i < count; ++i)
         if (g_dynamic_steps[mode][i] <= 720)
           start = i;
+      // sasrt-nx 1.0.1 (2026-11-24, sasrt_dynamic_docked_start_top): a game started docked begins at the range's top.
+      // From 720 SASRT climbed to 1080 in ten steps over 10 s at the menus, each step's targets larger than any range
+      // the last ones left free, so the GPU region grew 158 times to a peak of 1,372 MB in use and kept 567 MB free in
+      // 48 ranges that only the GPU could use (SASRT's docked bad_alloc). Steps down from the top fit where the bigger
+      // targets were. A change of mode keeps the 720 start (night_gpu2: docking mid-game with the heap at its end).
+      if (first_start && docked && DockedStartTop())
+        start = count - 1;
       g_dynamic_step = start;
     }
     ++g_latches;
@@ -776,14 +831,24 @@ void LatchResolutionScaleLocked() {
     if ((heap >> 20) < 48)
       room = std::min(room, heap);
     const uint32_t mb = uint32_t(std::min<uint64_t>(room >> 20, 0xFFFFFFF0ull));
+    // sasrt-nx 1.0.1 (2026-11-24, sasrt_memory_cpu_governor; banjo_renut_tuning.cpp has the docked bad_alloc): the CPU
+    // side's own room, the heap's and the region's free bottom (newlib can have that back; the free space inside the
+    // region it cannot). UINT32_MAX with the watch off, so its marks never trip.
+    const bool cpu_watch = banjo::renut_gpu::CpuGovernorOn();
+    const uint64_t cpu_room = heap + (region.on ? uint64_t(region.freeBottom) : 0);
+    const uint32_t cpu_mb = cpu_watch ? uint32_t(std::min<uint64_t>(cpu_room >> 20, 0xFFFFFFF0ull)) : UINT32_MAX;
     const bool was_low = banjo::renut_gpu::MemoryLow(), was_critical = banjo::renut_gpu::MemoryCritical();
     banjo::renut_gpu::g_heap_free_mb.store(mb, std::memory_order_relaxed);
+    banjo::renut_gpu::g_cpu_free_mb.store(cpu_mb, std::memory_order_relaxed);
     const bool low = banjo::renut_gpu::MemoryLow(), critical = banjo::renut_gpu::MemoryCritical();
     if (!emergency && banjo::renut_gpu::g_memory_emergency_looks.load(std::memory_order_relaxed))
       banjo::renut_gpu::g_memory_emergency_looks.fetch_sub(1, std::memory_order_relaxed);
     // the GPU region's free bottom back to the heap while the heap itself (the CPU side's) is short: SASRT's docked race
-    // crashed with the command buffers' arena out of heap and 500-700 MB free in the region
-    if ((heap >> 20) < 192) {
+    // crashed with the command buffers' arena out of heap and 500-700 MB free in the region. sasrt-nx 1.0.1: also from
+    // the CPU side's low mark (sasrt_memory_cpu_low_mb), whichever is higher.
+    const uint64_t give_back_under =
+        std::max<uint64_t>(192, cpu_watch ? uint64_t(banjo::renut_gpu::CpuLowMarkMb()) : 0);
+    if ((heap >> 20) < give_back_under) {
       const uint64_t given = plume::Deko3DRegionGiveBack();
       static uint32_t given_logged = 0;
       if (given && given_logged++ < 32)
@@ -836,7 +901,9 @@ void LatchResolutionScaleLocked() {
 #endif
     static uint32_t logged = 0;
     if ((low != was_low || critical != was_critical) && logged++ < 64)
-      RGPU_INFO("[renut] {} MB free (heap and GPU region): {} (sasrt_memory_governor)", mb,
+      RGPU_INFO("[renut] {} MB free (heap and GPU region), the CPU side {} MB (heap {} MB, the region's free bottom {} "
+                "MB): {} (sasrt_memory_governor)", mb, cpu_room >> 20, heap >> 20,
+                region.on ? uint64_t(region.freeBottom) >> 20 : 0,
                 critical ? "critical: dynamic resolution steps down, the stream cache at 48 MB"
                 : low    ? "low: no dynamic resolution step up, the stream cache at 96 MB, idle targets after 60 frames"
                          : "enough again");
@@ -890,7 +957,7 @@ REXCVAR_DEFINE_BOOL(sasrt_dynamic_up_memory, true, "SASRT/Graphics",
 
 void NoteGpuFrameForDynamicResolution(double gpu_ms) {
   const int mode = g_dynamic_docked ? 1 : 0;
-  const int count = g_dynamic_count[mode];
+  const int count = g_dynamic_active.load(std::memory_order_relaxed);  // rr6-nx (2026-11-22): 0 while its switch is off
   if (count < 2 || gpu_ms <= 0.0)
     return;
   // banjo-nx (2026-10-28): up after banjo_renut_dynamic_up_s in a row of fitting, 1 s by default (the user: "be
@@ -1071,6 +1138,26 @@ void ColorAliasesLocked(const HostSurface *surface, std::vector<HostSurface *> &
   out.clear();
   if (!surface || surface->depth)
     return;
+  // sasrt-nx (2026-11-20, sasrt_rt2_color_alias_memo): what the scans found, kept until the table changes (a target
+  // built or retired bumps g_sasrt_table_epoch; the scans read the keys, the textures and the depth flags alone).
+  const bool memo = sasrt::gpu_round::On(sasrt::gpu_round::kRt2ColorAliasMemo);
+  if (memo && surface->sasrt_alias_epoch == g_sasrt_table_epoch) {
+    out = surface->sasrt_aliases;
+    sasrt::gpu_round::Count(sasrt::gpu_round::kRt2ColorAliasMemo);
+    return;
+  }
+  struct Keep {
+    const HostSurface *surface;
+    std::vector<HostSurface *> &out;
+    bool on;
+    ~Keep() {
+      if (on) {
+        surface->sasrt_aliases = out;
+        surface->sasrt_alias_epoch = g_sasrt_table_epoch;
+        sasrt::gpu_round::Count(sasrt::gpu_round::kRt2ColorAliasMemo, 1, 1);
+      }
+    }
+  } keep{surface, out, memo};
   // TargetKey: the view in the low 32 bits, the host format above.
   constexpr uint64_t kViewMask = 0xFFFFFFFFull;
   uint64_t own = 0;
@@ -1416,7 +1503,9 @@ HostSurface *GetHostSurfaceLocked(u32 surface_va) {
   }
 
   const bool memo = banjo::renut_gpu::CpuMemosOn();
-  SurfaceMemo &m = g_surface_memo[(surface_va * 0x9E3779B1u) >> 26];
+  const u32 memo_hash = surface_va * 0x9E3779B1u;
+  SurfaceMemo &m = g_surface_memo[sasrt::gpu_round::On(sasrt::gpu_round::kRt3SurfaceMemo256) ? memo_hash >> 24
+                                                                                               : memo_hash >> 26];
   if (memo && m.epoch == g_surface_epoch && m.va == surface_va && m.size == desc->Size &&
       m.info == desc->SurfaceInfo && m.format == desc->Format && m.color_info == desc->ColorInfo) {
     // the same as the lookup's: the surface bound now

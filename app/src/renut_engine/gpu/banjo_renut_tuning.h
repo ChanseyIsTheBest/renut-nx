@@ -220,6 +220,13 @@ uint64_t StreamCacheMaxBytes(uint64_t renut_max);
 // the Switch; UINT32_MAX before the first look and on other platforms), and whether it is under sasrt_memory_low_mb /
 // sasrt_memory_critical_mb.
 extern std::atomic<uint32_t> g_heap_free_mb;
+// sasrt-nx 1.0.1 (2026-11-24, sasrt_memory_cpu_governor): the CPU side's room in MB (the heap's room and the GPU region's
+// free bottom; surfaces.cpp sets it with g_heap_free_mb), whether that watch is on, its low mark, and the room the region
+// leaves the CPU side (sasrt_region_cpu_reserve_mb, bytes; 0: plume's 32 MB).
+extern std::atomic<uint32_t> g_cpu_free_mb;
+bool CpuGovernorOn();
+uint32_t CpuLowMarkMb();
+uint64_t RegionCpuReserveBytes();
 bool MemoryLow();
 bool MemoryCritical();
 // sasrt-nx (2026-11-09 night, sasrt_memory_emergency; port 58): the governor's looks left in an emergency (a texture or
@@ -392,6 +399,9 @@ void CountChainReuseN(const uint64_t counts[5][2]);
 unsigned Deko3DUamFlags();
 // banjo_background_compile_core / banjo_deko3d_compile_priority (2026-10-18): the uam thread's core and priority.
 int Deko3DCompileCore();
+// sasrt-nx (2026-11-22, sasrt_compile_threads_core -1): what places the uam thread (every core of the process), or null
+// (then it is pinned to Deko3DCompileCore(), -1 none).
+void (*Deko3DCompileThreadPlacer())();
 int Deko3DCompilePriority();
 int Deko3DBackgroundCompileShare();  // banjo_deko3d_background_compile_share (2026-10-23)
 bool Deko3DCompileWaitBoostOn();  // banjo_deko3d_compile_wait_boost (2026-10-23)

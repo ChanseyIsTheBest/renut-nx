@@ -17,6 +17,7 @@
 #include <vector>
 
 #include <rex/logging.h>
+#include <rex/filesystem/opus_pcm.h>  // rr6-nx (2026-11-21)
 #include <rex/math.h>
 #include <rex/system/xio.h>
 
@@ -108,6 +109,27 @@ StfsContainerDevice::Error StfsContainerDevice::OpenFiles() {
     REXFS_ERROR("Error opening STFS header file.");
     return Error::kErrorReadError;
   }
+  /*
+   * rr6-nx (2026-11-21, the user: the music re-encoded to Opus): P.opcm next to the package P stands for the whole
+   * package with its music track as Opus (rex/filesystem/opus_pcm.h); P itself is then only the package's header,
+   * which the DLC scan and the content list read. Every read of the package below goes through P.opcm (ReadAt). A
+   * whole P (not cut short) is read as it is.
+   */
+  {
+    std::filesystem::path opcm_path = host_path_;
+    opcm_path += std::string(kOpusPcmSuffix);
+    uint64_t whole = 0;
+    std::error_code ec;
+    const auto own = std::filesystem::file_size(host_path_, ec);
+    if (!ec && ReadOpusPcmSize(opcm_path, &whole) && own < whole) {
+      opcm_ = OpenOpusPcm(FileHandle::OpenExisting(opcm_path, FileAccess::kFileReadData));
+      if (opcm_) {
+        opcm_size_ = whole;
+        REXFS_INFO("STFS package {} read through its .opcm (the music as Opus)",
+                   rex::path_to_utf8(host_path_.filename()));
+      }
+    }
+  }
 
   auto header_result = ReadHeaderAndVerify(header_file);
   if (header_result != Error::kSuccess) {
@@ -168,6 +190,19 @@ StfsContainerDevice::Error StfsContainerDevice::OpenFiles() {
   return Error::kSuccess;
 }
 
+size_t StfsContainerDevice::ReadAt(size_t file, uint64_t offset, void* out, size_t length) {
+  if (opcm_ && file == 0) {
+    size_t got = 0;
+    return opcm_->Read(size_t(offset), out, length, &got) ? got : 0;
+  }
+  auto it = files_.find(file);
+  if (it == files_.end()) {
+    return 0;
+  }
+  rex::filesystem::Seek(it->second, int64_t(offset), SEEK_SET);
+  return fread(out, 1, length, it->second);
+}
+
 void StfsContainerDevice::CloseFiles() {
   for (auto& file : files_) {
     fclose(file.second);
@@ -191,16 +226,21 @@ Entry* StfsContainerDevice::ResolvePath(const std::string_view path) {
 
 StfsContainerDevice::Error StfsContainerDevice::ReadHeaderAndVerify(FILE* header_file) {
   // Check size of the file is enough to store an STFS header
-  rex::filesystem::Seek(header_file, 0L, SEEK_END);
-  files_total_size_ = rex::filesystem::Tell(header_file);
-  rex::filesystem::Seek(header_file, 0L, SEEK_SET);
+  if (opcm_) {
+    files_total_size_ = size_t(opcm_size_);  // rr6-nx (2026-11-21): the whole package P.opcm stands for
+  } else {
+    rex::filesystem::Seek(header_file, 0L, SEEK_END);
+    files_total_size_ = rex::filesystem::Tell(header_file);
+    rex::filesystem::Seek(header_file, 0L, SEEK_SET);
+  }
 
   if (sizeof(StfsHeader) > files_total_size_) {
     return Error::kErrorTooSmall;
   }
 
   // Read header & check signature
-  if (fread(&header_, sizeof(StfsHeader), 1, header_file) != 1) {
+  if (opcm_ ? ReadAt(0, 0, &header_, sizeof(StfsHeader)) != sizeof(StfsHeader)
+            : fread(&header_, sizeof(StfsHeader), 1, header_file) != 1) {
     return Error::kErrorReadError;
   }
 
@@ -537,8 +577,6 @@ void StfsContainerDevice::BlockToOffsetSVOD(size_t block, size_t* out_address,
 }
 
 StfsContainerDevice::Error StfsContainerDevice::ReadSTFS() {
-  auto& file = files_.at(0);
-
   auto root_entry = new StfsContainerEntry(this, nullptr, "", &files_);
   root_entry->attributes_ = kFileAttributeDirectory;
   root_entry_ = std::unique_ptr<Entry>(root_entry);
@@ -553,9 +591,8 @@ StfsContainerDevice::Error StfsContainerDevice::ReadSTFS() {
   size_t n = 0;
   for (n = 0; n < descriptor.file_table_block_count; n++) {
     auto offset = BlockToOffsetSTFS(table_block_index);
-    rex::filesystem::Seek(file, offset, SEEK_SET);
 
-    if (fread(&directory, sizeof(StfsDirectoryBlock), 1, file) != 1) {
+    if (ReadAt(0, offset, &directory, sizeof(StfsDirectoryBlock)) != sizeof(StfsDirectoryBlock)) {
       REXFS_ERROR("ReadSTFS failed to read directory block at 0x{:X}", offset);
       return Error::kErrorReadError;
     }
@@ -710,8 +747,6 @@ size_t StfsContainerDevice::BlockToHashBlockOffsetSTFS(uint32_t block_index,
 }
 
 const StfsHashEntry* StfsContainerDevice::GetBlockHash(uint32_t block_index) {
-  auto& file = files_.at(0);
-
   auto& descriptor = header_.metadata.volume_descriptor.stfs;
 
   // Offset for selecting the secondary hash block, in packages that have them
@@ -737,10 +772,9 @@ const StfsHashEntry* StfsContainerDevice::GetBlockHash(uint32_t block_index) {
             auto hash_offset_lv2 = BlockToHashBlockOffsetSTFS(block_index, 2);
 
             if (!cached_hash_tables_.count(hash_offset_lv2)) {
-              rex::filesystem::Seek(file, hash_offset_lv2 + secondary_table_offset, SEEK_SET);
-
               StfsHashTable table_lv2;
-              if (fread(&table_lv2, sizeof(StfsHashTable), 1, file) != 1) {
+              if (ReadAt(0, hash_offset_lv2 + secondary_table_offset, &table_lv2, sizeof(StfsHashTable)) !=
+                  sizeof(StfsHashTable)) {
                 REXFS_ERROR("GetBlockHash failed to read level2 hash table at 0x{:X}",
                             hash_offset_lv2 + secondary_table_offset);
                 return nullptr;
@@ -753,10 +787,9 @@ const StfsHashEntry* StfsContainerDevice::GetBlockHash(uint32_t block_index) {
             secondary_table_offset = record_data->levelN_active_index() ? kBlockSize : 0;
           }
 
-          rex::filesystem::Seek(file, hash_offset_lv1 + secondary_table_offset, SEEK_SET);
-
           StfsHashTable table_lv1;
-          if (fread(&table_lv1, sizeof(StfsHashTable), 1, file) != 1) {
+          if (ReadAt(0, hash_offset_lv1 + secondary_table_offset, &table_lv1, sizeof(StfsHashTable)) !=
+              sizeof(StfsHashTable)) {
             REXFS_ERROR("GetBlockHash failed to read level1 hash table at 0x{:X}",
                         hash_offset_lv1 + secondary_table_offset);
             return nullptr;
@@ -770,10 +803,9 @@ const StfsHashEntry* StfsContainerDevice::GetBlockHash(uint32_t block_index) {
       }
     }
 
-    rex::filesystem::Seek(file, hash_offset_lv0 + secondary_table_offset, SEEK_SET);
-
     StfsHashTable table_lv0;
-    if (fread(&table_lv0, sizeof(StfsHashTable), 1, file) != 1) {
+    if (ReadAt(0, hash_offset_lv0 + secondary_table_offset, &table_lv0, sizeof(StfsHashTable)) !=
+        sizeof(StfsHashTable)) {
       REXFS_ERROR("GetBlockHash failed to read level0 hash table at 0x{:X}",
                   (hash_offset_lv0 + secondary_table_offset));
       return nullptr;

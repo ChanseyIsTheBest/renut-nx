@@ -75,15 +75,33 @@ REXCVAR_DEFINE_BOOL(banjo_system_core_compiles, false, "Banjo/Threads",
                     "banjo_background_compile_core (off by default: core 3 was full with them and audio stuttered). "
                     "No effect with the usual three cores")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// sasrt-nx (2026-11-22, after base port 254 showed what a pinned compile does behind port 251's command stage on core 3:
+// in RR6 races one took 250-354 s): the shader compile threads (the uam thread and its spare-chunk thread, the pipeline
+// prebuild workers, the list writer, the cache saver) placed by this one key, the ring cleaner (not a compile) left to
+// banjo_system_core_compiles. The user: first "Let the shader compiles float around instead", then "Or restrict it to
+// core 2 actually": 2 by default (the game's core 2, as banjo_background_compile_core's default). -1: every core of the
+// process (with four cores, the system core too), no preferred core: the kernel places them (floating). -2: as before
+// (banjo_background_compile_core / banjo_system_core_compiles / banjo_system_core_uam).
+REXCVAR_DEFINE_INT32(sasrt_compile_threads_core, 2, "Banjo/Threads",
+                     "The shader compile threads' core (uam, the pipeline prebuild workers, the list writer, the cache "
+                     "saver): 0-3 pinned there (2: the user, 2026-11-22), -1 every core with no preferred one "
+                     "(floating), -2 as banjo_background_compile_core / banjo_system_core_compiles / "
+                     "banjo_system_core_uam place them")
+    .range(-2, 3)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // banjo-nx (2026-10-28, the user's request): the uam thread alone on the system core, with the background compiles held
 // to banjo_deko3d_background_compile_share (10 %) by their rests. The pipeline prebuild workers (bursts at area loads,
 // banjo_system_core_compiles) stay off it.
-REXCVAR_DEFINE_BOOL(banjo_system_core_uam, true, "Banjo/Threads",
+// Port 254 (2026-11-22, the user to rr6-nx: "Compile on core 2"): off by default. Port 251's command stage (0x2E) and
+// warm helper (0x2F) keep the system core busy in play, above this thread (0x3B): in RR6 races a compile there took
+// 250-354 s and the prebuild waiting on it held every specialised pipeline back (GPU +1.2 ms); on core 2, 169 ms.
+REXCVAR_DEFINE_BOOL(banjo_system_core_uam, false, "Banjo/Threads",
                     "When the process has the system core (four cores granted, banjo_system_core 1 or 2): the uam "
                     "shader compile thread runs there (at the lowest priority an application gets, so the audio "
                     "threads there go first; its background compiles rest to banjo_deko3d_background_compile_share of "
                     "the core) instead of on banjo_background_compile_core, the game's core 2. The pipeline prebuild "
-                    "workers stay where banjo_system_core_compiles puts them. No effect with the usual three cores")
+                    "workers stay where banjo_system_core_compiles puts them. Off by default (port 254: port 251's "
+                    "command stage and warm helper keep that core busy). No effect with the usual three cores")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DECLARE(int32_t, banjo_prewarm_threads);
 // banjo-nx's renderer's NVK keys (masseffect_native_draws.cpp), applied to Renut's renderer too (ControlNvkLocked).
@@ -323,12 +341,12 @@ REXCVAR_DEFINE_INT32(banjo_renut_render_height_handheld, BANJO_SWITCH_DEFAULT(64
                      "Frames without that composite for half a second (menus, loading) are drawn at the display's "
                      "resolution whole. Shadow maps and the post-processing buffers keep the console's sizes. From the "
                      "next frame")
-    .range(480, 1080);
+    .range(360, 1080);  // port 196 (S4ep1-nx's): from 480; a game drawing 1920x1080 is half at 360 (960x540)
 REXCVAR_DEFINE_INT32(banjo_renut_render_height_docked, BANJO_SWITCH_DEFAULT(864, 720), "Banjo/Enhancements",
                      "NOT exact, the user's request (2026-10-21): banjo_renut_render_height_handheld for docked mode "
                      "(864 = 1536x864, 1.2x the game's; 900 = 1600x900; with banjo_renut_display_height_docked = 1080 "
                      "the HUD at 1920x1080). From the next frame on deko3d (blur-nx 2026-11-18), else read at start")
-    .range(480, 1080);
+    .range(360, 1080);  // port 196 (S4ep1-nx's): from 480
 REXCVAR_DEFINE_INT32(banjo_renut_display_height_docked, BANJO_SWITCH_DEFAULT(1080, 720), "Banjo/Enhancements",
                      "The display's resolution when docked on deko3d (2026-10-21; the swapchain change from sa2-nx "
                      "1.0.3.1): 720 = 1280x720, which the console scales to the TV; 1080 = the swapchain made at "
@@ -1601,13 +1619,16 @@ void StatsGameFrame() {
     const uint64_t depth = g_ui_depth[0].exchange(0, std::memory_order_relaxed);
     const uint64_t kept = g_ui_depth[1].exchange(0, std::memory_order_relaxed);
     // banjo-nx (2026-10-28): with dynamic resolution on, its ranges (the fixed-height keys are not used then).
-    const std::string heights =
-        ::renut::gpu::DynamicResolutionOn()
-            ? fmt::format("dynamic: handheld {}-{}, docked {}-{}, {} steps between", ::renut::gpu::DynamicHeight(false, false),
-                          ::renut::gpu::DynamicHeight(false, true), ::renut::gpu::DynamicHeight(true, false),
-                          ::renut::gpu::DynamicHeight(true, true), ::renut::gpu::DynamicSteps())
-            : fmt::format("banjo_renut_render_height_handheld {}, _docked {}", RenderHeightHandheld(),
-                          RenderHeightDocked());
+    // rr6-nx (2026-11-22): each mode's own (banjo_renut_dynamic_resolution_handheld / _docked).
+    const auto mode_heights = [](bool docked) {
+      return ::renut::gpu::DynamicModeOn(docked)
+                 ? fmt::format("{} dynamic {}-{}", docked ? "docked" : "handheld",
+                               ::renut::gpu::DynamicHeight(docked, false), ::renut::gpu::DynamicHeight(docked, true))
+                 : fmt::format("{} fixed {}", docked ? "docked" : "handheld",
+                               docked ? RenderHeightDocked() : RenderHeightHandheld());
+    };
+    const std::string heights = mode_heights(false) + ", " + mode_heights(true) +
+                                fmt::format(", {} steps between", ::renut::gpu::DynamicSteps());
     if (scaled || RenderHeightHandheld() != 720 || RenderHeightDocked() != 720)
       REXLOG_INFO("[renut] internal resolution ({}, display docked {}, "
                   "{} upscale, not exact): {} composites scaled up for the HUD, {} drawn at the display's resolution, "
@@ -1892,7 +1913,38 @@ static int32_t BackgroundCore() {
   }
   return REXCVAR_GET(banjo_background_compile_core);
 }
+#if REX_PLATFORM_SWITCH
+// sasrt-nx (2026-11-22, sasrt_compile_threads_core -1): the calling thread on every core of the process (the system
+// core kept in the mask: RexSwitchSetCurrentThreadCoresWithSystem), no preferred core.
+static bool FloatCurrentThread() {
+  return RexSwitchSetCurrentThreadCoresWithSystem(-1, RexSwitchProcessCoreMask());
+}
+static void FloatCompileThread() {
+  const bool ok = FloatCurrentThread();
+  REXLOG_INFO("[renut] uam thread floats: every core of the process (mask 0x{:X}){} (sasrt_compile_threads_core -1)",
+              RexSwitchProcessCoreMask(), ok ? "" : " (NOT accepted)");
+}
+// The compile threads' place by sasrt_compile_threads_core (>= 0 pinned, -1 floating); false for -2 (the old keys).
+static bool PlaceCompileThreadByKey() {
+  const int32_t core = REXCVAR_GET(sasrt_compile_threads_core);
+  if (core == -1)
+    return FloatCurrentThread();
+  if (core >= 0)
+    return RexSwitchPinCurrentThreadToCore(int(core));
+  return false;
+}
+#endif
+void (*Deko3DCompileThreadPlacer())() {
+#if REX_PLATFORM_SWITCH
+  if (REXCVAR_GET(sasrt_compile_threads_core) == -1)  // floating; a pinned core goes through compileCore
+    return &FloatCompileThread;
+#endif
+  return nullptr;
+}
 int Deko3DCompileCore() {
+  // sasrt-nx (2026-11-22): sasrt_compile_threads_core (-1: placed by Deko3DCompileThreadPlacer; -2: the keys below)
+  if (REXCVAR_GET(sasrt_compile_threads_core) != -2)
+    return REXCVAR_GET(sasrt_compile_threads_core);
   // banjo-nx (2026-10-28): the uam thread on the system core when there is one (banjo_system_core_uam).
   if (REXCVAR_GET(banjo_system_core_uam)) {
     const int system_core = RexSwitchSystemCore();
@@ -2213,19 +2265,65 @@ REXCVAR_DEFINE_INT32(sasrt_memory_low_mb, 256, "SASRT/Graphics", "sasrt_memory_g
 REXCVAR_DEFINE_INT32(sasrt_memory_critical_mb, 128, "SASRT/Graphics", "sasrt_memory_governor: the critical mark (MB free)")
     .range(8, 2048)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// sasrt-nx 1.0.1 (2026-11-24, SASRT's docked bad_alloc): the figure above adds the GPU region's free space to the heap's
+// room (what a GPU block can use), and in docked mode it read 782 MB while newlib, the CPU side, had 215: the region's
+// 567 MB were free in 48 ranges inside it, which newlib cannot use (its heap ends at the region's bottom). The region
+// then grew into the rest and the game's own allocation failed with 0.6 MB left; the governor saw its critical mark 3 s
+// before. So the CPU side's room is a figure of its own: the heap's room and the region's free bottom
+// (Deko3DRegionGiveBack can return it), against marks of its own; either side under its mark makes memory low /
+// critical.
+REXCVAR_DEFINE_BOOL(sasrt_memory_cpu_governor, true, "SASRT/Graphics",
+                    "sasrt_memory_governor also watches the CPU side's room on its own (the heap's room and the GPU "
+                    "region's free bottom, not the region's free space inside it): under sasrt_memory_cpu_low_mb memory "
+                    "is low, under sasrt_memory_cpu_critical_mb critical, and the region's free bottom goes back")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(sasrt_memory_cpu_low_mb, 160, "SASRT/Graphics",
+                     "sasrt_memory_cpu_governor: the CPU side's low mark (MB of heap room and region free bottom)")
+    .range(16, 2048)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(sasrt_memory_cpu_critical_mb, 96, "SASRT/Graphics",
+                     "sasrt_memory_cpu_governor: the CPU side's critical mark (MB of heap room and region free bottom)")
+    .range(8, 2048)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// sasrt-nx 1.0.1 (2026-11-24): the room the GPU region leaves newlib (plume's Deko3DSetRegionCpuReserve; 32 MB before):
+// the region's growth and a GPU block's fallback to newlib stop there and fail as the memory emergency (textures
+// released, the resolution a step down) where the CPU side's failure was the game's crash. 0: the old 32 MB.
+REXCVAR_DEFINE_INT32(sasrt_region_cpu_reserve_mb, 160, "SASRT/Graphics",
+                     "The MB of heap the GPU region always leaves the CPU side (its growth and GPU blocks' fallback to the "
+                     "heap stop there: a GPU block fails, which the memory emergency answers, instead of the game's own "
+                     "allocation); 0: 32 MB as before")
+    .range(0, 1024)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 std::atomic<uint32_t> g_heap_free_mb{UINT32_MAX};
+std::atomic<uint32_t> g_cpu_free_mb{UINT32_MAX};  // sasrt-nx 1.0.1
 std::atomic<uint32_t> g_memory_emergency_looks{0};
 bool MemoryLow() {
   static const bool on = REXCVAR_GET(sasrt_memory_governor);
   static const uint32_t mark = uint32_t(REXCVAR_GET(sasrt_memory_low_mb));
+  static const uint32_t cpu_mark = REXCVAR_GET(sasrt_memory_cpu_governor) ? uint32_t(REXCVAR_GET(sasrt_memory_cpu_low_mb)) : 0;
   return on && (g_heap_free_mb.load(std::memory_order_relaxed) < mark ||
+                g_cpu_free_mb.load(std::memory_order_relaxed) < cpu_mark ||
                 g_memory_emergency_looks.load(std::memory_order_relaxed) != 0);
 }
 bool MemoryCritical() {
   static const bool on = REXCVAR_GET(sasrt_memory_governor);
   static const uint32_t mark = uint32_t(REXCVAR_GET(sasrt_memory_critical_mb));
+  static const uint32_t cpu_mark =
+      REXCVAR_GET(sasrt_memory_cpu_governor) ? uint32_t(REXCVAR_GET(sasrt_memory_cpu_critical_mb)) : 0;
   return on && (g_heap_free_mb.load(std::memory_order_relaxed) < mark ||
+                g_cpu_free_mb.load(std::memory_order_relaxed) < cpu_mark ||
                 g_memory_emergency_looks.load(std::memory_order_relaxed) != 0);
+}
+bool CpuGovernorOn() {  // sasrt-nx 1.0.1
+  static const bool on = REXCVAR_GET(sasrt_memory_governor) && REXCVAR_GET(sasrt_memory_cpu_governor);
+  return on;
+}
+uint32_t CpuLowMarkMb() {  // sasrt-nx 1.0.1
+  static const uint32_t mark = uint32_t(REXCVAR_GET(sasrt_memory_cpu_low_mb));
+  return mark;
+}
+uint64_t RegionCpuReserveBytes() {  // sasrt-nx 1.0.1: 0 keeps plume's 32 MB
+  return uint64_t(REXCVAR_GET(sasrt_region_cpu_reserve_mb)) << 20;
 }
 uint32_t MemoryLowMarkMb() {
   static const uint32_t mark = uint32_t(REXCVAR_GET(sasrt_memory_low_mb));
@@ -2481,6 +2579,18 @@ int BackgroundThreadPriority() { return kBackgroundPriority; }  // blur-nx (2026
 void OnBackgroundThreadStart(const char *what) {
 #if REX_PLATFORM_SWITCH
   const bool priority_ok = RexSwitchSetCurrentThreadPriorityOk(kBackgroundPriority);
+  // sasrt-nx (2026-11-22): the compile threads by sasrt_compile_threads_core; the ring cleaner (not a compile) stays
+  // where banjo_system_core_compiles places it
+  if (REXCVAR_GET(sasrt_compile_threads_core) != -2 && std::string_view(what) != "ring cleaner") {
+    const int32_t key_core = REXCVAR_GET(sasrt_compile_threads_core);
+    const bool place_ok = PlaceCompileThreadByKey();
+    REXLOG_INFO("[renut] {} at priority 0x{:X}{}, {}{} (sasrt_compile_threads_core)", what, kBackgroundPriority,
+                priority_ok ? "" : " (NOT accepted)",
+                key_core < 0 ? fmt::format("floating on every core of the process (mask 0x{:X})", RexSwitchProcessCoreMask())
+                             : fmt::format("pinned to core {}", key_core),
+                place_ok ? "" : " (NOT accepted)");
+    return;
+  }
   const int32_t core = BackgroundCore();  // banjo-nx (2026-10-27): the system core when there is one
   const bool core_ok = core < 0 || RexSwitchPinCurrentThreadToCore(int(core));
   REXLOG_INFO("[renut] {} at priority 0x{:X}{}, {} (banjo_background_compile_core / banjo_system_core_compiles)",
@@ -2637,7 +2747,9 @@ void OnDeviceCreated(plume::RenderDevice *device) {
 #if REX_PLATFORM_SWITCH
     (void)RexSwitchSetCurrentThreadPriorityOk(kBackgroundPriority);
     const int32_t core = REXCVAR_GET(banjo_background_compile_core);
-    if (core >= 0)
+    if (REXCVAR_GET(sasrt_compile_threads_core) != -2)  // sasrt-nx (2026-11-22)
+      (void)PlaceCompileThreadByKey();
+    else if (core >= 0)
       (void)RexSwitchPinCurrentThreadToCore(int(core));
 #endif
     std::unique_lock lock(g_saver.mutex);

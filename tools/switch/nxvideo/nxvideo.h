@@ -1,3 +1,4 @@
+// rr6-nx (2026-11-21): copied from culdcept-nx (8a27e964, tools/switch/nxvideo; credit culdcept-nx) for the H.265 movies.
 // culdcept-nx (2026-11-20, the user: "I think getting hardware h.265 decoding would br good in thr long run would br good
 // for other ports as well and most sagings and most performant so lets do that"): a video decoder on the Switch's NVDEC
 // through devkitPro's FFmpeg 7.1 (switch-ffmpeg, built with averne's nvtegra backend: the hardware decoding of

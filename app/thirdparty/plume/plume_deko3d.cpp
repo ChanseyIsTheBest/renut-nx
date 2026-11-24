@@ -192,13 +192,24 @@ namespace plume {
     static std::unordered_map<DkMemBlock, std::pair<uintptr_t, uint64_t>> g_regionBlocks;
     static uint64_t g_regionRefused = 0;
 
-    // newlib's end moved to 'end' under malloc's lock; lowering keeps kRegionNewlibSlack above its break.
+    // sasrt-nx 1.0.1 (2026-11-24): the room left to newlib (plume_deko3d.h, Deko3DSetRegionCpuReserve); kRegionNewlibSlack
+    // until set. g_regionReserveRefused counts the growths and newlib fallbacks it refused.
+    static std::atomic<uint64_t> g_regionCpuReserve{kRegionNewlibSlack};
+    static std::atomic<uint64_t> g_regionReserveRefused{0};
+    void Deko3DSetRegionCpuReserve(uint64_t bytes) {
+        g_regionCpuReserve.store(std::max<uint64_t>(bytes, kRegionNewlibSlack), std::memory_order_relaxed);
+    }
+
+    // newlib's end moved to 'end' under malloc's lock; lowering keeps the CPU side's reserve (kRegionNewlibSlack before
+    // sasrt-nx 1.0.1) above its break.
     static bool regionMoveHeapEnd(uintptr_t end, bool lowering) {
         __malloc_lock(_REENT);
         const uintptr_t brk = reinterpret_cast<uintptr_t>(sbrk(0));
-        const bool ok = !lowering || end >= brk + kRegionNewlibSlack;
+        const bool ok = !lowering || end >= brk + g_regionCpuReserve.load(std::memory_order_relaxed);
         if (ok)
             fake_heap_end = reinterpret_cast<char *>(end);
+        else
+            g_regionReserveRefused.fetch_add(1, std::memory_order_relaxed);
         __malloc_unlock(_REENT);
         return ok;
     }
@@ -208,6 +219,23 @@ namespace plume {
         if (!g_regionOn || !g_region.high)
             return 0;
         return g_region.giveBackBottom(kRegionStep, [](uintptr_t low) { return regionMoveHeapEnd(low, false); });
+    }
+
+    // sasrt-nx 1.0.1 (2026-11-24): newlib's last chance. The app's _sbrk_r (app/src/blur_small_alloc.cpp, under malloc's
+    // lock) calls this when a move of the break would pass the heap's end: the region's free bottom goes back to newlib
+    // and the move is tried again. The region's lock is only tried: its holders take malloc's lock inside it
+    // (regionMoveHeapEnd), so waiting for it here, under malloc's lock, could deadlock; held (another thread, or this one
+    // allocating inside the region's code: libnx's mutex refuses a try by its owner too), nothing is given and malloc
+    // fails as before. regionMoveHeapEnd takes malloc's lock again on this thread: it is recursive.
+    // giveBackBottomInPlace, not giveBackBottom (sasrt-nx, 2026-11-24, after 1.0.1): this runs inside newlib's
+    // malloc_extend_top, which keeps the old top chunk's address and size across its sbrk call; giveBackBottom's map
+    // erase and emplace would free and malloc a node there, and a node freed into the top chunk or carved from it leaves
+    // the top chunk's recorded size wrong.
+    extern "C" uint64_t plume_region_give_back_for_sbrk(void) {
+        std::unique_lock<std::mutex> lock(g_regionMutex, std::try_to_lock);
+        if (!lock.owns_lock() || !g_regionOn || !g_region.high)
+            return 0;
+        return g_region.giveBackBottomInPlace(kRegionStep, [](uintptr_t low) { return regionMoveHeapEnd(low, false); });
     }
 
     static std::atomic<bool> g_imageBestFit{true};  // sasrt-nx (2026-11-09 night; port 58): Deko3DSetImageBestFit
@@ -234,6 +262,8 @@ namespace plume {
         out.givebacks = g_region.givebacks;
         out.givenBack = g_region.givenBack;
         out.refused = g_regionRefused;
+        out.freeBottom = g_region.freeBottom();  // sasrt-nx 1.0.1
+        out.reserveRefused = g_regionReserveRefused.load(std::memory_order_relaxed);
     }
 
     // FNV-1a 64: the variant cache key (tools/deko3d_shaders.py computes the same over the same text).
@@ -1429,6 +1459,25 @@ namespace plume {
                 return block;
             }
             // No room above newlib's break: newlib's heap, as before.
+            // sasrt-nx 1.0.1 (2026-11-24): but not below the CPU side's reserve (Deko3DSetRegionCpuReserve): the region
+            // was refused for it, and taking the same bytes from newlib here would spend it all the same. The block
+            // fails as one newlib cannot give does (below: the memory emergency), which the governor answers.
+            if (g_region.high) {
+                const uintptr_t brk = reinterpret_cast<uintptr_t>(sbrk(0));
+                const uintptr_t end = reinterpret_cast<uintptr_t>(fake_heap_end);
+                const uint64_t room = end > brk ? uint64_t(end - brk) : 0;
+                if (room < uint64_t(m.size) + g_regionCpuReserve.load(std::memory_order_relaxed)) {
+                    g_regionReserveRefused.fetch_add(1, std::memory_order_relaxed);
+                    total.fetch_sub(m.size);
+                    g_memoryEmergency.store(true, std::memory_order_relaxed);
+                    static std::atomic<uint32_t> reserveLogged{0};
+                    if (reserveLogged.fetch_add(1, std::memory_order_relaxed) < 16)
+                        logf("GPU region: a %s of %u KiB not made from the heap: %" PRIu64 " MB left there, under the CPU "
+                             "side's reserve of %" PRIu64 " MB (sasrt_region_cpu_reserve_mb)", what, size >> 10,
+                             room >> 20, g_regionCpuReserve.load(std::memory_order_relaxed) >> 20);
+                    return nullptr;
+                }
+            }
         }
         void *probe = memalign(DK_MEMBLOCK_ALIGNMENT, m.size);
         if (!probe) {
@@ -1636,7 +1685,9 @@ namespace plume {
     void Deko3DDevice::spareWorker() {
         // The uam thread's place: off the render thread's core, below the game's threads (the priority the process
         // allows at or above the asked one, as compileWorker takes it).
-        if (g_deko3dOptions.compileCore >= 0)
+        if (g_deko3dOptions.placeCompileThread)  // sasrt-nx (2026-11-22): the compiles float (see the option)
+            g_deko3dOptions.placeCompileThread();
+        else if (g_deko3dOptions.compileCore >= 0)
             svcSetThreadCoreMask(CUR_THREAD_HANDLE, g_deko3dOptions.compileCore, 1u << g_deko3dOptions.compileCore);
         s32 asked = g_deko3dOptions.compilePriority, priority = -1;
         if (asked > 0) {
@@ -2103,7 +2154,9 @@ namespace plume {
             std::lock_guard<std::mutex> lock(compileMutex);  // compile() reads it under the lock
             compileThreadHandle = threadGetCurHandle();
         }
-        if (g_deko3dOptions.compileCore >= 0)
+        if (g_deko3dOptions.placeCompileThread)  // sasrt-nx (2026-11-22): the compiles float (see the option)
+            g_deko3dOptions.placeCompileThread();
+        else if (g_deko3dOptions.compileCore >= 0)
             svcSetThreadCoreMask(CUR_THREAD_HANDLE, g_deko3dOptions.compileCore, 1u << g_deko3dOptions.compileCore);
         // banjo-nx (2026-10-23): the priority the process may give (the console's profile showed this thread at 0x3B in
         // every report: 0x3E is below an application's lowest, the game threads' 0x3B, and the kernel refused it while

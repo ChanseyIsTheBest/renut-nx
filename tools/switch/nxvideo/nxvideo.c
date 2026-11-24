@@ -1,3 +1,4 @@
+// rr6-nx (2026-11-21): copied from culdcept-nx (8a27e964, tools/switch/nxvideo; credit culdcept-nx) for the H.265 movies.
 // culdcept-nx (2026-11-20): the decoder of nxvideo.h on devkitPro's FFmpeg 7.1 (switch-ffmpeg with nvtegra). Built by
 // tools/switch/nxvideo/build.sh into one object with its FFmpeg linked in and every symbol but nxv_* made local.
 #include "nxvideo.h"

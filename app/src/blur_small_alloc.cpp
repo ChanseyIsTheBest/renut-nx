@@ -38,6 +38,69 @@ REXCVAR_DEFINE_INT32(blur_small_alloc_mb, 32, "Blur/Enhancements",
 
 #if defined(__SWITCH__)
 
+// sasrt-nx 1.0.1 (2026-11-24, the user: "start 1.0.1 with blur's fix"; blur-nx ae5e607a of 2026-11-23, credit
+// blur-nx): newlib's break under malloc's lock. SASRT 1.0.0 died on 2026-11-24 with std::bad_alloc in renut's NewOp
+// (operator new on the game's draw thread) in docked mode, the third mission's drift challenge
+// (out/console_runs/c1124_docked_crash), as Blur's race-end bad_alloc of 2026-11-22 did.
+//
+// Blur's finding: libsysbase's _sbrk_r (devkitA64, a weak symbol) moves the break with a plain load and store of a
+// static and no lock, sbrk(0) included (it stores the break it read). newlib's own calls hold malloc's lock; the base's
+// do not: renut's AdvanceStreamCacheFrameLocked (every frame, the render thread), QueryGpuMemory, the memory report,
+// the heap-short checks of the command buffers, the pipelines and the upload ring, and plume's memoryFigures,
+// memoryFiguresQuick (after it lets the lock go), heapRoomShort and Deko3DHeapRoomBytes all read the heap's room with
+// sbrk(0) from their own threads (SASRT has every one of them). One of them that loads the break just before malloc
+// moves it and stores it just after undoes malloc's move. A lost extend leaves the break below the top chunk's end:
+// newlib's next extend gets a break below its top's end (malloc_extend_top: "a foreign sbrk call killed our space")
+// and malloc returns null with the heap's room untouched. A lost trim leaks what it trimmed.
+//
+// The _sbrk_r below replaces libsysbase's (the strong symbol wins and sbrk.o is never linked): the same moves, under
+// malloc's recursive lock, so every caller of sbrk is serialized with malloc. plume's regionMoveHeapEnd already lowers
+// fake_heap_end and reads sbrk(0) under the same lock (recursive: fine).
+#include <malloc.h>
+#include <sys/reent.h>
+
+#include <cerrno>
+
+extern "C" {
+extern char *fake_heap_start, *fake_heap_end;
+}
+
+namespace {
+// The break (libsysbase's heap_start): moved only by _sbrk_r below, under malloc's lock.
+char* g_break = nullptr;
+}  // namespace
+
+// sasrt-nx 1.0.1 (2026-11-24): the GPU region's free bottom back to newlib when a move would pass the heap's end
+// (app/thirdparty/plume/plume_deko3d.cpp; weak, so a build without plume's region links and simply fails as before).
+extern "C" __attribute__((weak)) uint64_t plume_region_give_back_for_sbrk(void);
+
+// libsysbase's _sbrk_r with malloc's lock around it. The same moves: the break starts at libnx's fake_heap_start
+// (libsysbase falls back to the image's end, which libnx never leaves it to: __libnx_initheap sets the bounds before any
+// malloc), the end is fake_heap_end (plume's GPU region lowers it under the same lock) or, with none set, the caller's
+// stack; past the end it fails with ENOMEM. newlib's own calls (malloc_extend_top, malloc_trim) already hold the lock,
+// which is recursive.
+extern "C" __attribute__((used)) void* _sbrk_r(struct _reent* r, ptrdiff_t incr) {
+  __malloc_lock(r);
+  if (!g_break) g_break = fake_heap_start;
+  char* const prev = g_break;
+  char* end = fake_heap_end ? fake_heap_end : static_cast<char*>(__builtin_frame_address(0));
+  // sasrt-nx 1.0.1 (2026-11-24): past the end, the GPU region's free bottom is asked for first (it raises fake_heap_end;
+  // see plume_region_give_back_for_sbrk), then the move is tried once more.
+  if (prev && incr > 0 && prev + incr > end && fake_heap_end && plume_region_give_back_for_sbrk &&
+      plume_region_give_back_for_sbrk() != 0)
+    end = fake_heap_end;
+  void* result;
+  if (!prev || prev + incr > end) {
+    r->_errno = ENOMEM;
+    result = reinterpret_cast<void*>(-1);
+  } else {
+    g_break = prev + incr;
+    result = prev;
+  }
+  __malloc_unlock(r);
+  return result;
+}
+
 namespace {
 
 constexpr uint32_t kClasses = 10;

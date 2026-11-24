@@ -3,15 +3,15 @@
 | | |
 |---|---|
 | Base | renut_nx_ultimate_base, `D:\renut-ultimate\base`, branch `ultimate` |
-| Taken up to | **6cd02ae7** (2026-11-19, "docs: ports 186-188"; ports 1-188) |
-| How | the rebase of 2026-11-19 (docs/ultimate-rebase-plan.md), not ult_port_sync |
+| Taken up to | **b40a6f79** (2026-11-24, "docs: port 279's row"; ports 1-279; 223-249, 251, 274-277 are this tree's own) |
+| How | the rebase of 2026-11-19 (docs/ultimate-rebase-plan.md), then tools/ult_port_sync.py (2026-11-24) |
 
 ## Taking the base's later ports
 
 As the base's docs/ultimate/building.md section 7 says, a port commit at a time:
 
 ```
-python tools/ult_port_sync.py --base D:\renut-ultimate\base --port "D:\Banjo kazooie port\banjo-nx-ult" --range 6cd02ae7..<base commit> --dry-run
+python tools/ult_port_sync.py --base D:\renut-ultimate\base --port "D:\Banjo kazooie port\banjo-nx-ult" --range b40a6f79..<base commit> --dry-run
 ```
 
 then without `--dry-run`, resolve the diff3 blocks, build, test, and write the new commit here. The tool's default
@@ -39,3 +39,6 @@ What the tool cannot know about this tree:
 | Date | Base commit | Ports | Notes |
 |---|---|---|---|
 | 2026-11-19 | 6cd02ae7 | 1-188 | the rebase (docs/ultimate-rebase-plan.md) |
+| 2026-11-24 | b40a6f79 | 189-279 | ult_port_sync.py --skip 223-249 251 274-277 (banjo-nx's own handoffs: this tree keeps its own form of them). 33 conflicts in 21 files; the base's form taken for the SDK's game-file readers (ports 203/218/259/264/266), sasrt-nx's resolve carry (257) and render-thread rounds (260); Banjo's own kept: N&B's snapshot chunk (48 bytes), the Switch defaults (dynamic resolution on in both modes from 540, the docked heights), the frame limiter's default, input_script's started time. Hand files left out: ports 196 / 207 shader.cpp (GetFunction hooks, version 0x10 containers: not N&B's), 268 state.cpp (Katamari's viewport log). post_codegen run again (ports 191 / 199 / 200's tools). Port 279: the hand-over's two-destination loss fixed (see notes) |
+
+A/B numbers since 2026-11-24: this tree's 320 (tile twin merge) and 322 (no late snap) are the base's 204 and 205 (ports 275 / 276, taken from this tree); 321 (EndTiling resolve once) is this tree's alone.

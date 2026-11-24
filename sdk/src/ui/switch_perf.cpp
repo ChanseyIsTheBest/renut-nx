@@ -120,10 +120,14 @@ constexpr size_t kMaxSamples = 1 << 15;
 constexpr size_t kFrames = 10;
 // 0-32 renderer/audio counters (see RexSwitchPerfAdd); 40-55 host-runtime overhead (include/rex/sys_counters.h).
 constexpr unsigned kCounterCount = 64;
-// In <NRO folder>/logs/rex/ (switch_crash_hooks.c computes it at startup).
-// banjo-nx (2026-11-01, the public build): whether rex_profile.log is written (logging on, or stack sampling).
+}  // namespace
+extern "C" const char* RexAppBuildStamp(void);  // port 193: switch_crash_hooks.c (weak), app/src/build_stamp.cpp
+namespace {
+// banjo-nx (2026-11-01, the public build; port 230): whether rex_profile.log is written (logging on, or stack
+// sampling).
 bool g_write_reports = true;
 
+// In <NRO folder>/logs/rex/ (switch_crash_hooks.c computes it at startup).
 std::string ReportPath() {
   return std::string(RexSwitchLogDir()) + "rex_profile.log";
 }
@@ -532,7 +536,7 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
   std::sort(order.begin(), order.end(),
             [](size_t a, size_t b) { return g_slots[a].cpu > g_slots[b].cpu; });
 
-  FILE* f = g_write_reports ? std::fopen(ReportPath().c_str(), "a") : nullptr;  // banjo-nx (2026-11-01)
+  FILE* f = g_write_reports ? std::fopen(ReportPath().c_str(), "a") : nullptr;  // banjo-nx (port 230)
   if (!f) {
     g_sample_count = 0;
     return;
@@ -1154,9 +1158,17 @@ void ProfilerMain(void*) {
   for (unsigned i = 0; i < kCounterCount; ++i) {
     counters_last[i] = CounterRead(i);
   }
-  // banjo-nx (2026-11-01, the public build): rex_profile.log only with logging on (log_level not "off").
+  // banjo-nx (2026-11-01, the public build; port 230): rex_profile.log only with logging on (log_level not "off"),
+  // or with stack sampling; port 193's copy of the last one only then too.
   g_write_reports = rex::cvar::GetFlagByName("log_level") != "off" || sample_stacks;
+  // Port 193 (TFU-nx's): the last launch's report kept as rex_profile.prev.log, and the build stamp first.
+  if (g_write_reports) {
+    const std::string prev = std::string(RexSwitchLogDir()) + "rex_profile.prev.log";
+    std::remove(prev.c_str());
+    if (std::rename(ReportPath().c_str(), prev.c_str()) != 0) std::remove(ReportPath().c_str());
+  }
   if (FILE* f = g_write_reports ? std::fopen(ReportPath().c_str(), "w") : nullptr) {
+    std::fprintf(f, "%s\n", RexAppBuildStamp());
     std::fprintf(f, "image 0x%016" PRIx64 ", code up to 0x%016" PRIx64 "\n\n", g_base,
                  g_text_hi);
     std::fprintf(f, "Stack sampling: %s (%u ms)\n", sample_stacks ? "active" : "disabled",
