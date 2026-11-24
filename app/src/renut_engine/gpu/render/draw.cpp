@@ -16457,6 +16457,19 @@ bool MaterialiseLocked(HostTexture &d, bool words) {
       return true;
     }
     CountHanded(d, 5);
+    // banjo-nx (2026-11-24, diagnostic: N&B's lost colour resolves after the base's port 279): the first 48 named,
+    // with what of the target changed since the resolve was left in its image, and the code asking.
+    static u32 lost_logged = 0;
+    if (lost_logged < 48) {
+      ++lost_logged;
+      RGPU_INFO("[renut] hand-over lost: texture {:08X} {}x{} ({}) from target {:08X} {}x{} base {:03X}{}: {}; "
+                "generation {} -> {}, writes {} -> {}; cause {}, frame {}{}",
+                d.guest_va, d.width, d.height, d.handed_color ? "colour" : "depth", source->guest_va, source->width,
+                source->height, u32(source->color_info_word) & 0xFFF, UiRedirectedLocked() ? ", UI redirected" : "",
+                !source->texture ? "no image" : !same ? "the target changed" : "the copy failed", d.handed_generation,
+                source->generation, d.handed_writes, source->writes, g_materialise_cause, TextureFrameLocked(),
+                source->handed ? ", the target still holds others" : "");
+    }
     return false;
   }
   if (!d.held || !d.held_current)
@@ -16631,6 +16644,24 @@ void DepthHandOverBeforeBindLocked(HostSurface *surface, const plume::RenderRect
         break;
       }
     }
+  }
+  // banjo-nx (2026-11-24, diagnostic with MaterialiseLocked's "hand-over lost"): the first 48 whole clears with a
+  // resolve in the image that the target changed under, each holder with whether the target is as its resolve left it.
+  static u32 take_logged = 0;
+  bool any_changed = false;
+  for (const HostTexture *h : holders)
+    any_changed |= !(surface->generation == h->handed_generation && surface->writes == h->handed_writes);
+  if (take && take_logged < 48 && any_changed) {
+    ++take_logged;
+    std::string list;
+    for (const HostTexture *h : holders)
+      list += fmt::format(" {:08X} {}x{}{}{}", h->guest_va, h->width, h->height,
+                          surface->generation == h->handed_generation && surface->writes == h->handed_writes ? ""
+                                                                                                             : " (changed)",
+                          h == taker ? " (takes)" : "");
+    RGPU_INFO("[renut] hand-over at a whole clear of {:08X} {}x{} base {:03X} (writes {}, frame {}):{}",
+              surface->guest_va, surface->width, surface->height, u32(surface->color_info_word) & 0xFFF,
+              surface->writes, TextureFrameLocked(), list);
   }
   for (HostTexture *d : holders)
     if (d != taker)
@@ -17101,6 +17132,26 @@ plume::RenderRect ClampRect(const ClearRect *rect, uint32_t width, uint32_t heig
 }
 
 } // namespace
+
+// banjo-nx (2026-11-24, render/ui_scale.cpp): the UI scale pass draws every pixel of the UI target (no blending, the
+// whole write mask), as a whole clear would. A resolve still left in the target's image (N&B: the frame's front buffer,
+// resolved from the UI target after the HUD and scanned out from that image) is handled as at a whole clear: the last
+// one takes the image, any other is drawn first. Before, the pass wrote the image under it, and the front buffer's
+// resolve was lost at the next frame's first HUD draw (the 10 s line's colour "lost": one a frame, 5 % of the
+// hand-overs in Showdown Town; found in Ryujinx with the "hand-over lost" log), the texture keeping an older frame. The
+// present reads the image by a draw in queue order, before this, so what is shown never changed; no copy is added.
+REXCVAR_DEFINE_BOOL(banjo_renut_ui_scale_handover, true, "Banjo/Enhancements",
+                    "deko3d renderer: a resolve left in the UI target's image (the front buffer) takes that image "
+                    "before the UI scale pass writes every pixel of the target, as at a whole clear (false: the pass "
+                    "writes the image under it and the resolve is lost). Same pixels on screen; no copy")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+void HandOverBeforeWholeWriteLocked(HostSurface *surface) {
+  static const bool on = REXCVAR_GET(banjo_renut_ui_scale_handover);
+  if (!on || !surface || !surface->handed || surface->depth)
+    return;
+  const plume::RenderRect whole(0, 0, int32_t(surface->width), int32_t(surface->height));
+  DepthHandOverBeforeBindLocked(surface, &whole, 1u);
+}
 
 void ReadClearViewport(const u8 *device_state, float viewport[4]) {  // blur-nx (2026-11-13, #55)
   const GuestDevice device(device_state);

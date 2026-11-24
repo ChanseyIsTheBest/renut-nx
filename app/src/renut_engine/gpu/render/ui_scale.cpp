@@ -43,6 +43,8 @@
 #endif
 
 namespace renut::gpu {
+// render/draw.cpp (banjo-nx 2026-11-24): a resolve left in the target's image, settled as at a whole clear.
+void HandOverBeforeWholeWriteLocked(HostSurface *surface);
 namespace {
 
 struct UiScalePass {
@@ -219,6 +221,10 @@ bool UiScaleAfterCompositeLocked(HostSurface *surface) {
   const uint32_t source_slot = SurfaceSampleSlotLocked(surface);
   if (!ui || source_slot == kInvalidDescriptor)
     return false;
+  // banjo-nx (2026-11-24, banjo_renut_ui_scale_handover): the pass writes every pixel of the UI target, so a resolve
+  // left in its image (the front buffer) takes that image first, as at a whole clear. Before the framebuffer's check:
+  // the target then has another image (and generation).
+  HandOverBeforeWholeWriteLocked(ui);
   UiScalePass &p = g_pass;
   if (p.target != ui || p.target_generation != ui->generation || !p.framebuffer) {
     const plume::RenderTexture *colors[1] = {ui->texture.get()};
